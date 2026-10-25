@@ -5,6 +5,7 @@
 #include "ma/Solver.h"
 #include "ma/TonalBalance.h"
 #include "ma/Decibels.h"
+#include "ma/Ducker.h"
 #include "ma/EqualLoudness.h"
 #include "ma/GainStaging.h"
 #include "ma/LevelStats.h"
@@ -556,6 +557,76 @@ void testCorrelation()
     check(wide.fullBand() < wide.lowBand(), "full band shows the width");
 }
 
+// RMS of a stretch of samples, in dBFS.
+double rmsDb(const std::vector<float>& x, size_t from, size_t to)
+{
+    double sum = 0.0;
+    for (size_t i = from; i < to; ++i)
+        sum += static_cast<double>(x[i]) * x[i];
+    return 10.0 * std::log10(std::max(sum / static_cast<double>(to - from), 1e-20));
+}
+
+void testDucker()
+{
+    constexpr double sr = 48000.0;
+    const size_t n = static_cast<size_t>(sr * 2.0);
+    // Sidechain: a 55 Hz "kick" for 80 ms at the start of every 500 ms beat.
+    std::vector<float> kick(n, 0.0f);
+    for (size_t i = 0; i < n; ++i)
+        if (i % 24000 < 3840)
+            kick[i] = static_cast<float>(0.8 * std::sin(2.0 * kPi * 55.0 * i / sr));
+    const auto bassSource = sine(sr, 2.0, 1, 55.0, 0.5);
+    const auto hatSource = sine(sr, 2.0, 1, 4000.0, 0.5);
+
+    auto duck = [&](const std::vector<float>& input, const ma::DuckSettings& s, bool withSidechain) {
+        std::vector<float> out(input);
+        ma::Ducker d;
+        d.prepare(sr);
+        d.setSettings(s);
+        for (size_t start = 0; start < n; start += 512)
+        {
+            const int count = static_cast<int>(std::min<size_t>(512, n - start));
+            float* main[] = {out.data() + start};
+            const float* side[] = {kick.data() + start};
+            d.process(main, 1, withSidechain ? side : nullptr, withSidechain ? 1 : 0, count);
+        }
+        return out;
+    };
+
+    ma::DuckSettings band;
+    band.on = 1.0f;
+    band.hz = 55.0f;
+    band.depthDb = 9.0f;
+    band.thresholdDb = -30.0f;
+    band.releaseMs = 60.0f;
+
+    const auto bass = duck(bassSource.channels[0], band, true);
+    // Second beat: kick at 24000..27840, gap afterwards.
+    const double during = rmsDb(bass, 25000, 27500) - rmsDb(bassSource.channels[0], 25000, 27500);
+    const double between = rmsDb(bass, 40000, 47000) - rmsDb(bassSource.channels[0], 40000, 47000);
+    checkNear(during, -9.0, 1.5, "band duck pulls the bass down by its depth while the kick plays");
+    checkNear(between, 0.0, 0.5, "band duck lets the bass back between kicks");
+
+    const auto hats = duck(hatSource.channels[0], band, true);
+    checkNear(rmsDb(hats, 25000, 27500) - rmsDb(hatSource.channels[0], 25000, 27500), 0.0, 0.3,
+              "band duck leaves content far from the band alone");
+
+    auto whole = band;
+    whole.wholeSignal = 1.0f;
+    const auto wholeHats = duck(hatSource.channels[0], whole, true);
+    checkNear(rmsDb(wholeHats, 25000, 27500) - rmsDb(hatSource.channels[0], 25000, 27500), -9.0, 1.5,
+              "whole-signal duck turns everything down");
+
+    const auto noSidechain = duck(bassSource.channels[0], band, false);
+    check(noSidechain == bassSource.channels[0], "without a sidechain nothing is ducked");
+
+    auto off = band;
+    off.on = 0.0f;
+    check(duck(bassSource.channels[0], off, true) == bassSource.channels[0], "duck switched off is bypassed");
+
+    checkNear(ma::syncedReleaseMs(125.0, 1.0 / 16.0), 120.0, 0.01, "a sixteenth at 125 BPM is 120 ms");
+}
+
 void testWavRoundTrip()
 {
     const auto a = sine(44100.0, 0.5, 2, 440.0, 0.25);
@@ -584,6 +655,7 @@ int main()
     testTonalBalance();
     testTonalSolver();
     testCorrelation();
+    testDucker();
     testWavRoundTrip();
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "OK" : "FAILED", failures, failures == 1 ? "" : "s");

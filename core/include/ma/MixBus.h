@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ChannelEq.h"
+#include "Ducker.h"
 
 #include <atomic>
 #include <cstdint>
@@ -20,7 +21,7 @@ namespace ma::bus
 {
 
 constexpr std::uint32_t kMagic = 0x4D414255; // "MABU"
-constexpr std::uint32_t kVersion = 2;
+constexpr std::uint32_t kVersion = 3;
 constexpr int kMaxSlots = 128;
 constexpr int kNameLength = 48;
 constexpr int kBands = 40;            // ERB bands, as SpectrumAnalyzer with BandScale::erb
@@ -53,12 +54,28 @@ struct AgentData
     std::int32_t eqBypass;
     std::int32_t hasBackup;     // the last applied command can be undone
     std::uint32_t lastCommand;  // serial of the last command the Agent carried out
+    DuckSettings duck;          // dynamic give-way driven by the sidechain input
+    std::int32_t duckSync;      // release synced to tempo: 0 = off, else a note length (see duckSyncFraction)
+    std::int32_t polarityInverted;
+    std::int32_t sidechainConnected; // signal arrived on the sidechain input in the last seconds
+    float sidechainDb;          // sidechain peak level, about the last second
+    float duckReductionDb;      // most the duck took off, about the last second
+    float sidechainLowCorrelation; // low band (< 120 Hz) correlation of this channel with the sidechain
+    std::int32_t correlationValid;
 };
+
+// Note lengths for a tempo-synced duck release, indexed by AgentData::duckSync.
+constexpr int kDuckSyncChoices = 5;
+inline double duckSyncFraction(int index)
+{
+    constexpr double fractions[kDuckSyncChoices] = {0.0, 1.0 / 32.0, 1.0 / 16.0, 1.0 / 8.0, 1.0 / 4.0};
+    return index > 0 && index < kDuckSyncChoices ? fractions[index] : 0.0;
+}
 
 enum class CommandKind : std::int32_t
 {
     none = 0,
-    apply = 1, // remember the current settings, then set trim and EQ
+    apply = 1, // remember the current settings, then set trim, EQ, duck and polarity
     undo = 2   // go back to the remembered settings
 };
 
@@ -69,6 +86,9 @@ struct Command
     CommandKind kind;
     float trimDb;
     EqBand eq[kEqBands];
+    DuckSettings duck;
+    std::int32_t duckSync;
+    std::int32_t polarityInverted;
 };
 
 struct Slot

@@ -6,6 +6,7 @@
 #include "ma/EqualLoudness.h"
 #include "ma/GainStaging.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 
@@ -18,12 +19,29 @@ float toShared(double db)
 {
     return std::isfinite(db) ? static_cast<float>(db) : ma::bus::kSilentDb;
 }
+
+// The dynamics as a flat list, for the audio-thread copy of the backup.
+std::array<float, 10> packDynamics(const AgentProcessor::DynamicState& s)
+{
+    const auto& d = s.duck;
+    return { d.on, d.wholeSignal, d.hz, d.q, d.depthDb, d.thresholdDb, d.attackMs, d.releaseMs,
+             static_cast<float>(s.sync), s.polarityInverted ? 1.0f : 0.0f };
+}
+
+void storeMax(std::atomic<float>& target, float value)
+{
+    auto current = target.load();
+    while (value > current && !target.compare_exchange_weak(current, value))
+    {
+    }
+}
 } // namespace
 
 AgentProcessor::AgentProcessor()
     : AudioProcessor(BusesProperties()
                          .withInput("Input", juce::AudioChannelSet::stereo(), true)
-                         .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
+                         .withOutput("Output", juce::AudioChannelSet::stereo(), true)
+                         .withInput("Sidechain", juce::AudioChannelSet::stereo(), true)),
       parameters(*this, nullptr, "AgentState", createLayout())
 {
     trimParam = parameters.getRawParameterValue(trimId);
@@ -54,6 +72,16 @@ AgentProcessor::~AgentProcessor()
 juce::StringArray AgentProcessor::roleNames()
 {
     return ma::ui::roleNames();
+}
+
+juce::StringArray AgentProcessor::duckModeNames()
+{
+    return { ma::ui::pl("Pasmo"), ma::ui::pl("Cały kanał") };
+}
+
+juce::StringArray AgentProcessor::duckSyncNames()
+{
+    return { ma::ui::pl("Ręcznie"), "1/32", "1/16", "1/8", "1/4" };
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout AgentProcessor::createLayout()
@@ -105,6 +133,33 @@ juce::AudioProcessorValueTreeState::ParameterLayout AgentProcessor::createLayout
         layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { eqParamId(b, "Q"), 3 }, name + "Q", q, 1.0f));
     }
 
+    const ma::DuckSettings duck {};
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { duckOnId, 4 }, "Duck", false));
+    layout.add(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID { duckModeId, 4 }, "Duck mode", duckModeNames(), 0));
+    Range duckFreq { 20.0f, 2000.0f, 1.0f };
+    duckFreq.setSkewForCentre(150.0f);
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { duckFreqId, 4 }, "Duck freq", duckFreq, duck.hz,
+                                                           juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    Range duckQ { 0.3f, 4.0f, 0.01f };
+    duckQ.setSkewForCentre(1.0f);
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { duckQId, 4 }, "Duck Q", duckQ, duck.q));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { duckDepthId, 4 }, "Duck depth",
+                                                           Range { 0.0f, 24.0f, 0.1f }, duck.depthDb,
+                                                           juce::AudioParameterFloatAttributes().withLabel("dB")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { duckThresholdId, 4 }, "Duck threshold",
+                                                           Range { -60.0f, 0.0f, 0.5f }, duck.thresholdDb,
+                                                           juce::AudioParameterFloatAttributes().withLabel("dB")));
+    Range attack { 0.1f, 50.0f, 0.1f };
+    attack.setSkewForCentre(5.0f);
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { duckAttackId, 4 }, "Duck attack", attack, duck.attackMs,
+                                                           juce::AudioParameterFloatAttributes().withLabel("ms")));
+    Range release { 10.0f, 1000.0f, 1.0f };
+    release.setSkewForCentre(120.0f);
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { duckReleaseId, 4 }, "Duck release", release,
+                                                           duck.releaseMs, juce::AudioParameterFloatAttributes().withLabel("ms")));
+    layout.add(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID { duckSyncId, 4 }, "Duck release sync", duckSyncNames(), 0));
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { polarityId, 4 }, "Polarity invert", false));
+
     return layout;
 }
 
@@ -113,16 +168,27 @@ bool AgentProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
     const auto& out = layouts.getMainOutputChannelSet();
     if (out != juce::AudioChannelSet::mono() && out != juce::AudioChannelSet::stereo())
         return false;
-    return layouts.getMainInputChannelSet() == out;
+    if (layouts.getMainInputChannelSet() != out)
+        return false;
+    if (layouts.inputBuses.size() > 1)
+    {
+        const auto& side = layouts.getChannelSet(true, 1);
+        return side.isDisabled() || side == juce::AudioChannelSet::mono() || side == juce::AudioChannelSet::stereo();
+    }
+    return true;
 }
 
 void AgentProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
-    const int channels = getTotalNumInputChannels();
+    const int channels = getMainBusNumInputChannels();
     learnAnalyzer.prepare(sampleRate, channels);
     liveLoudness.prepare(sampleRate, channels);
     liveSpectrum.prepare(sampleRate, ma::BandScale::erb);
     eq.prepare(sampleRate);
+    ducker.prepare(sampleRate);
+    sidechainCorrelation.prepare(sampleRate);
+    mainMono.assign(static_cast<size_t>(std::max(samplesPerBlock, 512)), 0.0f);
+    sideMono.assign(mainMono.size(), 0.0f);
     trimGain.reset(sampleRate, 0.05);
     trimGain.setCurrentAndTargetValue(static_cast<float>(ma::dbToGain(trimParam->load())));
 
@@ -140,20 +206,39 @@ void AgentProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
 {
     juce::ScopedNoDenormals noDenormals;
 
-    const int numChannels = getTotalNumInputChannels();
+    auto mainBuffer = getBusBuffer(buffer, true, 0);
+    const int numChannels = mainBuffer.getNumChannels();
     const int numSamples = buffer.getNumSamples();
-    for (int c = numChannels; c < getTotalNumOutputChannels(); ++c)
+    for (int c = numChannels; c < getMainBusNumOutputChannels(); ++c)
         buffer.clear(c, 0, numSamples);
     if (numSamples == 0)
         return;
 
-    const auto* const* input = buffer.getArrayOfReadPointers();
+    // The bus buffer owns the channel pointer list, so it has to live as long as `sidechain`.
+    const bool hasSidechain = getBusCount(true) > 1 && getBus(true, 1)->isEnabled();
+    auto sideBuffer = hasSidechain ? getBusBuffer(buffer, true, 1) : juce::AudioBuffer<float> {};
+    const int numSidechain = sideBuffer.getNumChannels();
+    const float* const* sidechain = numSidechain > 0 ? sideBuffer.getArrayOfReadPointers() : nullptr;
+    float sidePeak = 0.0f;
+    for (int c = 0; c < numSidechain; ++c)
+    {
+        const auto range = juce::FloatVectorOperations::findMinAndMax(sidechain[c], numSamples);
+        sidePeak = std::max({ sidePeak, std::abs(range.getStart()), std::abs(range.getEnd()) });
+    }
+    storeMax(sidechainPeakHold, sidePeak);
+
+    if (auto* head = getPlayHead())
+        if (const auto position = head->getPosition())
+            if (const auto bpm = position->getBpm())
+                hostBpm.store(*bpm);
+
+    const auto* const* input = mainBuffer.getArrayOfReadPointers();
 
     // Live meters on the input, before the trim: that is what gain staging corrects.
     double blockSum = 0.0;
     for (int c = 0; c < numChannels; ++c)
     {
-        const double rms = buffer.getRMSLevel(c, 0, numSamples);
+        const double rms = mainBuffer.getRMSLevel(c, 0, numSamples);
         blockSum += rms * rms;
     }
     const double blockMeanSquare = numChannels > 0 ? blockSum / numChannels : 0.0;
@@ -204,12 +289,57 @@ void AgentProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         {
             const float g = trimGain.getNextValue();
             for (int c = 0; c < numChannels; ++c)
-                buffer.getWritePointer(c)[i] *= g;
+                mainBuffer.getWritePointer(c)[i] *= g;
         }
     }
     else
     {
-        buffer.applyGain(0, numSamples, trimGain.getTargetValue());
+        mainBuffer.applyGain(0, numSamples, trimGain.getTargetValue());
+    }
+
+    // Dynamics: the live parameters, or the backup while the Brain compares.
+    DynamicState dynamics;
+    if (before)
+    {
+        std::array<float, kDynamicValues> v {};
+        for (size_t i = 0; i < v.size(); ++i)
+            v[i] = backupDynamicsAudio[i].load();
+        dynamics.duck = { v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7] };
+        dynamics.sync = static_cast<int>(v[8]);
+        dynamics.polarityInverted = v[9] > 0.5f;
+    }
+    else
+    {
+        dynamics = currentDynamics();
+    }
+    const double syncFraction = ma::bus::duckSyncFraction(dynamics.sync);
+    if (syncFraction > 0.0 && hostBpm.load() > 0.0)
+        dynamics.duck.releaseMs = static_cast<float>(ma::syncedReleaseMs(hostBpm.load(), syncFraction));
+    releaseInUse.store(dynamics.duck.releaseMs);
+
+    if (dynamics.polarityInverted)
+        mainBuffer.applyGain(0, numSamples, -1.0f);
+
+    // How this channel lines up with the sidechain in the low end, as the mix will sum them.
+    if (sidechain != nullptr && numChannels > 0)
+    {
+        const auto chunk = static_cast<int>(mainMono.size());
+        for (int start = 0; start < numSamples; start += chunk)
+        {
+            const int n = std::min(chunk, numSamples - start);
+            for (int i = 0; i < n; ++i)
+            {
+                float m = 0.0f, sc = 0.0f;
+                for (int c = 0; c < numChannels; ++c)
+                    m += mainBuffer.getReadPointer(c)[start + i];
+                for (int c = 0; c < numSidechain; ++c)
+                    sc += sidechain[c][start + i];
+                mainMono[static_cast<size_t>(i)] = m;
+                sideMono[static_cast<size_t>(i)] = sc;
+            }
+            sidechainCorrelation.process(mainMono.data(), sideMono.data(), n);
+        }
+        lowCorrelation.store(sidechainCorrelation.lowBand());
     }
 
     ma::EqSettings bands {};
@@ -229,11 +359,15 @@ void AgentProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         }
     }
     eq.setBands(bands);
-    eq.process(buffer.getArrayOfWritePointers(), numChannels, numSamples);
+    eq.process(mainBuffer.getArrayOfWritePointers(), numChannels, numSamples);
+
+    ducker.setSettings(dynamics.duck);
+    ducker.process(mainBuffer.getArrayOfWritePointers(), numChannels, sidechain, numSidechain, numSamples);
+    storeMax(reductionHold, static_cast<float>(ducker.reductionDb()));
 
     double outPeak = 0.0;
     for (int c = 0; c < numChannels; ++c)
-        outPeak = std::max(outPeak, static_cast<double>(buffer.getMagnitude(c, 0, numSamples)));
+        outPeak = std::max(outPeak, static_cast<double>(mainBuffer.getMagnitude(c, 0, numSamples)));
     outputPeak.store(ma::gainToDb(outPeak));
 }
 
@@ -264,7 +398,27 @@ void AgentProcessor::timerCallback()
     auto state = LearnState::finished;
     if (learnState.compare_exchange_strong(state, LearnState::idle))
         applyLearned();
+    updateDynamicMeters();
     publishToBrain();
+}
+
+void AgentProcessor::updateDynamicMeters()
+{
+    const auto now = juce::Time::getMillisecondCounterHiRes();
+    const float peak = sidechainPeakHold.exchange(0.0f);
+    const double peakDb = ma::gainToDb(peak);
+    if (peakDb > -80.0)
+        lastSidechainMs = now;
+    sidechainSeen = lastSidechainMs > 0.0 && now - lastSidechainMs < 3000.0;
+    // Peak hold that falls about 12 dB a second (the timer runs at 10 Hz).
+    const double fallen = std::isfinite(sidechainShownDb) ? sidechainShownDb - 1.2 : -INFINITY;
+    sidechainShownDb = std::max(peakDb, fallen);
+    if (sidechainShownDb < -100.0)
+        sidechainShownDb = -INFINITY;
+    // Deepest dip over the last second (ten timer ticks), so one kick per beat reads steadily.
+    reductionHistory[reductionIndex] = reductionHold.exchange(0.0f);
+    reductionIndex = (reductionIndex + 1) % reductionHistory.size();
+    reductionShownDb = *std::max_element(reductionHistory.begin(), reductionHistory.end());
 }
 
 void AgentProcessor::publishToBrain()
@@ -313,6 +467,15 @@ void AgentProcessor::publishToBrain()
     data.eqBypass = eqBypassed() ? 1 : 0;
     data.hasBackup = backupValid ? 1 : 0;
     data.lastCommand = lastCommand;
+    const auto dynamics = currentDynamics();
+    data.duck = dynamics.duck;
+    data.duckSync = dynamics.sync;
+    data.polarityInverted = dynamics.polarityInverted ? 1 : 0;
+    data.sidechainConnected = sidechainSeen ? 1 : 0;
+    data.sidechainDb = toShared(sidechainShownDb);
+    data.duckReductionDb = static_cast<float>(reductionShownDb);
+    data.sidechainLowCorrelation = static_cast<float>(lowCorrelation.load());
+    data.correlationValid = correlationValid() ? 1 : 0;
     ma::bus::publish(region->slots[slotIndex], data, now);
 }
 
@@ -332,7 +495,11 @@ void AgentProcessor::handleBrainCommand(ma::bus::Region& region)
         backupTrimDb = trimParam->load();
         backupEq = currentEq();
         backupBypass = eqBypassed();
+        backupDynamics = currentDynamics();
         backupValid = true;
+        const auto packed = packDynamics(backupDynamics);
+        for (size_t i = 0; i < packed.size(); ++i)
+            backupDynamicsAudio[i].store(packed[i]);
         backupTrimAudio.store(backupTrimDb);
         for (int b = 0; b < ma::kEqBands; ++b)
         {
@@ -349,12 +516,14 @@ void AgentProcessor::handleBrainCommand(ma::bus::Region& region)
         setParam(trimId, command.trimDb);
         setEqParams(next);
         setParam(eqBypassId, 0.0f);
+        setDynamics({ command.duck, command.duckSync, command.polarityInverted != 0 });
     }
     else if (command.kind == ma::bus::CommandKind::undo && backupValid)
     {
         setParam(trimId, backupTrimDb);
         setEqParams(backupEq);
         setParam(eqBypassId, backupBypass ? 1.0f : 0.0f);
+        setDynamics(backupDynamics);
         backupValid = false;
         useBackup.store(false);
     }
@@ -378,6 +547,38 @@ void AgentProcessor::setEqParams(const ma::EqSettings& settings)
         }
         setParam(eqParamId(b, "Gain"), band.gainDb);
     }
+}
+
+void AgentProcessor::setDynamics(const DynamicState& state)
+{
+    const auto& d = state.duck;
+    setParam(duckOnId, d.on);
+    setParam(duckModeId, d.wholeSignal);
+    setParam(duckFreqId, d.hz);
+    setParam(duckQId, d.q);
+    setParam(duckDepthId, d.depthDb);
+    setParam(duckThresholdId, d.thresholdDb);
+    setParam(duckAttackId, d.attackMs);
+    setParam(duckReleaseId, d.releaseMs);
+    setParam(duckSyncId, static_cast<float>(state.sync));
+    setParam(polarityId, state.polarityInverted ? 1.0f : 0.0f);
+}
+
+AgentProcessor::DynamicState AgentProcessor::currentDynamics() const
+{
+    const auto value = [this](const char* id) { return parameters.getRawParameterValue(id)->load(); };
+    DynamicState state;
+    state.duck.on = value(duckOnId) > 0.5f ? 1.0f : 0.0f;
+    state.duck.wholeSignal = value(duckModeId) > 0.5f ? 1.0f : 0.0f;
+    state.duck.hz = value(duckFreqId);
+    state.duck.q = value(duckQId);
+    state.duck.depthDb = value(duckDepthId);
+    state.duck.thresholdDb = value(duckThresholdId);
+    state.duck.attackMs = value(duckAttackId);
+    state.duck.releaseMs = value(duckReleaseId);
+    state.sync = juce::roundToInt(value(duckSyncId));
+    state.polarityInverted = value(polarityId) > 0.5f;
+    return state;
 }
 
 ma::EqSettings AgentProcessor::currentEq() const

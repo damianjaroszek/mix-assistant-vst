@@ -3,6 +3,8 @@
 #include "SharedSession.h"
 #include "ma/ChannelAnalyzer.h"
 #include "ma/ChannelEq.h"
+#include "ma/CorrelationMeter.h"
+#include "ma/Ducker.h"
 #include "ma/LoudnessMeter.h"
 #include "ma/SpectrumAnalyzer.h"
 
@@ -10,6 +12,8 @@
 
 #include <array>
 #include <atomic>
+#include <cmath>
+#include <vector>
 
 // Agent: measures one mixer channel and applies its gain-staging trim.
 //
@@ -105,6 +109,36 @@ public:
     bool isComparingBefore() const { return useBackup.load(); }
     bool hasBackup() const { return backupValid; }
 
+    // Dynamic give-way (phase 4): the channel dips while the sidechain input plays,
+    // e.g. the bass in its low band on every kick. Release can follow the host tempo.
+    static constexpr const char* duckOnId = "duckOn";
+    static constexpr const char* duckModeId = "duckMode";
+    static constexpr const char* duckFreqId = "duckFreq";
+    static constexpr const char* duckQId = "duckQ";
+    static constexpr const char* duckDepthId = "duckDepth";
+    static constexpr const char* duckThresholdId = "duckThreshold";
+    static constexpr const char* duckAttackId = "duckAttack";
+    static constexpr const char* duckReleaseId = "duckRelease";
+    static constexpr const char* duckSyncId = "duckSync";
+    static constexpr const char* polarityId = "polarity";
+    static juce::StringArray duckModeNames();
+    static juce::StringArray duckSyncNames();
+
+    struct DynamicState
+    {
+        ma::DuckSettings duck {};
+        int sync = 0;
+        bool polarityInverted = false;
+    };
+    DynamicState currentDynamics() const;
+    bool sidechainConnected() const { return sidechainSeen; }
+    double sidechainLevelDb() const { return sidechainShownDb; }
+    double duckReductionDb() const { return reductionShownDb; }
+    double effectiveReleaseMs() const { return releaseInUse.load(); }
+    double hostTempo() const { return hostBpm.load(); }
+    double sidechainLowCorrelation() const { return lowCorrelation.load(); }
+    bool correlationValid() const { return sidechainSeen && std::isfinite(inputRms.load()) && inputRms.load() > -60.0; }
+
 private:
     enum class LearnState { idle, resetRequested, learning, finished };
     static constexpr int kBands = ma::SpectrumAnalyzer::kMaxBands;
@@ -117,12 +151,29 @@ private:
     void handleBrainCommand(ma::bus::Region& region);
     void setParam(const juce::String& id, float value);
     void setEqParams(const ma::EqSettings& eq);
+    void setDynamics(const DynamicState& state);
+    void updateDynamicMeters();
 
     std::atomic<float>* trimParam = nullptr;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> trimGain;
     ma::ChannelEq eq;
     std::atomic<float>* eqBypassParam = nullptr;
     std::array<std::array<std::atomic<float>*, 3>, ma::kEqBands> eqParams {}; // freq, gain, q
+
+    ma::Ducker ducker;
+    ma::CorrelationMeter sidechainCorrelation; // this channel (L) against the sidechain (R)
+    std::vector<float> mainMono, sideMono;     // sized in prepareToPlay
+    std::atomic<double> hostBpm { 0.0 };
+    std::atomic<double> releaseInUse { 120.0 };
+    std::atomic<float> sidechainPeakHold { 0.0f }; // linear, max since the timer last read it
+    std::atomic<float> reductionHold { 0.0f };     // dB, max since the timer last read it
+    std::atomic<double> lowCorrelation { 0.0 };
+    // Message thread only.
+    bool sidechainSeen = false;
+    double sidechainShownDb = -INFINITY, reductionShownDb = 0.0;
+    std::array<float, 10> reductionHistory {};
+    size_t reductionIndex = 0;
+    double lastSidechainMs = 0.0;
 
     ma::ChannelAnalyzer learnAnalyzer;
     ma::LoudnessMeter liveLoudness;
@@ -161,11 +212,14 @@ private:
     float backupTrimDb = 0.0f;
     ma::EqSettings backupEq {};
     bool backupBypass = false;
+    DynamicState backupDynamics {};
     std::uint32_t lastCommand = 0;
     // Audio thread copy of the backup, used while the Brain compares before/after.
     std::atomic<bool> useBackup { false };
     std::atomic<float> backupTrimAudio { 0.0f };
     std::array<std::array<std::atomic<float>, 3>, ma::kEqBands> backupEqAudio {};
+    static constexpr int kDynamicValues = 10; // DuckSettings (8), sync, polarity
+    std::array<std::atomic<float>, kDynamicValues> backupDynamicsAudio {};
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(AgentProcessor)
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AgentProcessor)
