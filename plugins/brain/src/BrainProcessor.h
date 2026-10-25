@@ -4,6 +4,7 @@
 #include "ma/CorrelationMeter.h"
 #include "ma/LoudnessMeter.h"
 #include "ma/Masking.h"
+#include "ma/Solver.h"
 #include "ma/SpectrumAnalyzer.h"
 #include "ma/TruePeakMeter.h"
 
@@ -30,8 +31,11 @@ struct MixSnapshot
         std::uint64_t owner = 0;
         ma::bus::AgentData data {};
         juce::String name;
-        // Raw ERB band levels after the Agent's trim, smoothed over a few seconds.
+        // Raw ERB band levels after the Agent's trim, smoothed over a few seconds,
+        // before the Brain's EQ (what the solver works from) ...
         std::array<double, ma::bus::kBands> bandsDb {};
+        // ... and with it (what the mix hears).
+        std::array<double, ma::bus::kBands> heardDb {};
         bool spectrumValid = false;
     };
 
@@ -45,6 +49,25 @@ struct MixSnapshot
     std::vector<Channel> channels;
     ma::MaskingResult masking;
     std::vector<ReportItem> report;
+};
+
+// The solver's proposal, waiting for the user to pick what to apply.
+struct Proposal
+{
+    struct Item
+    {
+        ma::SolverChange change;
+        std::uint64_t owner = 0;       // eqCut: channel that gets the cut
+        std::uint64_t maskedOwner = 0; // eqCut: channel it makes room for
+        ma::EqBand band;
+        juce::String text;
+        bool selected = true;
+    };
+
+    std::vector<Item> items;
+    std::vector<std::pair<std::uint64_t, ma::EqSettings>> eq; // complete proposed EQ per channel
+    double crowdingBefore = 0.0, crowdingAfter = 0.0;
+    bool made = false;
 };
 
 // Brain: sits last on the master. Measures the mix (loudness, true peak, PLR, spectrum,
@@ -98,6 +121,18 @@ public:
     void setEditorOpen(bool open) { editorOpen = open; }
     juce::String describeIssue(const ma::MaskingIssue& issue) const;
 
+    // Phase 3: propose, apply, undo, compare.
+    const Proposal& proposal() const { return currentProposal; }
+    void propose();
+    void toggleProposalItem(int index);
+    int applySelected(); // returns how many Agents got a command
+    int undoLast();
+    bool canUndo() const;
+    void setComparing(bool shouldCompare);
+    bool isComparing() const { return comparing; }
+    // Loudness matching for the comparison: dB added while playing "before", NaN until measured.
+    double compareGainDb() const;
+
     juce::AudioProcessorValueTreeState parameters;
 
     static constexpr const char* peakCeilingId = "peakCeiling";
@@ -107,6 +142,8 @@ private:
     void timerCallback() override;
     void collectChannels(ma::bus::Region& region, std::uint64_t now);
     void buildReport();
+    void updateLoudnessMatch(std::uint64_t now);
+    void sendCommand(std::uint64_t owner, const ma::bus::Command& command);
 
     std::atomic<float>* peakCeiling = nullptr;
 
@@ -124,12 +161,20 @@ private:
     std::atomic<double> correlationLow { 1.0 };
     std::atomic<double> correlationFull { 1.0 };
     std::atomic<bool> stereo { true };
+    std::atomic<float> outputGainDb { 0.0f };
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> outputGain;
 
     // Message thread only.
     std::shared_ptr<ma::SharedSession> session = ma::SharedSession::get();
     MixSnapshot mix;
     bool useProfiles = false;
     bool editorOpen = false;
+    Proposal currentProposal;
+    std::uint32_t commandSerial = static_cast<std::uint32_t>(juce::Random::getSystemRandom().nextInt());
+    bool comparing = false;
+    std::uint64_t compareSwitchedMs = 0;
+    std::uint64_t resetAtMs = 0; // re-measure once the Agents have switched (they poll at 10 Hz)
+    double loudnessBefore = -INFINITY, loudnessAfter = -INFINITY;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(BrainProcessor)
 };

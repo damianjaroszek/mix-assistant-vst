@@ -31,12 +31,15 @@ void initialise(Region& region)
         region.header.version = kVersion;
         region.header.brainHeartbeatMs.store(0);
         region.header.spectraWantedUntil.store(0);
+        region.header.compareBefore.store(0);
         for (auto& slot : region.slots)
         {
             slot.owner.store(0);
             slot.heartbeatMs.store(0);
             slot.sequence.store(0);
-            std::memset(&slot.data, 0, sizeof(slot.data));
+            slot.data = AgentData {};
+            slot.commandSequence.store(0);
+            slot.command = Command {};
         }
         region.header.magic.store(kMagic);
     }
@@ -107,6 +110,31 @@ bool read(const Slot& slot, AgentData& out, std::uint64_t nowMs)
             out.name[kNameLength - 1] = '\0';
             return true;
         }
+    }
+    return false;
+}
+
+void sendCommand(Slot& slot, const Command& command)
+{
+    const auto seq = slot.commandSequence.load(std::memory_order_relaxed);
+    slot.commandSequence.store(seq + 1, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
+    std::memcpy(&slot.command, &command, sizeof(Command));
+    std::atomic_thread_fence(std::memory_order_release);
+    slot.commandSequence.store(seq + 2, std::memory_order_release);
+}
+
+bool readCommand(const Slot& slot, Command& out)
+{
+    for (int attempt = 0; attempt < 8; ++attempt)
+    {
+        const auto before = slot.commandSequence.load(std::memory_order_acquire);
+        if (before & 1u)
+            continue;
+        std::memcpy(&out, &slot.command, sizeof(Command));
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (slot.commandSequence.load(std::memory_order_relaxed) == before)
+            return before != 0;
     }
     return false;
 }

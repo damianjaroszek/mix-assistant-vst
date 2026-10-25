@@ -27,6 +27,14 @@ AgentProcessor::AgentProcessor()
       parameters(*this, nullptr, "AgentState", createLayout())
 {
     trimParam = parameters.getRawParameterValue(trimId);
+    eqBypassParam = parameters.getRawParameterValue(eqBypassId);
+    for (int b = 0; b < ma::kEqBands; ++b)
+    {
+        auto& p = eqParams[static_cast<size_t>(b)];
+        p[0] = parameters.getRawParameterValue(eqParamId(b, "Freq"));
+        p[1] = parameters.getRawParameterValue(eqParamId(b, "Gain"));
+        p[2] = parameters.getRawParameterValue(eqParamId(b, "Q"));
+    }
     for (size_t b = 0; b < kBands; ++b)
     {
         learnProfile[b].store(-INFINITY);
@@ -80,6 +88,23 @@ juce::AudioProcessorValueTreeState::ParameterLayout AgentProcessor::createLayout
     layout.add(std::make_unique<juce::AudioParameterInt>(
         juce::ParameterID { priorityId, 2 }, "Priority", 1, 10, 5));
 
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { eqBypassId, 3 }, "Brain EQ bypass", false));
+    const float defaultHz[] = { 100.0f, 300.0f, 1000.0f, 4000.0f };
+    for (int b = 0; b < ma::kEqBands; ++b)
+    {
+        const auto name = "Brain EQ " + juce::String(b + 1) + " ";
+        Range freq { 20.0f, 20000.0f, 1.0f };
+        freq.setSkewForCentre(1000.0f);
+        layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { eqParamId(b, "Freq"), 3 }, name + "freq", freq,
+                                                               defaultHz[b], juce::AudioParameterFloatAttributes().withLabel("Hz")));
+        layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { eqParamId(b, "Gain"), 3 }, name + "gain",
+                                                               Range { -12.0f, 6.0f, 0.1f }, 0.0f,
+                                                               juce::AudioParameterFloatAttributes().withLabel("dB")));
+        Range q { 0.3f, 8.0f, 0.01f };
+        q.setSkewForCentre(1.0f);
+        layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { eqParamId(b, "Q"), 3 }, name + "Q", q, 1.0f));
+    }
+
     return layout;
 }
 
@@ -97,6 +122,7 @@ void AgentProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     learnAnalyzer.prepare(sampleRate, channels);
     liveLoudness.prepare(sampleRate, channels);
     liveSpectrum.prepare(sampleRate, ma::BandScale::erb);
+    eq.prepare(sampleRate);
     trimGain.reset(sampleRate, 0.05);
     trimGain.setCurrentAndTargetValue(static_cast<float>(ma::dbToGain(trimParam->load())));
 
@@ -168,7 +194,10 @@ void AgentProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             learnState.compare_exchange_strong(state, LearnState::finished);
     }
 
-    trimGain.setTargetValue(static_cast<float>(ma::dbToGain(trimParam->load())));
+    // While the Brain compares before/after, play the settings from before the last apply.
+    const bool before = useBackup.load();
+    const float trimDb = before ? backupTrimAudio.load() : trimParam->load();
+    trimGain.setTargetValue(static_cast<float>(ma::dbToGain(trimDb)));
     if (trimGain.isSmoothing())
     {
         for (int i = 0; i < numSamples; ++i)
@@ -182,6 +211,25 @@ void AgentProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     {
         buffer.applyGain(0, numSamples, trimGain.getTargetValue());
     }
+
+    ma::EqSettings bands {};
+    const bool bypass = !before && eqBypassParam->load() > 0.5f;
+    for (int b = 0; b < ma::kEqBands && !bypass; ++b)
+    {
+        auto& band = bands[static_cast<size_t>(b)];
+        if (before)
+        {
+            const auto& saved = backupEqAudio[static_cast<size_t>(b)];
+            band = { saved[0].load(), saved[1].load(), saved[2].load() };
+        }
+        else
+        {
+            const auto& p = eqParams[static_cast<size_t>(b)];
+            band = { p[0]->load(), p[1]->load(), p[2]->load() };
+        }
+    }
+    eq.setBands(bands);
+    eq.process(buffer.getArrayOfWritePointers(), numChannels, numSamples);
 
     double outPeak = 0.0;
     for (int c = 0; c < numChannels; ++c)
@@ -233,6 +281,7 @@ void AgentProcessor::publishToBrain()
         slotIndex = ma::bus::claimSlot(*region, instanceId, now);
     if (slotIndex < 0)
         return;
+    handleBrainCommand(*region);
 
     ma::bus::AgentData data {};
     const auto name = getDisplayName().toRawUTF8();
@@ -258,7 +307,99 @@ void AgentProcessor::publishToBrain()
         data.liveDb[b] = toShared(liveBands[static_cast<size_t>(b)].load());
         data.profileDb[b] = toShared(profile[static_cast<size_t>(b)].load() + weights[static_cast<size_t>(b)]);
     }
+    const auto current = currentEq();
+    for (int b = 0; b < ma::kEqBands; ++b)
+        data.eq[b] = current[static_cast<size_t>(b)];
+    data.eqBypass = eqBypassed() ? 1 : 0;
+    data.hasBackup = backupValid ? 1 : 0;
+    data.lastCommand = lastCommand;
     ma::bus::publish(region->slots[slotIndex], data, now);
+}
+
+void AgentProcessor::handleBrainCommand(ma::bus::Region& region)
+{
+    useBackup.store(backupValid && brainAlive.load() && region.header.compareBefore.load() != 0);
+
+    ma::bus::Command command {};
+    if (slotIndex < 0 || !ma::bus::readCommand(region.slots[slotIndex], command))
+        return;
+    if (command.target != instanceId || command.serial == lastCommand)
+        return;
+    lastCommand = command.serial;
+
+    if (command.kind == ma::bus::CommandKind::apply)
+    {
+        backupTrimDb = trimParam->load();
+        backupEq = currentEq();
+        backupBypass = eqBypassed();
+        backupValid = true;
+        backupTrimAudio.store(backupTrimDb);
+        for (int b = 0; b < ma::kEqBands; ++b)
+        {
+            const auto& band = backupEq[static_cast<size_t>(b)];
+            auto& saved = backupEqAudio[static_cast<size_t>(b)];
+            saved[0].store(backupBypass ? 1000.0f : band.hz);
+            saved[1].store(backupBypass ? 0.0f : band.gainDb);
+            saved[2].store(backupBypass ? 1.0f : band.q);
+        }
+
+        ma::EqSettings next {};
+        for (int b = 0; b < ma::kEqBands; ++b)
+            next[static_cast<size_t>(b)] = command.eq[b];
+        setParam(trimId, command.trimDb);
+        setEqParams(next);
+        setParam(eqBypassId, 0.0f);
+    }
+    else if (command.kind == ma::bus::CommandKind::undo && backupValid)
+    {
+        setParam(trimId, backupTrimDb);
+        setEqParams(backupEq);
+        setParam(eqBypassId, backupBypass ? 1.0f : 0.0f);
+        backupValid = false;
+        useBackup.store(false);
+    }
+}
+
+void AgentProcessor::setParam(const juce::String& id, float value)
+{
+    if (auto* param = parameters.getParameter(id))
+        param->setValueNotifyingHost(param->convertTo0to1(value));
+}
+
+void AgentProcessor::setEqParams(const ma::EqSettings& settings)
+{
+    for (int b = 0; b < ma::kEqBands; ++b)
+    {
+        const auto& band = settings[static_cast<size_t>(b)];
+        if (ma::isOn(band))
+        {
+            setParam(eqParamId(b, "Freq"), band.hz);
+            setParam(eqParamId(b, "Q"), band.q);
+        }
+        setParam(eqParamId(b, "Gain"), band.gainDb);
+    }
+}
+
+ma::EqSettings AgentProcessor::currentEq() const
+{
+    ma::EqSettings out {};
+    for (int b = 0; b < ma::kEqBands; ++b)
+    {
+        const auto& p = eqParams[static_cast<size_t>(b)];
+        out[static_cast<size_t>(b)] = { p[0]->load(), p[1]->load(), p[2]->load() };
+    }
+    return out;
+}
+
+bool AgentProcessor::eqBypassed() const
+{
+    return eqBypassParam->load() > 0.5f;
+}
+
+void AgentProcessor::clearEq()
+{
+    for (int b = 0; b < ma::kEqBands; ++b)
+        setParam(eqParamId(b, "Gain"), 0.0f);
 }
 
 void AgentProcessor::updateTrackProperties(const TrackProperties& properties)

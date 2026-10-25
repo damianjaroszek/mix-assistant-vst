@@ -2,6 +2,7 @@
 
 #include "SharedSession.h"
 #include "ma/ChannelAnalyzer.h"
+#include "ma/ChannelEq.h"
 #include "ma/LoudnessMeter.h"
 #include "ma/SpectrumAnalyzer.h"
 
@@ -94,6 +95,16 @@ public:
 
     static juce::StringArray roleNames();
 
+    // The Brain's corrections (phase 3): four bells, set by "Zastosuj" in the Brain.
+    static constexpr const char* eqBypassId = "eqBypass";
+    static juce::String eqParamId(int band, const char* what) { return "eq" + juce::String(band + 1) + what; }
+    ma::EqSettings currentEq() const;
+    bool eqBypassed() const;
+    void clearEq();
+    // A/B in the Brain: the Agent plays its settings from before the last "Zastosuj".
+    bool isComparingBefore() const { return useBackup.load(); }
+    bool hasBackup() const { return backupValid; }
+
 private:
     enum class LearnState { idle, resetRequested, learning, finished };
     static constexpr int kBands = ma::SpectrumAnalyzer::kMaxBands;
@@ -103,9 +114,15 @@ private:
     void applyLearned();
     bool measuresLufs() const;
     void publishToBrain();
+    void handleBrainCommand(ma::bus::Region& region);
+    void setParam(const juce::String& id, float value);
+    void setEqParams(const ma::EqSettings& eq);
 
     std::atomic<float>* trimParam = nullptr;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> trimGain;
+    ma::ChannelEq eq;
+    std::atomic<float>* eqBypassParam = nullptr;
+    std::array<std::array<std::atomic<float>*, 3>, ma::kEqBands> eqParams {}; // freq, gain, q
 
     ma::ChannelAnalyzer learnAnalyzer;
     ma::LoudnessMeter liveLoudness;
@@ -138,6 +155,17 @@ private:
     int slotIndex = -1;
     std::atomic<bool> brainAlive { false };
     juce::String userName, trackName;
+
+    // Settings from before the last applied Brain command, for undo and A/B.
+    bool backupValid = false;
+    float backupTrimDb = 0.0f;
+    ma::EqSettings backupEq {};
+    bool backupBypass = false;
+    std::uint32_t lastCommand = 0;
+    // Audio thread copy of the backup, used while the Brain compares before/after.
+    std::atomic<bool> useBackup { false };
+    std::atomic<float> backupTrimAudio { 0.0f };
+    std::array<std::array<std::atomic<float>, 3>, ma::kEqBands> backupEqAudio {};
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(AgentProcessor)
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AgentProcessor)

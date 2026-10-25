@@ -29,6 +29,8 @@ struct MaskingIssue
     double score = 0.0;   // 0..1, share of the masked channel's important bands that are covered
     double lowHz = 0.0;   // strongest contiguous masked range, band edges
     double highHz = 0.0;
+    int lowBand = 0;      // the same range as ERB band indices, inclusive
+    int highBand = 0;
 };
 
 struct MaskingResult

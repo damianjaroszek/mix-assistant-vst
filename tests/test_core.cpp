@@ -1,6 +1,8 @@
 // Unit tests for the DSP core. Plain asserts, no framework, so they build anywhere.
 
 #include "ma/ChannelAnalyzer.h"
+#include "ma/ChannelEq.h"
+#include "ma/Solver.h"
 #include "ma/Decibels.h"
 #include "ma/EqualLoudness.h"
 #include "ma/GainStaging.h"
@@ -278,6 +280,20 @@ void testMixBus()
 
     ma::bus::releaseSlot(*region, b, 222);
     check(region->slots[b].owner.load() == 0 || c == b, "released slot is free");
+
+    ma::bus::Command command {};
+    check(!ma::bus::readCommand(region->slots[a], command), "no command before the Brain sends one");
+    command.target = 333;
+    command.serial = 7;
+    command.kind = ma::bus::CommandKind::apply;
+    command.trimDb = -2.5f;
+    command.eq[1] = { 250.0f, -3.0f, 1.4f };
+    ma::bus::sendCommand(region->slots[a], command);
+    ma::bus::Command received {};
+    check(ma::bus::readCommand(region->slots[a], received), "Agent reads the Brain's command");
+    check(received.target == 333 && received.serial == 7 && received.kind == ma::bus::CommandKind::apply
+              && received.trimDb == -2.5f && received.eq[1].hz == 250.0f && received.eq[1].gainDb == -3.0f,
+          "command arrives intact");
 }
 
 ma::MaskingChannel band(double lowHz, double highHz, double db, int priority)
@@ -313,6 +329,82 @@ void testMasking()
     for (const auto& issue : r.issues)
         reverse = reverse || (issue.masker == 0 && issue.masked == 1);
     check(!reverse, "a more important channel masking a less important one is not an issue");
+}
+
+void testEq()
+{
+    const auto bell = ma::Biquad::peaking(48000.0, 1000.0, -6.0, 1.0);
+    checkNear(bell.magnitudeDb(1000.0, 48000.0), -6.0, 0.01, "bell reaches its gain at the centre");
+    check(std::abs(bell.magnitudeDb(100.0, 48000.0)) < 0.2, "bell leaves frequencies far below alone");
+
+    ma::EqSettings eq {};
+    eq[0] = { 1000.0f, -6.0f, 1.0f };
+    checkNear(ma::eqResponseDb(eq, 1000.0), -6.0, 0.01, "EQ response sums its bands");
+    checkNear(ma::eqResponseDb(ma::EqSettings {}, 1000.0), 0.0, 1e-9, "an empty EQ is flat");
+
+    // Real-time EQ on a 1 kHz sine: -6 dB in, about half the amplitude out.
+    auto s = sine(48000.0, 1.0, 2, 1000.0, 0.5);
+    ma::ChannelEq realtime;
+    realtime.prepare(48000.0);
+    realtime.setBands(eq);
+    float* channels[] = { s.channels[0].data(), s.channels[1].data() };
+    realtime.process(channels, 2, s.numSamples());
+    float peak = 0.0f;
+    for (int i = s.numSamples() / 2; i < s.numSamples(); ++i)
+        peak = std::max(peak, std::abs(s.channels[0][static_cast<size_t>(i)]));
+    checkNear(peak, 0.5 * std::pow(10.0, -6.0 / 20.0), 0.005, "real-time EQ cuts the sine by 6 dB");
+}
+
+ma::SolverChannel solverBand(double lowHz, double highHz, double db, int priority)
+{
+    const auto m = band(lowHz, highHz, db, priority);
+    ma::SolverChannel c;
+    c.rawDb = m.rawDb;
+    c.priority = m.priority;
+    c.valid = true;
+    return c;
+}
+
+void testSolver()
+{
+    // Kick (1) masked by a louder bass (2); vocal (3) masked by a pad (6); hats stay clear.
+    const std::vector<ma::SolverChannel> channels { solverBand(45.0, 90.0, -14.0, 1), solverBand(45.0, 250.0, -8.0, 2),
+                                                    solverBand(300.0, 3000.0, -20.0, 3), solverBand(200.0, 2500.0, -14.0, 6),
+                                                    solverBand(8000.0, 14000.0, -24.0, 5) };
+    const auto r = ma::solve(channels);
+
+    bool bassCut = false, padCut = false, wrongWay = false;
+    for (const auto& change : r.changes)
+    {
+        if (change.kind != ma::SolverChange::Kind::eqCut)
+            continue;
+        const auto& band = r.eq[static_cast<size_t>(change.channel)][static_cast<size_t>(change.eqSlot)];
+        check(band.gainDb < 0.0f && band.gainDb >= -6.0f, "solver cuts within the limit");
+        check(change.scoreAfter < change.scoreBefore, "every proposed cut reduces its collision");
+        bassCut = bassCut || (change.channel == 1 && change.maskedChannel == 0 && band.hz < 120.0f);
+        padCut = padCut || (change.channel == 3 && change.maskedChannel == 2 && band.hz > 250.0f && band.hz < 3000.0f);
+        wrongWay = wrongWay || channels[static_cast<size_t>(change.channel)].priority < channels[static_cast<size_t>(change.maskedChannel)].priority;
+    }
+    check(bassCut, "solver cuts the bass under the kick");
+    check(padCut, "solver cuts the pad where the vocal lives");
+    check(!wrongWay, "solver never cuts the more important channel");
+    check(r.crowdingAfter < r.crowdingBefore, "collisions go down overall");
+    for (const auto& band : r.eq[4])
+        check(band.gainDb == 0.0f, "a channel without collisions is left alone");
+
+    const auto again = ma::solve(channels);
+    bool same = again.changes.size() == r.changes.size();
+    for (size_t c = 0; c < channels.size() && same; ++c)
+        for (int b = 0; b < ma::kEqBands; ++b)
+            same = same && again.eq[c][static_cast<size_t>(b)].gainDb == r.eq[c][static_cast<size_t>(b)].gainDb;
+    check(same, "solving again gives the same proposal");
+
+    ma::SolverOptions headroom;
+    headroom.headroomGainDb = -2.5;
+    const auto withGain = ma::solve(channels, headroom);
+    check(!withGain.changes.empty() && withGain.changes.front().kind == ma::SolverChange::Kind::globalGain
+              && withGain.changes.front().gainDb == -2.5,
+          "missing headroom becomes one gain change for all channels");
 }
 
 void testCorrelation()
@@ -372,6 +464,8 @@ int main()
     testChannelAnalyzerSpeed();
     testMixBus();
     testMasking();
+    testEq();
+    testSolver();
     testCorrelation();
     testWavRoundTrip();
 

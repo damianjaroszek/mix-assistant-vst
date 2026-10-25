@@ -132,6 +132,8 @@ MaskingResult analyseMasking(const std::vector<MaskingChannel>& channels, double
             issue.score = score;
             issue.lowHz = SpectrumAnalyzer::bandEdgeHz(BandScale::erb, bestStart);
             issue.highHz = SpectrumAnalyzer::bandEdgeHz(BandScale::erb, bestEnd + 1);
+            issue.lowBand = bestStart;
+            issue.highBand = bestEnd;
             result.issues.push_back(issue);
         }
     }

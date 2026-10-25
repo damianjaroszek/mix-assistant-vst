@@ -13,6 +13,7 @@ namespace
 constexpr int kUpdateHz = 5;
 constexpr double kSmoothingSeconds = 3.0;
 constexpr std::uint64_t kSpectraRequestMs = 3000;
+constexpr std::uint64_t kAgentSwitchMs = 400; // Agents poll the bus at 10 Hz
 
 juce::String quoted(const juce::String& name)
 {
@@ -49,6 +50,8 @@ BrainProcessor::BrainProcessor()
 BrainProcessor::~BrainProcessor()
 {
     stopTimer();
+    if (comparing)
+        setComparing(false);
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout BrainProcessor::createLayout()
@@ -80,6 +83,8 @@ void BrainProcessor::prepareToPlay(double sampleRate, int)
     spectrum.prepare(sampleRate);
     correlation.prepare(sampleRate);
     stereo.store(channels >= 2);
+    outputGain.reset(sampleRate, 0.1);
+    outputGain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(outputGainDb.load()));
 }
 
 void BrainProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
@@ -119,6 +124,13 @@ void BrainProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     const auto recent = spectrum.recentDb();
     for (size_t b = 0; b < bands.size(); ++b)
         bands[b].store(recent[b]);
+
+    // Loudness matching while comparing before/after; measurements above stay unaffected.
+    outputGain.setTargetValue(juce::Decibels::decibelsToGain(outputGainDb.load()));
+    if (outputGain.isSmoothing())
+        outputGain.applyGain(buffer, numSamples);
+    else if (std::abs(outputGain.getTargetValue() - 1.0f) > 1e-6f)
+        buffer.applyGain(outputGain.getTargetValue());
 }
 
 void BrainProcessor::setUseLearnedProfiles(bool shouldUse)
@@ -142,6 +154,11 @@ void BrainProcessor::timerCallback()
 
     const auto now = ma::SharedSession::nowMs();
     region->header.brainHeartbeatMs.store(now);
+    if (resetAtMs != 0 && now >= resetAtMs)
+    {
+        resetAtMs = 0;
+        requestReset();
+    }
     if (editorOpen && !useProfiles)
         region->header.spectraWantedUntil.store(now + kSpectraRequestMs);
 
@@ -154,9 +171,10 @@ void BrainProcessor::timerCallback()
         masking[c].valid = channel.spectrumValid;
         masking[c].priority = channel.data.priority;
         for (int b = 0; b < ma::bus::kBands; ++b)
-            masking[c].rawDb[static_cast<size_t>(b)] = channel.bandsDb[static_cast<size_t>(b)];
+            masking[c].rawDb[static_cast<size_t>(b)] = channel.heardDb[static_cast<size_t>(b)];
     }
     mix.masking = ma::analyseMasking(masking);
+    updateLoudnessMatch(now);
     buildReport();
 }
 
@@ -197,6 +215,14 @@ void BrainProcessor::collectChannels(ma::bus::Region& region, std::uint64_t now)
                 smoothed = previous->bandsDb[static_cast<size_t>(b)]
                            + alpha * (level - previous->bandsDb[static_cast<size_t>(b)]);
         }
+        ma::EqSettings eq {};
+        if (channel.data.eqBypass == 0)
+            for (int b = 0; b < ma::kEqBands; ++b)
+                eq[static_cast<size_t>(b)] = channel.data.eq[b];
+        for (int b = 0; b < ma::bus::kBands; ++b)
+            channel.heardDb[static_cast<size_t>(b)] = channel.bandsDb[static_cast<size_t>(b)]
+                + ma::eqResponseDb(eq, ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b));
+
         // Keep a channel that just went quiet in the picture while its average fades.
         channel.spectrumValid = audible || (continuing && !useProfiles && *std::max_element(channel.bandsDb.begin(), channel.bandsDb.end()) > -120.0);
         next.push_back(channel);
@@ -360,6 +386,191 @@ juce::String BrainProcessor::describeIssue(const ma::MaskingIssue& issue) const
     const auto& masked = mix.channels[static_cast<size_t>(issue.masked)];
     return quoted(masker.name) + pl(" zasłania ") + quoted(masked.name) + pl(" w ") + hzText(issue.lowHz) + pl("–")
            + hzText(issue.highHz) + " (" + juce::String(juce::roundToInt(issue.score * 100.0)) + "%)";
+}
+
+void BrainProcessor::propose()
+{
+    currentProposal = {};
+    currentProposal.made = true;
+
+    std::vector<ma::SolverChannel> channels(mix.channels.size());
+    for (size_t c = 0; c < mix.channels.size(); ++c)
+    {
+        channels[c].valid = mix.channels[c].spectrumValid;
+        channels[c].priority = mix.channels[c].data.priority;
+        for (int b = 0; b < ma::bus::kBands; ++b)
+            channels[c].rawDb[static_cast<size_t>(b)] = mix.channels[c].bandsDb[static_cast<size_t>(b)];
+    }
+
+    ma::SolverOptions options;
+    const double peak = truePeakDb();
+    const double over = std::isfinite(peak) ? peak - peakCeilingDb() : 0.0;
+    if (over > 0.0)
+        options.headroomGainDb = -std::ceil((over + 0.5) * 2.0) / 2.0;
+
+    const auto solved = ma::solve(channels, options);
+    currentProposal.crowdingBefore = solved.crowdingBefore;
+    currentProposal.crowdingAfter = solved.crowdingAfter;
+    for (size_t c = 0; c < mix.channels.size(); ++c)
+        currentProposal.eq.emplace_back(mix.channels[c].owner, solved.eq[c]);
+
+    const auto roles = ma::ui::roleNames();
+    for (const auto& change : solved.changes)
+    {
+        Proposal::Item item;
+        item.change = change;
+        if (change.kind == ma::SolverChange::Kind::globalGain)
+        {
+            item.text = pl("Wszystkie kanały: ") + juce::String(change.gainDb, 1) + pl(" dB, bo szczyt sumy jest ")
+                        + juce::String(over, 1) + pl(" dB ponad limitem pre-master");
+        }
+        else
+        {
+            const auto& masker = mix.channels[static_cast<size_t>(change.channel)];
+            const auto& masked = mix.channels[static_cast<size_t>(change.maskedChannel)];
+            item.owner = masker.owner;
+            item.maskedOwner = masked.owner;
+            item.band = solved.eq[static_cast<size_t>(change.channel)][static_cast<size_t>(change.eqSlot)];
+            item.text = quoted(masker.name) + ": " + juce::String(item.band.gainDb, 1) + pl(" dB przy ") + hzText(item.band.hz)
+                        + " (Q " + juce::String(item.band.q, 1) + pl("), bo zasłania ") + quoted(masked.name) + pl(" w ")
+                        + hzText(change.lowHz) + pl("–") + hzText(change.highHz) + " ("
+                        + juce::String(juce::roundToInt(change.scoreBefore * 100.0)) + pl("% → ")
+                        + juce::String(juce::roundToInt(change.scoreAfter * 100.0)) + "%)";
+            // Stopa and bas: a static cut is a first step; the dynamic one comes in phase 4.
+            if (masker.data.role == 2 && masked.data.role == 1)
+                item.text += pl(". Docelowo dynamicznie (faza 4)");
+        }
+        currentProposal.items.push_back(item);
+    }
+}
+
+void BrainProcessor::toggleProposalItem(int index)
+{
+    if (index >= 0 && index < static_cast<int>(currentProposal.items.size()))
+        currentProposal.items[static_cast<size_t>(index)].selected = !currentProposal.items[static_cast<size_t>(index)].selected;
+}
+
+void BrainProcessor::sendCommand(std::uint64_t owner, const ma::bus::Command& command)
+{
+    auto* region = session->region();
+    if (region == nullptr)
+        return;
+    for (auto& slot : region->slots)
+        if (slot.owner.load() == owner)
+            ma::bus::sendCommand(slot, command);
+}
+
+int BrainProcessor::applySelected()
+{
+    if (!currentProposal.made)
+        return 0;
+    if (comparing)
+        setComparing(false);
+
+    double globalGain = 0.0;
+    for (const auto& item : currentProposal.items)
+        if (item.selected && item.change.kind == ma::SolverChange::Kind::globalGain)
+            globalGain += item.change.gainDb;
+
+    int sent = 0;
+    for (const auto& channel : mix.channels)
+    {
+        const auto proposed = std::find_if(currentProposal.eq.begin(), currentProposal.eq.end(),
+                                           [&](const auto& e) { return e.first == channel.owner; });
+
+        // The proposal's bands this channel's selected items refer to; the rest switch off.
+        ma::EqSettings eq {};
+        bool eqChanges = false;
+        for (const auto& item : currentProposal.items)
+        {
+            if (!item.selected || item.change.kind != ma::SolverChange::Kind::eqCut || item.owner != channel.owner)
+                continue;
+            if (proposed != currentProposal.eq.end())
+                eq[static_cast<size_t>(item.change.eqSlot)] = proposed->second[static_cast<size_t>(item.change.eqSlot)];
+            eqChanges = true;
+        }
+        if (!eqChanges && std::abs(globalGain) < 0.05)
+            continue;
+        if (!eqChanges)
+            for (int b = 0; b < ma::kEqBands; ++b)
+                eq[static_cast<size_t>(b)] = channel.data.eq[b]; // keep what is there
+
+        ma::bus::Command command {};
+        command.target = channel.owner;
+        command.serial = ++commandSerial;
+        command.kind = ma::bus::CommandKind::apply;
+        command.trimDb = static_cast<float>(juce::jlimit(-24.0, 24.0, channel.data.trimDb + globalGain));
+        for (int b = 0; b < ma::kEqBands; ++b)
+            command.eq[b] = eq[static_cast<size_t>(b)];
+        sendCommand(channel.owner, command);
+        ++sent;
+    }
+
+    if (sent > 0)
+    {
+        currentProposal = {};
+        loudnessBefore = loudnessAfter = -INFINITY;
+        resetAtMs = ma::SharedSession::nowMs() + kAgentSwitchMs; // measure the mix again from there
+    }
+    return sent;
+}
+
+bool BrainProcessor::canUndo() const
+{
+    return std::any_of(mix.channels.begin(), mix.channels.end(), [](const auto& c) { return c.data.hasBackup != 0; });
+}
+
+int BrainProcessor::undoLast()
+{
+    if (comparing)
+        setComparing(false);
+    int sent = 0;
+    for (const auto& channel : mix.channels)
+    {
+        if (channel.data.hasBackup == 0)
+            continue;
+        ma::bus::Command command {};
+        command.target = channel.owner;
+        command.serial = ++commandSerial;
+        command.kind = ma::bus::CommandKind::undo;
+        sendCommand(channel.owner, command);
+        ++sent;
+    }
+    if (sent > 0)
+    {
+        loudnessBefore = loudnessAfter = -INFINITY;
+        resetAtMs = ma::SharedSession::nowMs() + kAgentSwitchMs;
+    }
+    return sent;
+}
+
+void BrainProcessor::setComparing(bool shouldCompare)
+{
+    comparing = shouldCompare;
+    compareSwitchedMs = ma::SharedSession::nowMs();
+    if (auto* region = session->region())
+        region->header.compareBefore.store(shouldCompare ? 1u : 0u);
+    outputGainDb.store(0.0f);
+    // Peaks and loudness of one version must not leak into the other's report.
+    resetAtMs = compareSwitchedMs + kAgentSwitchMs;
+}
+
+double BrainProcessor::compareGainDb() const
+{
+    if (!std::isfinite(loudnessBefore) || !std::isfinite(loudnessAfter))
+        return std::nan("");
+    return juce::jlimit(-12.0, 12.0, loudnessAfter - loudnessBefore);
+}
+
+void BrainProcessor::updateLoudnessMatch(std::uint64_t now)
+{
+    // Short-term loudness covers 3 s; wait until it only holds the current version.
+    const double shortTermNow = shortTermLufs();
+    if (now - compareSwitchedMs > 3500 + kAgentSwitchMs && std::isfinite(shortTermNow) && shortTermNow > -60.0)
+        (comparing ? loudnessBefore : loudnessAfter) = shortTermNow;
+
+    const double gain = compareGainDb();
+    outputGainDb.store(comparing && std::isfinite(gain) ? static_cast<float>(gain) : 0.0f);
 }
 
 void BrainProcessor::getStateInformation(juce::MemoryBlock& destData)
