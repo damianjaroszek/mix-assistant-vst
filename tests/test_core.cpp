@@ -3,6 +3,7 @@
 #include "ma/ChannelAnalyzer.h"
 #include "ma/ChannelEq.h"
 #include "ma/Solver.h"
+#include "ma/TonalBalance.h"
 #include "ma/Decibels.h"
 #include "ma/EqualLoudness.h"
 #include "ma/GainStaging.h"
@@ -407,6 +408,120 @@ void testSolver()
           "missing headroom becomes one gain change for all channels");
 }
 
+ma::Curve mixOf(const std::vector<ma::SolverChannel>& channels)
+{
+    ma::Curve mix {};
+    for (int b = 0; b < ma::SpectrumAnalyzer::numBandsFor(ma::BandScale::erb); ++b)
+    {
+        double power = 0.0;
+        for (const auto& c : channels)
+            power += std::pow(10.0, c.rawDb[static_cast<size_t>(b)] / 10.0);
+        mix[static_cast<size_t>(b)] = 10.0 * std::log10(power);
+    }
+    return mix;
+}
+
+void testTonalBalance()
+{
+    const int n = ma::SpectrumAnalyzer::numBandsFor(ma::BandScale::erb);
+    ma::Curve slope {};
+    for (int b = 0; b < n; ++b)
+        slope[static_cast<size_t>(b)] = -20.0 - 4.0 * std::log2(ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b) / 100.0);
+
+    const auto norm = ma::normaliseCurve(slope);
+    double mean = 0.0;
+    int count = 0;
+    for (int b = 0; b < n; ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        if (hz >= 60.0 && hz <= 8000.0)
+        {
+            mean += norm[static_cast<size_t>(b)];
+            ++count;
+        }
+    }
+    checkNear(mean / count, 0.0, 1e-9, "normalised curve sits at 0 dB over 60 Hz..8 kHz");
+
+    ma::TonalTarget target;
+    target.name = "House";
+    target.references.push_back(norm);
+    target.rebuild();
+    check(target.high[20] - target.low[20] >= 4.0 - 1e-9, "one reference gets a corridor of at least +-2 dB");
+
+    // The same slope 12 dB quieter, with a 6 dB hole around 2-4 kHz.
+    ma::Curve mix = slope;
+    for (int b = 0; b < n; ++b)
+    {
+        mix[static_cast<size_t>(b)] -= 12.0;
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        if (hz >= 2000.0 && hz <= 4000.0)
+            mix[static_cast<size_t>(b)] -= 6.0;
+    }
+    const auto cmp = ma::compareToTarget(mix, target);
+    check(cmp.valid && !cmp.regions.empty(), "a hole is found");
+    if (!cmp.regions.empty())
+    {
+        check(cmp.regions.front().hole() && cmp.regions.front().lowHz >= 1500.0 && cmp.regions.front().highHz <= 5000.0,
+              "the hole is reported where it is, regardless of overall level");
+        check(cmp.regions.front().deviationDb < -2.0, "the hole is a few dB under the corridor");
+    }
+    const auto same = ma::compareToTarget(slope, target);
+    check(same.valid && same.regions.empty(), "the reference itself fits its own target");
+
+    ma::TonalTarget parsed;
+    check(ma::parseTarget(ma::serialiseTarget(target), parsed), "target file parses");
+    check(parsed.name == "House" && parsed.references.size() == 1 && std::abs(parsed.centre[10] - target.centre[10]) < 0.01,
+          "target survives a save and load");
+
+    std::string crlf;
+    for (char ch : ma::serialiseTarget(target))
+        crlf += ch == '\n' ? std::string("\r\n") : std::string(1, ch);
+    ma::TonalTarget windows;
+    check(ma::parseTarget(crlf, windows) && windows.name == "House" && windows.references.size() == 1,
+          "a target file with Windows line endings loads too");
+}
+
+void testTonalSolver()
+{
+    // Kick, a vocal across 300 Hz-5 kHz and hats at 5-7 kHz; nothing above 9 kHz.
+    std::vector<ma::SolverChannel> channels { solverBand(45.0, 90.0, -14.0, 1), solverBand(300.0, 5000.0, -24.0, 2),
+                                              solverBand(5000.0, 7000.0, -30.0, 5) };
+    const auto mix = mixOf(channels);
+
+    // Target: the same mix with 6 dB more at 2-4.5 kHz and real content up to 14 kHz.
+    ma::Curve reference = mix;
+    for (int b = 0; b < ma::SpectrumAnalyzer::numBandsFor(ma::BandScale::erb); ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        if (hz >= 2000.0 && hz <= 4500.0)
+            reference[static_cast<size_t>(b)] += 6.0;
+        if (hz >= 9000.0 && hz <= 14000.0)
+            reference[static_cast<size_t>(b)] = -36.0;
+    }
+    ma::TonalTarget target;
+    target.references.push_back(ma::normaliseCurve(reference));
+    target.rebuild();
+    const auto cmp = ma::compareToTarget(mix, target);
+
+    ma::SolverOptions options;
+    options.tonal = &cmp;
+    const auto r = ma::solve(channels, options);
+
+    bool boostVocal = false, advice = false;
+    for (const auto& change : r.changes)
+    {
+        if (change.kind == ma::SolverChange::Kind::tonalBoost)
+        {
+            const auto& band = r.eq[static_cast<size_t>(change.channel)][static_cast<size_t>(change.eqSlot)];
+            boostVocal = boostVocal || (change.channel == 1 && band.gainDb > 0.0f && band.gainDb <= 4.0f && band.hz > 1500.0f && band.hz < 5000.0f);
+        }
+        if (change.kind == ma::SolverChange::Kind::tonalAdvice)
+            advice = advice || (change.lowHz >= 7000.0 && (change.sourceChannel == 1 || change.sourceChannel == 2));
+    }
+    check(boostVocal, "a hole in 2-4.5 kHz is filled by boosting the vocal, which has content there");
+    check(advice, "a hole nothing can fill becomes advice, naming a channel with content an octave below");
+}
+
 void testCorrelation()
 {
     const auto a = sine(48000.0, 3.0, 2, 60.0, 0.5);
@@ -466,6 +581,8 @@ int main()
     testMasking();
     testEq();
     testSolver();
+    testTonalBalance();
+    testTonalSolver();
     testCorrelation();
     testWavRoundTrip();
 

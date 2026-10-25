@@ -111,6 +111,43 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     };
     addAndMakeVisible(proposalView);
 
+    for (auto* button : { &channelsViewButton, &tonalViewButton })
+    {
+        button->setClickingTogglesState(true);
+        button->setRadioGroupId(1);
+        button->setColour(juce::TextButton::buttonColourId, colours::panel);
+        button->setColour(juce::TextButton::buttonOnColourId, colours::accent.darker(0.4f));
+        addAndMakeVisible(button);
+    }
+    channelsViewButton.setButtonText(pl("Kanały"));
+    tonalViewButton.setButtonText(pl("Balans tonalny"));
+    channelsViewButton.onClick = [this] { showTonal(false); };
+    tonalViewButton.onClick = [this] { showTonal(true); };
+
+    targetBox.setTextWhenNothingSelected(pl("wybierz cel"));
+    targetBox.setColour(juce::ComboBox::backgroundColourId, colours::panel);
+    targetBox.onChange = [this] {
+        if (targetBox.getSelectedId() > 0)
+            processor.selectTarget(targetBox.getText());
+    };
+    addChildComponent(targetBox);
+    styleButton(newTargetButton, pl("Nowy cel"));
+    styleButton(captureButton, pl("Nagraj referencję"));
+    styleButton(removeReferenceButton, pl("Usuń ostatnią"));
+    newTargetButton.onClick = [this] { askForNewTarget(); };
+    captureButton.onClick = [this] {
+        if (!processor.isCapturing())
+            processor.startCapture();
+        else if (!processor.finishCapture())
+            processor.cancelCapture();
+        timerCallback();
+    };
+    removeReferenceButton.onClick = [this] { processor.removeLastReference(); };
+    addChildComponent(tonalView);
+    refreshTargets();
+    channelsViewButton.setToggleState(true, juce::dontSendNotification);
+    showTonal(false);
+
     table.onSelect = [this](std::uint64_t owner) { select(owner); };
     issues.onSelect = [this](std::uint64_t owner) { select(owner == selected ? 0 : owner); };
     for (auto* view : std::initializer_list<juce::Component*> { &report, &table, &overlay, &issues })
@@ -127,6 +164,42 @@ BrainEditor::~BrainEditor()
     if (processor.isComparing())
         processor.setComparing(false);
     processor.setEditorOpen(false);
+}
+
+void BrainEditor::showTonal(bool tonal)
+{
+    overlay.setVisible(!tonal);
+    profilesButton.setVisible(!tonal);
+    overlayLabel.setVisible(false);
+    for (auto* c : std::initializer_list<juce::Component*> { &tonalView, &targetBox, &newTargetButton, &captureButton, &removeReferenceButton })
+        c->setVisible(tonal);
+    resized();
+}
+
+void BrainEditor::refreshTargets()
+{
+    targetBox.clear(juce::dontSendNotification);
+    const auto names = processor.targetNames();
+    targetBox.addItemList(names, 1);
+    const auto current = juce::String::fromUTF8(processor.target().name.c_str());
+    shownTarget = current;
+    const int index = names.indexOf(current);
+    if (index >= 0)
+        targetBox.setSelectedId(index + 1, juce::dontSendNotification);
+}
+
+void BrainEditor::askForNewTarget()
+{
+    nameDialog = std::make_unique<juce::AlertWindow>(pl("Nowy cel"), pl("Nazwa celu, np. „House 124”. Potem nagraj do niego referencje."),
+                                                     juce::MessageBoxIconType::NoIcon, this);
+    nameDialog->addTextEditor("name", {}, pl("Nazwa"));
+    nameDialog->addButton("OK", 1, juce::KeyPress(juce::KeyPress::returnKey));
+    nameDialog->addButton(pl("Anuluj"), 0, juce::KeyPress(juce::KeyPress::escapeKey));
+    nameDialog->enterModalState(true, juce::ModalCallbackFunction::create([this](int result) {
+        if (result == 1 && nameDialog != nullptr && processor.createTarget(nameDialog->getTextEditorContents("name")))
+            refreshTargets();
+        nameDialog.reset();
+    }));
 }
 
 void BrainEditor::select(std::uint64_t owner)
@@ -164,13 +237,39 @@ void BrainEditor::timerCallback()
     report.setItems(mix.report);
     table.setChannels(mix.channels, selected);
 
-    std::array<double, ma::SpectrumAnalyzer::kNumBands> bands {}, centres {};
-    for (int b = 0; b < ma::SpectrumAnalyzer::kNumBands; ++b)
+    std::array<double, ma::SpectrumAnalyzer::kMaxBands> bands {}, centres {};
+    const int masterBands = BrainProcessor::numMasterBands();
+    for (int b = 0; b < masterBands; ++b)
     {
         bands[static_cast<size_t>(b)] = processor.bandDb(b);
-        centres[static_cast<size_t>(b)] = ma::SpectrumAnalyzer::bandCentreHz(b);
+        centres[static_cast<size_t>(b)] = ma::SpectrumAnalyzer::bandCentreHz(ma::kTonalScale, b);
     }
-    overlay.setData(mix, selected, bands.data(), centres.data(), ma::SpectrumAnalyzer::kNumBands);
+    overlay.setData(mix, selected, bands.data(), centres.data(), masterBands);
+
+    const auto& target = processor.target();
+    const auto targetName = juce::String::fromUTF8(target.name.c_str());
+    if (shownTarget != targetName)
+        refreshTargets();
+    juce::String tonalStatus;
+    if (processor.isCapturing())
+        tonalStatus = pl("Nagrywam referencję do „") + targetName + pl("”: ") + juce::String(juce::roundToInt(processor.secondsAnalysed()))
+                      + pl(" s. Puść cały utwór (albo drop) na masterze i kliknij „Zakończ nagrywanie”.");
+    else if (targetName.isEmpty())
+        tonalStatus = pl("Utwórz cel („Nowy cel”) i nagraj do niego referencje, jak Capture w Tonal Balance.");
+    else if (!target.valid())
+        tonalStatus = pl("Cel „") + targetName + pl("” nie ma referencji. Kliknij „Nagraj referencję”.");
+    else if (!mix.tonal.valid)
+        tonalStatus = pl("Cel „") + targetName + "\" (" + juce::String(static_cast<int>(target.references.size()))
+                      + pl(" ref.). Słucham miksu: ") + juce::String(juce::roundToInt(processor.secondsAnalysed())) + " / "
+                      + juce::String(juce::roundToInt(BrainProcessor::kMinimumSeconds)) + " s";
+    else
+        tonalStatus = pl("Cel „") + targetName + "\" (" + juce::String(static_cast<int>(target.references.size()))
+                      + pl(" ref.), miks z ") + juce::String(juce::roundToInt(processor.secondsAnalysed())) + " s";
+    tonalView.setData(target, mix.tonal, tonalStatus);
+    captureButton.setButtonText(processor.isCapturing() ? pl("Zakończ nagrywanie") : pl("Nagraj referencję"));
+    captureButton.setToggleState(processor.isCapturing(), juce::dontSendNotification);
+    captureButton.setEnabled(targetName.isNotEmpty());
+    removeReferenceButton.setEnabled(!target.references.empty() && !processor.isCapturing());
 
     std::vector<brain::IssuesView::Line> lines;
     for (const auto& issue : mix.masking.issues)
@@ -257,11 +356,28 @@ void BrainEditor::resized()
     area.removeFromTop(4);
     table.setBounds(area.removeFromTop(190));
     area.removeFromTop(10);
-    auto overlayHeader = area.removeFromTop(22);
+    auto overlayHeader = area.removeFromTop(24);
+    channelsViewButton.setBounds(overlayHeader.removeFromLeft(90));
+    overlayHeader.removeFromLeft(4);
+    tonalViewButton.setBounds(overlayHeader.removeFromLeft(120));
     profilesButton.setBounds(overlayHeader.removeFromRight(170));
-    overlayLabel.setBounds(overlayHeader);
+    overlayLabel.setBounds({});
     area.removeFromTop(4);
-    overlay.setBounds(area.removeFromTop(250));
+    auto viewArea = area.removeFromTop(250);
+    overlay.setBounds(viewArea);
+    if (tonalView.isVisible())
+    {
+        auto controls = viewArea.removeFromTop(26);
+        targetBox.setBounds(controls.removeFromLeft(170));
+        controls.removeFromLeft(6);
+        newTargetButton.setBounds(controls.removeFromLeft(90));
+        controls.removeFromLeft(6);
+        captureButton.setBounds(controls.removeFromLeft(150));
+        controls.removeFromLeft(6);
+        removeReferenceButton.setBounds(controls.removeFromLeft(110));
+        viewArea.removeFromTop(4);
+        tonalView.setBounds(viewArea);
+    }
     area.removeFromTop(10);
     issuesLabel.setBounds(area.removeFromTop(22));
     area.removeFromTop(4);

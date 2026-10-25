@@ -25,6 +25,20 @@ juce::String hzText(double hz)
     return hz >= 1000.0 ? juce::String(hz / 1000.0, hz >= 10000.0 ? 0 : 1) + " kHz" : juce::String(juce::roundToInt(hz)) + " Hz";
 }
 
+// What usually lives in a band in house and trance, for advice when nothing in the mix does.
+juce::String arrangementHint(double hz)
+{
+    if (hz < 60.0)
+        return pl("sub bas albo dłuższy ogon stopy");
+    if (hz < 250.0)
+        return pl("bas, dół stopy");
+    if (hz < 2000.0)
+        return pl("pad, akordy, ciało wokalu albo leadu");
+    if (hz < 6000.0)
+        return pl("wokal, lead, clap, perkusjonalia");
+    return pl("hi-hat, shaker, ride, „powietrze” na wokalu");
+}
+
 juce::String joinNames(const juce::StringArray& names)
 {
     const int shown = juce::jmin(names.size(), 4);
@@ -43,6 +57,8 @@ BrainProcessor::BrainProcessor()
 {
     peakCeiling = parameters.getRawParameterValue(peakCeilingId);
     for (auto& b : bands)
+        b.store(-INFINITY);
+    for (auto& b : averageBands)
         b.store(-INFINITY);
     startTimerHz(kUpdateHz);
 }
@@ -80,7 +96,8 @@ void BrainProcessor::prepareToPlay(double sampleRate, int)
     const int channels = getTotalNumInputChannels();
     loudness.prepare(sampleRate, channels);
     truePeakMeter.prepare(channels);
-    spectrum.prepare(sampleRate);
+    spectrum.prepare(sampleRate, ma::kTonalScale);
+    hopSeconds = 2048.0 / sampleRate; // half of the analyser's 4096-point FFT
     correlation.prepare(sampleRate);
     stereo.store(channels >= 2);
     outputGain.reset(sampleRate, 0.1);
@@ -122,8 +139,13 @@ void BrainProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     truePeak.store(truePeakMeter.truePeakDb());
 
     const auto recent = spectrum.recentDb();
+    const auto average = spectrum.averageDb();
     for (size_t b = 0; b < bands.size(); ++b)
+    {
         bands[b].store(recent[b]);
+        averageBands[b].store(average[b]);
+    }
+    analysedSeconds.store(spectrum.framesAnalysed() * hopSeconds);
 
     // Loudness matching while comparing before/after; measurements above stay unaffected.
     outputGain.setTargetValue(juce::Decibels::decibelsToGain(outputGainDb.load()));
@@ -174,6 +196,9 @@ void BrainProcessor::timerCallback()
             masking[c].rawDb[static_cast<size_t>(b)] = channel.heardDb[static_cast<size_t>(b)];
     }
     mix.masking = ma::analyseMasking(masking);
+    mix.tonal = {};
+    if (currentTarget.valid() && !capturing && !comparing && secondsAnalysed() >= kMinimumSeconds)
+        mix.tonal = ma::compareToTarget(averageSpectrum(), currentTarget);
     updateLoudnessMatch(now);
     buildReport();
 }
@@ -351,6 +376,45 @@ void BrainProcessor::buildReport()
         report.push_back(item);
     }
 
+    // Tonal balance against the chosen target.
+    {
+        MixSnapshot::ReportItem item;
+        item.title = pl("Balans tonalny");
+        if (!currentTarget.valid())
+        {
+            item.detail = currentTarget.name.empty()
+                              ? pl("Wybierz albo utwórz cel i nagraj kilka referencji (widok „Balans tonalny”).")
+                              : pl("Cel nie ma jeszcze referencji. Nagraj co najmniej jedną.");
+        }
+        else if (capturing)
+        {
+            item.detail = pl("Nagrywam referencję...");
+        }
+        else if (!mix.tonal.valid)
+        {
+            item.detail = pl("Słucham miksu: potrzeba ") + juce::String(juce::roundToInt(kMinimumSeconds)) + pl(" s.");
+        }
+        else if (mix.tonal.regions.empty())
+        {
+            item.status = Status::good;
+            item.detail = pl("Cały miks mieści się w korytarzu celu ") + quoted(juce::String::fromUTF8(currentTarget.name.c_str())) + ".";
+        }
+        else
+        {
+            double worst = 0.0;
+            juce::StringArray parts;
+            for (const auto& region : mix.tonal.regions)
+            {
+                worst = std::max(worst, std::abs(region.deviationDb));
+                if (parts.size() < 3)
+                    parts.add((region.hole() ? pl("brakuje ") : pl("za dużo ")) + hzText(region.lowHz) + pl("–") + hzText(region.highHz));
+            }
+            item.status = worst >= 3.0 ? Status::problem : Status::warning;
+            item.detail = parts.joinIntoString(", ") + pl(". „Zaproponuj” podpowie, co zrobić.");
+        }
+        report.push_back(item);
+    }
+
     // Collisions.
     {
         int valid = 0;
@@ -408,6 +472,8 @@ void BrainProcessor::propose()
     if (over > 0.0)
         options.headroomGainDb = -std::ceil((over + 0.5) * 2.0) / 2.0;
 
+    if (mix.tonal.valid)
+        options.tonal = &mix.tonal;
     const auto solved = ma::solve(channels, options);
     currentProposal.crowdingBefore = solved.crowdingBefore;
     currentProposal.crowdingAfter = solved.crowdingAfter;
@@ -419,10 +485,33 @@ void BrainProcessor::propose()
     {
         Proposal::Item item;
         item.change = change;
+        const auto targetName = quoted(juce::String::fromUTF8(currentTarget.name.c_str()));
+        const auto range = hzText(change.lowHz) + pl("–") + hzText(change.highHz);
         if (change.kind == ma::SolverChange::Kind::globalGain)
         {
             item.text = pl("Wszystkie kanały: ") + juce::String(change.gainDb, 1) + pl(" dB, bo szczyt sumy jest ")
                         + juce::String(over, 1) + pl(" dB ponad limitem pre-master");
+        }
+        else if (change.kind == ma::SolverChange::Kind::tonalAdvice)
+        {
+            item.advisory = true;
+            item.selected = false;
+            item.text = pl("Dziura ") + range + pl(": żaden kanał tam nie gra. ");
+            if (change.sourceChannel >= 0)
+                item.text += pl("Saturacja albo exciter na ") + quoted(mix.channels[static_cast<size_t>(change.sourceChannel)].name)
+                             + pl(" doda harmoniczne w tym paśmie, albo ");
+            item.text += pl("dodaj element: ") + arrangementHint(std::sqrt(change.lowHz * change.highHz));
+        }
+        else if (change.kind == ma::SolverChange::Kind::tonalBoost || change.kind == ma::SolverChange::Kind::tonalCut)
+        {
+            const auto& channel = mix.channels[static_cast<size_t>(change.channel)];
+            item.owner = channel.owner;
+            item.band = solved.eq[static_cast<size_t>(change.channel)][static_cast<size_t>(change.eqSlot)];
+            const bool boost = change.kind == ma::SolverChange::Kind::tonalBoost;
+            item.text = quoted(channel.name) + ": " + (boost ? "+" : "") + juce::String(change.gainDb, 1) + pl(" dB przy ")
+                        + hzText(item.band.hz) + " (Q " + juce::String(item.band.q, 1) + pl("), bo w ") + range
+                        + (boost ? pl(" brakuje ") : pl(" jest ")) + juce::String(std::abs(change.deviationDb), 1)
+                        + (boost ? pl(" dB do celu ") : pl(" dB za dużo względem celu ")) + targetName;
         }
         else
         {
@@ -446,8 +535,111 @@ void BrainProcessor::propose()
 
 void BrainProcessor::toggleProposalItem(int index)
 {
-    if (index >= 0 && index < static_cast<int>(currentProposal.items.size()))
-        currentProposal.items[static_cast<size_t>(index)].selected = !currentProposal.items[static_cast<size_t>(index)].selected;
+    if (index < 0 || index >= static_cast<int>(currentProposal.items.size()))
+        return;
+    auto& item = currentProposal.items[static_cast<size_t>(index)];
+    if (!item.advisory)
+        item.selected = !item.selected;
+}
+
+ma::Curve BrainProcessor::averageSpectrum() const
+{
+    ma::Curve out {};
+    for (size_t b = 0; b < out.size(); ++b)
+        out[b] = averageBands[b].load();
+    return out;
+}
+
+juce::File BrainProcessor::targetFolder()
+{
+    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+        .getChildFile("MixAssistant")
+        .getChildFile("targets");
+}
+
+juce::StringArray BrainProcessor::targetNames() const
+{
+    juce::StringArray names;
+    for (const auto& file : targetFolder().findChildFiles(juce::File::findFiles, false, "*.matarget"))
+    {
+        ma::TonalTarget t;
+        if (ma::parseTarget(file.loadFileAsString().toStdString(), t))
+            names.add(juce::String::fromUTF8(t.name.c_str()));
+    }
+    names.sortNatural();
+    return names;
+}
+
+bool BrainProcessor::selectTarget(const juce::String& name)
+{
+    for (const auto& file : targetFolder().findChildFiles(juce::File::findFiles, false, "*.matarget"))
+    {
+        ma::TonalTarget t;
+        if (ma::parseTarget(file.loadFileAsString().toStdString(), t) && juce::String::fromUTF8(t.name.c_str()) == name)
+        {
+            currentTarget = t;
+            parameters.state.setProperty("target", name, nullptr);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool BrainProcessor::createTarget(const juce::String& name)
+{
+    const auto trimmed = name.trim();
+    if (trimmed.isEmpty() || targetNames().contains(trimmed))
+        return false;
+    currentTarget = {};
+    currentTarget.name = trimmed.toStdString();
+    parameters.state.setProperty("target", trimmed, nullptr);
+    saveTarget();
+    return true;
+}
+
+void BrainProcessor::saveTarget()
+{
+    if (currentTarget.name.empty())
+        return;
+    const auto folder = targetFolder();
+    folder.createDirectory();
+    const auto fileName = juce::File::createLegalFileName(juce::String::fromUTF8(currentTarget.name.c_str())) + ".matarget";
+    folder.getChildFile(fileName).replaceWithText(ma::serialiseTarget(currentTarget), false, false, "\n");
+}
+
+void BrainProcessor::removeLastReference()
+{
+    if (currentTarget.references.empty())
+        return;
+    currentTarget.references.pop_back();
+    currentTarget.rebuild();
+    saveTarget();
+}
+
+void BrainProcessor::startCapture()
+{
+    if (comparing)
+        setComparing(false);
+    capturing = true;
+    requestReset();
+}
+
+bool BrainProcessor::finishCapture()
+{
+    if (!capturing || currentTarget.name.empty() || secondsAnalysed() < kMinimumSeconds)
+        return false;
+    capturing = false;
+    currentTarget.references.push_back(ma::normaliseCurve(averageSpectrum()));
+    currentTarget.rebuild();
+    saveTarget();
+    requestReset(); // the mix is measured from scratch again
+    return true;
+}
+
+void BrainProcessor::cancelCapture()
+{
+    capturing = false;
+    requestReset();
 }
 
 void BrainProcessor::sendCommand(std::uint64_t owner, const ma::bus::Command& command)
@@ -483,7 +675,10 @@ int BrainProcessor::applySelected()
         bool eqChanges = false;
         for (const auto& item : currentProposal.items)
         {
-            if (!item.selected || item.change.kind != ma::SolverChange::Kind::eqCut || item.owner != channel.owner)
+            const bool eqKind = item.change.kind == ma::SolverChange::Kind::eqCut
+                                || item.change.kind == ma::SolverChange::Kind::tonalBoost
+                                || item.change.kind == ma::SolverChange::Kind::tonalCut;
+            if (!item.selected || !eqKind || item.owner != channel.owner)
                 continue;
             if (proposed != currentProposal.eq.end())
                 eq[static_cast<size_t>(item.change.eqSlot)] = proposed->second[static_cast<size_t>(item.change.eqSlot)];
@@ -583,7 +778,12 @@ void BrainProcessor::setStateInformation(const void* data, int sizeInBytes)
 {
     if (auto xml = getXmlFromBinary(data, sizeInBytes))
         if (xml->hasTagName(parameters.state.getType()))
+        {
             parameters.replaceState(juce::ValueTree::fromXml(*xml));
+            const auto name = parameters.state.getProperty("target").toString();
+            if (name.isNotEmpty())
+                selectTarget(name);
+        }
 }
 
 juce::AudioProcessorEditor* BrainProcessor::createEditor()

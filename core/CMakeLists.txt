@@ -12,7 +12,8 @@ add_library(ma_core STATIC
     src/Masking.cpp
     src/CorrelationMeter.cpp
     src/ChannelEq.cpp
-    src/Solver.cpp)
+    src/Solver.cpp
+    src/TonalBalance.cpp)
 target_include_directories(ma_core PUBLIC include)
 
 # WAV reading/writing, used by the lab and tests only.

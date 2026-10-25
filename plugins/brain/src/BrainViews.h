@@ -288,8 +288,130 @@ private:
     std::vector<MixSnapshot::Channel> channels;
     std::vector<int> crowding;
     std::uint64_t selected = 0;
-    std::array<double, ma::SpectrumAnalyzer::kNumBands> master {}, masterCentres {};
+    std::array<double, ma::SpectrumAnalyzer::kMaxBands> master {}, masterCentres {};
     int numMaster = 0;
+};
+
+// The mix against the tonal target: corridor, its centre and the mix, holes in red,
+// excesses in amber. Curves are normalised, so this shows shape, not level.
+class TonalView : public juce::Component
+{
+public:
+    void setData(const ma::TonalTarget& newTarget, const ma::TonalComparison& newComparison, const juce::String& newStatus)
+    {
+        target = newTarget;
+        comparison = newComparison;
+        status = newStatus;
+        repaint();
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        namespace colours = ma::ui::colours;
+        auto area = getLocalBounds().toFloat();
+        g.setColour(colours::panel);
+        g.fillRoundedRectangle(area, 4.0f);
+        auto plot = area.reduced(8.0f, 6.0f);
+        const auto labels = plot.removeFromBottom(14.0f);
+
+        const int n = ma::SpectrumAnalyzer::numBandsFor(ma::kTonalScale);
+        const auto hz = [](int b) { return ma::SpectrumAnalyzer::bandCentreHz(ma::kTonalScale, b); };
+
+        // Fit the curves: 6 dB grid, a little room above, at most 48 dB tall.
+        double highest = 6.0, lowest = -12.0;
+        for (int b = 0; b < n; ++b)
+        {
+            const auto i = static_cast<size_t>(b);
+            if (target.valid())
+            {
+                highest = std::max(highest, target.high[i]);
+                lowest = std::min(lowest, target.low[i]);
+            }
+            if (comparison.valid && comparison.mixDb[i] > -100.0)
+            {
+                highest = std::max(highest, comparison.mixDb[i]);
+                lowest = std::min(lowest, comparison.mixDb[i]);
+            }
+        }
+        const double top = std::ceil((highest + 4.0) / 6.0) * 6.0;
+        const double bottom = std::max(top - 48.0, std::floor((lowest - 3.0) / 6.0) * 6.0);
+        const auto xOf = [&plot](double f) {
+            return plot.getX() + static_cast<float>(plot.getWidth() * std::log(f / 20.0) / std::log(1000.0));
+        };
+        const auto yOf = [&plot, top, bottom](double db) {
+            return plot.getY() + static_cast<float>(plot.getHeight() * (top - juce::jlimit(bottom, top, db)) / (top - bottom));
+        };
+        g.setColour(colours::quiet.withAlpha(0.2f));
+        for (double db = top - 6.0; db >= bottom; db -= 6.0)
+            g.drawHorizontalLine(juce::roundToInt(yOf(db)), plot.getX(), plot.getRight());
+
+        if (comparison.valid)
+            for (const auto& region : comparison.regions)
+            {
+                g.setColour((region.hole() ? colours::critical : colours::warning).withAlpha(0.16f));
+                g.fillRect(juce::Rectangle<float>::leftTopRightBottom(xOf(region.lowHz), plot.getY(), xOf(region.highHz), plot.getBottom()));
+            }
+
+        if (target.valid())
+        {
+            juce::Path corridor;
+            corridor.startNewSubPath(xOf(hz(0)), yOf(target.high[0]));
+            for (int b = 1; b < n; ++b)
+                corridor.lineTo(xOf(hz(b)), yOf(target.high[static_cast<size_t>(b)]));
+            for (int b = n - 1; b >= 0; --b)
+                corridor.lineTo(xOf(hz(b)), yOf(target.low[static_cast<size_t>(b)]));
+            corridor.closeSubPath();
+            g.setColour(colours::accent.withAlpha(0.22f));
+            g.fillPath(corridor);
+            g.setColour(colours::accent.withAlpha(0.6f));
+            g.strokePath(corridor, juce::PathStrokeType(1.0f));
+            g.strokePath(line(target.centre, n, xOf, yOf, hz), juce::PathStrokeType(1.0f, juce::PathStrokeType::curved),
+                         juce::AffineTransform());
+        }
+        if (comparison.valid)
+        {
+            g.setColour(colours::text);
+            g.strokePath(line(comparison.mixDb, n, xOf, yOf, hz), juce::PathStrokeType(2.2f));
+        }
+
+        g.setColour(colours::quiet);
+        g.setFont(juce::FontOptions(10.0f));
+        for (double f : { 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0 })
+        {
+            const auto text = f >= 1000.0 ? juce::String(juce::roundToInt(f / 1000.0)) + "k" : juce::String(juce::roundToInt(f));
+            g.drawText(text, juce::Rectangle<float>(xOf(f) - 16.0f, labels.getY(), 32.0f, 14.0f), juce::Justification::centred);
+        }
+        g.setFont(juce::FontOptions(12.5f));
+        g.drawText(status, plot.reduced(6.0f, 2.0f).removeFromTop(16.0f), juce::Justification::topLeft);
+    }
+
+private:
+    template <typename X, typename Y, typename H>
+    static juce::Path line(const ma::Curve& curve, int n, X xOf, Y yOf, H hz)
+    {
+        juce::Path p;
+        bool started = false;
+        for (int b = 0; b < n; ++b)
+        {
+            const double v = curve[static_cast<size_t>(b)];
+            if (v < -100.0)
+            {
+                started = false;
+                continue;
+            }
+            const juce::Point<float> point { xOf(hz(b)), yOf(v) };
+            if (!started)
+                p.startNewSubPath(point);
+            else
+                p.lineTo(point);
+            started = true;
+        }
+        return p;
+    }
+
+    ma::TonalTarget target;
+    ma::TonalComparison comparison;
+    juce::String status;
 };
 
 // Collisions in plain words, most important first. Clicking one highlights the masker.
@@ -367,7 +489,7 @@ public:
     {
         items.clear();
         for (const auto& item : proposal.items)
-            items.push_back({ item.text, item.selected });
+            items.push_back({ item.text, item.selected, item.advisory });
         made = proposal.made;
         repaint();
     }
@@ -396,6 +518,14 @@ public:
             if (row.getBottom() > getHeight())
                 break;
             const auto box = row.removeFromLeft(16.0f).withSizeKeepingCentre(12.0f, 12.0f);
+            if (item.advisory)
+            {
+                g.setColour(colours::warning);
+                g.drawText("i", box, juce::Justification::centred);
+                row.removeFromLeft(6.0f);
+                g.drawText(item.text, row, juce::Justification::centredLeft, true);
+                continue;
+            }
             g.setColour(colours::quiet);
             g.drawRoundedRectangle(box, 2.0f, 1.2f);
             if (item.selected)
@@ -421,6 +551,7 @@ private:
     {
         juce::String text;
         bool selected = true;
+        bool advisory = false;
     };
     static constexpr float rowHeight = 22.0f;
     std::vector<Line> items;
