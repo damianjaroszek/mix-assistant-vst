@@ -1,6 +1,7 @@
 #pragma once
 
 #include "BrainProcessor.h"
+#include "BrainViews.h"
 #include "MaUi.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -16,16 +17,24 @@ public:
 
 private:
     void timerCallback() override;
+    void select(std::uint64_t owner);
 
     BrainProcessor& processor;
+    std::uint64_t selected = 0;
 
-    juce::Label title;
+    juce::Label title, agentsLabel;
     juce::Label integratedLabel, integratedValue, shortTermLabel, shortTermValue;
     juce::Label truePeakLabel, truePeakValue, plrLabel, plrValue;
-    juce::Label ceilingLabel, headroomStatus;
+    juce::Label lowCorrelationLabel, lowCorrelationValue, fullCorrelationLabel, fullCorrelationValue;
+    juce::Label ceilingLabel, reportLabel, channelsLabel, overlayLabel, issuesLabel;
     juce::Slider ceilingSlider;
     juce::TextButton resetButton;
-    ma::ui::SpectrumView spectrumView;
+    juce::ToggleButton profilesButton;
+
+    brain::ReportView report;
+    brain::ChannelTable table;
+    brain::OverlayView overlay;
+    brain::IssuesView issues;
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> ceilingAttachment;
 

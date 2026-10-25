@@ -14,6 +14,13 @@ inline juce::String pl(const char* utf8)
     return juce::String::fromUTF8(utf8);
 }
 
+// Channel roles, in the order of the Agent's "role" parameter (the index travels to the Brain).
+inline juce::StringArray roleNames()
+{
+    return { pl("Inny"), pl("Stopa"), pl("Bas"), pl("Perkusja"), pl("Wokal"), pl("Lead"),
+             pl("Pad"), pl("Efekty"), pl("Bus"), pl("Wysyłka (pogłos, delay)") };
+}
+
 inline juce::String formatDb(double db, const char* unit, int decimals = 1)
 {
     if (!std::isfinite(db))

@@ -46,6 +46,17 @@ SpectrumAnalyzer::Bands equalLoudnessWeights(const SpectrumAnalyzer& layout, dou
     return weights;
 }
 
+const SpectrumAnalyzer::Bands& erbEqualLoudnessWeights()
+{
+    static const SpectrumAnalyzer::Bands weights = [] {
+        SpectrumAnalyzer::Bands w {};
+        for (int b = 0; b < SpectrumAnalyzer::numBandsFor(BandScale::erb); ++b)
+            w[static_cast<size_t>(b)] = equalLoudnessWeightDb(SpectrumAnalyzer::bandCentreHz(BandScale::erb, b));
+        return w;
+    }();
+    return weights;
+}
+
 void applyWeights(SpectrumAnalyzer::Bands& bands, const SpectrumAnalyzer::Bands& weights, int numBands)
 {
     for (int b = 0; b < numBands; ++b)

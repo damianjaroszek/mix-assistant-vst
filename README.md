@@ -10,13 +10,18 @@ Koncepcja, architektura i plan faz: [rewizja koncepcji](https://claude.ai/artifa
 
 | Część | Gdzie | Co robi |
 | --- | --- | --- |
-| **Agent** | `plugins/agent` | Wtyczka na końcu każdego kanału. Ma rolę (stopa, bas, wokal...) i priorytet. „Naucz poziom” mierzy fragment utworu (RMS albo LUFS, true peak, widmo w pasmach ERB), kończy sam po ustawionym czasie i ustawia trim do poziomu docelowego (domyślnie -18 dBFS RMS), nigdy nie przekraczając limitu szczytu (domyślnie -1 dBTP). Pokazuje widmo ważone krzywą jednakowej głośności (ISO 226), czyli tak, jak słyszy je ucho; nauczony profil zapisuje się w projekcie. |
-| **Mózg** | `plugins/brain` | Wtyczka na końcu mastera. Mierzy sumę: LUFS (integrated, short-term), true peak, PLR, widmo w 31 pasmach 1/3 oktawy i sprawdza zapas na mastering. |
-| **Rdzeń DSP** | `core` | Pomiary wspólne dla wtyczek i laboratorium, bez zależności od JUCE: LUFS wg ITU-R BS.1770-4, true peak (4x oversampling), RMS z bramką, widmo w pasmach 1/3 oktawy albo ERB, krzywe jednakowej głośności ISO 226:2003. |
+| **Agent** | `plugins/agent` | Wtyczka na końcu każdego kanału. Ma rolę (stopa, bas, wokal...) i priorytet. „Naucz poziom” mierzy fragment utworu (RMS albo LUFS, true peak, widmo w pasmach ERB), kończy sam po ustawionym czasie i ustawia trim do poziomu docelowego (domyślnie -18 dBFS RMS), nigdy nie przekraczając limitu szczytu (domyślnie -1 dBTP). Pokazuje widmo ważone krzywą jednakowej głośności (ISO 226), czyli tak, jak słyszy je ucho; nauczony profil zapisuje się w projekcie. Wysyła swoje pomiary do Mózgu; nazwa kanału to nazwa ścieżki z FL albo własna, wpisana w oknie. |
+| **Mózg** | `plugins/brain` | Wtyczka na końcu mastera. Mierzy sumę: LUFS (integrated, short-term), true peak, PLR, widmo w 31 pasmach 1/3 oktawy, korelację fazy (całość i dół poniżej 120 Hz). Widzi wszystkich Agentów: tabela kanałów, nałożone widma (tak, jak słyszy ucho), pasek „tłoku” w pasmach, lista kolizji („Pad zasłania Stopę w 200–600 Hz”) i raport poprawności. Kolizje liczy z tego, co gra teraz (uśrednione z ok. 3 s) albo z nauczonych profili. |
+| **Rdzeń DSP** | `core` | Pomiary wspólne dla wtyczek i laboratorium, bez zależności od JUCE: LUFS wg ITU-R BS.1770-4, true peak (4x oversampling), RMS z bramką, widmo w pasmach 1/3 oktawy albo ERB, krzywe jednakowej głośności ISO 226:2003, model maskowania między kanałami, korelacja fazy, kanał danych Agent ↔ Mózg. |
 | **Laboratorium** | `lab` | `ma-lab`: ta sama analiza na stemach WAV wyeksportowanych z FL, plus analiza ich sumy. |
 | **Testy** | `tests` | Testy rdzenia, m.in. przypadki z EBU Tech 3341. |
 
-Komunikacja Agentów z Mózgiem przychodzi w fazie 2.
+Agenci i Mózg rozmawiają przez mały plik w pamięci współdzielonej
+(`%TEMP%\MixAssistant\session-v1.bin`), więc działa to także, gdy FL uruchamia wtyczki
+w osobnych procesach (tryb bridged). Idą nim tylko wolne dane, kilka razy na sekundę.
+Kolizja liczy się tylko wtedy, gdy mniej ważny kanał (wyższa liczba priorytetu) zasłania
+ważniejszy albo równie ważny. Agent powinien stać na końcu łańcucha kanału, a suwak
+kanału w mikserze FL najlepiej zostawić na 0 dB: Mózg nie widzi suwaków.
 
 ## Pobranie gotowych wtyczek
 

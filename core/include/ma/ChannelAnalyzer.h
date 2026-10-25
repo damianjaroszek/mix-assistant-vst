@@ -41,6 +41,9 @@ private:
 // 1 kHz). Compute once after prepare(): it is too slow for every audio block.
 SpectrumAnalyzer::Bands equalLoudnessWeights(const SpectrumAnalyzer& layout, double phon = 80.0);
 
+// The same weights for the ERB layout, computed once per process.
+const SpectrumAnalyzer::Bands& erbEqualLoudnessWeights();
+
 // Subtracts the weights from band levels in place.
 void applyWeights(SpectrumAnalyzer::Bands& bands, const SpectrumAnalyzer::Bands& weights, int numBands);
 

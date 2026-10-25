@@ -51,6 +51,13 @@ double SpectrumAnalyzer::bandCentreHz(BandScale scale, int band)
     return erbRateToHz(kErbLow + (band + 0.5) * kErbStep);
 }
 
+double SpectrumAnalyzer::bandEdgeHz(BandScale scale, int edge)
+{
+    if (scale == BandScale::thirdOctave)
+        return 1000.0 * std::pow(2.0, (edge - kBandOf1kHz - 0.5) / 3.0);
+    return erbRateToHz(kErbLow + edge * kErbStep);
+}
+
 void SpectrumAnalyzer::prepare(double newSampleRate, BandScale newScale, int fftOrder)
 {
     bandScale = newScale;

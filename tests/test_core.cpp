@@ -5,6 +5,9 @@
 #include "ma/EqualLoudness.h"
 #include "ma/GainStaging.h"
 #include "ma/LevelStats.h"
+#include "ma/Masking.h"
+#include "ma/MixBus.h"
+#include "ma/CorrelationMeter.h"
 #include "ma/LoudnessMeter.h"
 #include "ma/SpectrumAnalyzer.h"
 #include "ma/TruePeakMeter.h"
@@ -13,7 +16,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -164,6 +169,10 @@ void testErbSpectrum()
 {
     checkNear(ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, 0), 33.5, 2.0, "lowest ERB band sits just above 20 Hz");
     check(ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, 39) < 20000.0, "highest ERB band stays below 20 kHz");
+    checkNear(ma::SpectrumAnalyzer::bandEdgeHz(ma::BandScale::erb, 0), 20.0, 0.01, "ERB bands start at 20 Hz");
+    checkNear(ma::SpectrumAnalyzer::bandEdgeHz(ma::BandScale::erb, 40), 20000.0, 0.5, "ERB bands end at 20 kHz");
+    checkNear(ma::SpectrumAnalyzer::bandEdgeHz(ma::BandScale::thirdOctave, 17) * std::pow(2.0, 1.0 / 6.0), 1000.0, 0.01,
+              "third-octave edges sit a sixth of an octave from the centre");
 
     // ERB bands are narrow in Hz at the bottom and wide at the top, like the ear.
     const double lowWidth = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, 1) - ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, 0);
@@ -240,6 +249,106 @@ void testChannelAnalyzerSpeed()
     check(std::isfinite(analyzer.integratedLufs()) && analyzer.gatedSeconds() > 59.0, "analyser measured the whole passage");
 }
 
+void testMixBus()
+{
+    auto region = std::make_unique<ma::bus::Region>();
+    std::memset(static_cast<void*>(region.get()), 0, sizeof(ma::bus::Region));
+    ma::bus::initialise(*region);
+    check(region->header.magic.load() == ma::bus::kMagic, "shared region initialises");
+
+    const int a = ma::bus::claimSlot(*region, 111, 1000);
+    const int b = ma::bus::claimSlot(*region, 222, 1000);
+    check(a >= 0 && b >= 0 && a != b, "two Agents get two slots");
+    check(ma::bus::claimSlot(*region, 111, 1100) == a, "an Agent gets its own slot back");
+
+    ma::bus::AgentData data {};
+    std::strncpy(data.name, "Kick", sizeof(data.name) - 1);
+    data.priority = 1;
+    data.liveDb[3] = -12.5f;
+    ma::bus::publish(region->slots[a], data, 1200);
+
+    ma::bus::AgentData out {};
+    check(ma::bus::read(region->slots[a], out, 1300), "Brain reads a published slot");
+    check(std::string(out.name) == "Kick" && out.priority == 1 && out.liveDb[3] == -12.5f, "slot data arrives intact");
+    check(!ma::bus::read(region->slots[a], out, 1200 + ma::bus::kAliveTimeoutMs + 1), "a silent Agent drops out");
+
+    // An abandoned slot (crashed instance) is reused after the timeout.
+    const int c = ma::bus::claimSlot(*region, 333, 1200 + ma::bus::kAliveTimeoutMs + 500);
+    check(c == a || c == b, "abandoned slots are reclaimed");
+
+    ma::bus::releaseSlot(*region, b, 222);
+    check(region->slots[b].owner.load() == 0 || c == b, "released slot is free");
+}
+
+ma::MaskingChannel band(double lowHz, double highHz, double db, int priority)
+{
+    ma::MaskingChannel ch;
+    ch.priority = priority;
+    ch.valid = true;
+    ch.rawDb.fill(-120.0);
+    for (int b = 0; b < ma::SpectrumAnalyzer::numBandsFor(ma::BandScale::erb); ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        if (hz >= lowHz && hz <= highHz)
+            ch.rawDb[static_cast<size_t>(b)] = db;
+    }
+    return ch;
+}
+
+void testMasking()
+{
+    // Kick (priority 1) at 45-90 Hz, a louder bass (priority 2) at 45-250 Hz, hi-hats up top.
+    const std::vector<ma::MaskingChannel> channels { band(45.0, 90.0, -14.0, 1), band(45.0, 250.0, -6.0, 2),
+                                                     band(8000.0, 14000.0, -24.0, 3) };
+    const auto r = ma::analyseMasking(channels);
+
+    check(r.amount[1][0] > 0.6, "loud bass masks the kick");
+    check(r.amount[0][1] < r.amount[1][0], "the kick masks the bass less than the other way round");
+    check(r.amount[2][0] < 0.05 && r.amount[0][2] < 0.05, "hi-hats and kick do not mask each other");
+    check(!r.issues.empty() && r.issues.front().masker == 1 && r.issues.front().masked == 0, "top issue: bass covers kick");
+    if (!r.issues.empty())
+        check(r.issues.front().lowHz < 60.0 && r.issues.front().highHz > 70.0, "issue names the kick's low band");
+
+    bool reverse = false;
+    for (const auto& issue : r.issues)
+        reverse = reverse || (issue.masker == 0 && issue.masked == 1);
+    check(!reverse, "a more important channel masking a less important one is not an issue");
+}
+
+void testCorrelation()
+{
+    const auto a = sine(48000.0, 3.0, 2, 60.0, 0.5);
+    ma::CorrelationMeter mono;
+    mono.prepare(48000.0);
+    mono.process(a.channels[0].data(), a.channels[1].data(), a.numSamples());
+    checkNear(mono.lowBand(), 1.0, 0.01, "identical channels are mono in the low band");
+    checkNear(mono.fullBand(), 1.0, 0.01, "identical channels are mono full band");
+
+    std::vector<float> inverted(a.channels[1]);
+    for (auto& v : inverted)
+        v = -v;
+    ma::CorrelationMeter flipped;
+    flipped.prepare(48000.0);
+    flipped.process(a.channels[0].data(), inverted.data(), a.numSamples());
+    checkNear(flipped.lowBand(), -1.0, 0.01, "polarity-flipped bass reads -1");
+
+    // Wide highs, mono lows: the low band still reads mono.
+    const auto lowPart = sine(48000.0, 3.0, 1, 50.0, 0.5);
+    const auto highL = sine(48000.0, 3.0, 1, 5000.0, 0.3);
+    const auto highR = sine(48000.0, 3.0, 1, 5000.0, 0.3, kPi / 2.0);
+    std::vector<float> l(lowPart.channels[0]), rr(lowPart.channels[0]);
+    for (size_t i = 0; i < l.size(); ++i)
+    {
+        l[i] += highL.channels[0][i];
+        rr[i] += highR.channels[0][i];
+    }
+    ma::CorrelationMeter wide;
+    wide.prepare(48000.0);
+    wide.process(l.data(), rr.data(), static_cast<int>(l.size()));
+    check(wide.lowBand() > 0.95, "wide highs do not spoil the low-band reading");
+    check(wide.fullBand() < wide.lowBand(), "full band shows the width");
+}
+
 void testWavRoundTrip()
 {
     const auto a = sine(44100.0, 0.5, 2, 440.0, 0.25);
@@ -261,6 +370,9 @@ int main()
     testEqualLoudness();
     testTrimPlan();
     testChannelAnalyzerSpeed();
+    testMixBus();
+    testMasking();
+    testCorrelation();
     testWavRoundTrip();
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "OK" : "FAILED", failures, failures == 1 ? "" : "s");
