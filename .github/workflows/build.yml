@@ -1,0 +1,43 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  core:
+    name: Core tests (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DMA_BUILD_PLUGINS=OFF
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  windows:
+    name: Plugins (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -A x64
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Collect artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item -Recurse "build/plugins/agent/MixAssistantAgent_artefacts/Release/VST3/Mix Assistant Agent.vst3" dist/
+          Copy-Item -Recurse "build/plugins/brain/MixAssistantBrain_artefacts/Release/VST3/Mix Assistant Brain.vst3" dist/
+          Copy-Item build/lab/Release/ma-lab.exe dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mix-assistant-windows
+          path: dist/
