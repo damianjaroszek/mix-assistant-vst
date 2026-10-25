@@ -30,11 +30,16 @@ private:
     juce::Slider ceilingSlider;
     juce::TextButton resetButton;
     juce::ToggleButton profilesButton;
-    juce::TextButton channelsViewButton, tonalViewButton;
+    juce::TextButton channelsViewButton, tonalViewButton, translationViewButton;
+    brain::TranslationView translationView;
+    juce::Label previewLabel;
+    juce::ComboBox previewBox;
     juce::ComboBox targetBox;
     juce::TextButton newTargetButton, captureButton, removeReferenceButton;
     brain::TonalView tonalView;
-    void showTonal(bool tonal);
+    enum class View { channels, tonal, translation };
+    void showView(View view);
+    View currentView = View::channels;
     void refreshTargets();
     void askForNewTarget();
     std::unique_ptr<juce::AlertWindow> nameDialog;
@@ -43,6 +48,8 @@ private:
     juce::Label proposalLabel, proposalStatus;
     juce::TextButton proposeButton, applyButton, undoButton, compareButton;
     brain::ProposalView proposalView;
+    juce::Viewport proposalViewport;
+    void layoutProposal();
 
     brain::ReportView report;
     brain::ChannelTable table;

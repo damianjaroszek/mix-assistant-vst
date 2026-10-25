@@ -6,6 +6,7 @@
 #include "ma/Masking.h"
 #include "ma/Solver.h"
 #include "ma/TonalBalance.h"
+#include "ma/Translation.h"
 #include "ma/SpectrumAnalyzer.h"
 #include "ma/TruePeakMeter.h"
 
@@ -38,6 +39,9 @@ struct MixSnapshot
         // ... and with it (what the mix hears).
         std::array<double, ma::bus::kBands> heardDb {};
         bool spectrumValid = false;
+        // Measured after the Agent's whole chain (harmonics and duck included), for translation.
+        std::array<double, ma::bus::kBands> outputDb {};
+        bool outputValid = false;
     };
 
     struct ReportItem
@@ -51,6 +55,7 @@ struct MixSnapshot
     ma::MaskingResult masking;
     std::vector<ReportItem> report;
     ma::TonalComparison tonal; // valid once a target is chosen and enough of the mix was heard
+    ma::TranslationResult translation; // per channel, as `channels`
 };
 
 // The solver's proposal, waiting for the user to pick what to apply.
@@ -71,11 +76,13 @@ struct Proposal
         {
             solver,
             duck,
-            polarity
+            polarity,
+            harmonics
         };
         Action action = Action::solver;
         ma::DuckSettings duck {};
         int duckSync = 0;
+        ma::HarmonicSettings harmonics {};
     };
 
     std::vector<Item> items;
@@ -132,6 +139,12 @@ public:
     double fullCorrelation() const { return correlationFull.load(); }
     double tempoBpm() const { return hostBpm.load(); } // 0 until the host reports it
 
+    // Listening through a simulated playback system (phase 5). Not saved with the project,
+    // so a forgotten preview never ends up in a render after reopening it.
+    static juce::StringArray systemNames();
+    void setPreviewSystem(int index) { previewSystem.store(juce::jlimit(0, ma::kPlaybackSystems - 1, index)); }
+    int previewSystemIndex() const { return previewSystem.load(); }
+
     const MixSnapshot& snapshot() const { return mix; }
     // Collision analysis on the learned profiles instead of the live spectra.
     bool usesLearnedProfiles() const { return useProfiles; }
@@ -177,6 +190,7 @@ private:
     void updateLoudnessMatch(std::uint64_t now);
     void sendCommand(std::uint64_t owner, const ma::bus::Command& command);
     void proposeDynamics();
+    void proposeHarmonics();
     juce::String kickName() const; // the channel most likely feeding the sidechains
     static juce::File targetFolder();
     void saveTarget();
@@ -201,6 +215,8 @@ private:
     std::atomic<double> correlationFull { 1.0 };
     std::atomic<bool> stereo { true };
     std::atomic<double> hostBpm { 0.0 };
+    std::atomic<int> previewSystem { 0 };
+    ma::SystemSimulator simulator;
     std::atomic<float> outputGainDb { 0.0f };
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> outputGain;
 

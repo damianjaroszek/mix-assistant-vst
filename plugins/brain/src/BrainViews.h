@@ -479,6 +479,94 @@ private:
     std::vector<Line> lines;
 };
 
+// How each channel's share of the mix moves on other playback systems: one row per channel,
+// one column per system. Around 0 dB the channel translates; far below it disappears there.
+class TranslationView : public juce::Component
+{
+public:
+    void setData(const MixSnapshot& mix)
+    {
+        rows.clear();
+        for (size_t c = 0; c < mix.channels.size(); ++c)
+        {
+            Row row;
+            row.name = mix.channels[c].name;
+            row.valid = mix.translation.valid && c < mix.translation.shareChangeDb.size();
+            if (row.valid)
+                row.change = mix.translation.shareChangeDb[c];
+            rows.push_back(row);
+        }
+        valid = mix.translation.valid;
+        repaint();
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        namespace colours = ma::ui::colours;
+        using ma::ui::pl;
+        auto area = getLocalBounds().toFloat();
+        g.setColour(colours::panel);
+        g.fillRoundedRectangle(area, 4.0f);
+        area.reduce(10.0f, 6.0f);
+        g.setFont(juce::FontOptions(13.0f));
+        if (!valid)
+        {
+            g.setColour(colours::quiet);
+            g.drawText(pl("Puść utwór: translacja liczy się z co najmniej dwóch grających kanałów."), area, juce::Justification::topLeft);
+            return;
+        }
+
+        const float nameWidth = 150.0f;
+        const int columns = ma::kPlaybackSystems - 1; // full range is the reference
+        const float columnWidth = (area.getWidth() - nameWidth) / static_cast<float>(columns);
+        auto header = area.removeFromTop(20.0f);
+        g.setColour(colours::quiet);
+        g.drawText(pl("Kanał"), header.removeFromLeft(nameWidth), juce::Justification::centredLeft);
+        const juce::StringArray shortNames { {}, pl("Telefon"), pl("Laptop"), pl("Douszne"), pl("Samochód"), pl("Klub (mono)") };
+        for (int s = 1; s <= columns; ++s)
+            g.drawText(shortNames[s], header.removeFromLeft(columnWidth), juce::Justification::centred);
+        area.removeFromTop(4.0f);
+
+        for (size_t r = 0; r < rows.size(); ++r)
+        {
+            auto line = area.removeFromTop(22.0f);
+            if (line.getBottom() > static_cast<float>(getHeight()))
+                break;
+            g.setColour(channelColour(static_cast<int>(r)));
+            g.fillRect(line.getX(), line.getY() + 5.0f, 3.0f, 12.0f);
+            g.setColour(colours::text);
+            g.drawText(rows[r].name, line.removeFromLeft(nameWidth).withTrimmedLeft(8.0f), juce::Justification::centredLeft, true);
+            for (int s = 1; s <= columns; ++s)
+            {
+                auto cell = line.removeFromLeft(columnWidth).reduced(4.0f, 2.0f);
+                if (!rows[r].valid)
+                    continue;
+                const double db = rows[r].change[static_cast<size_t>(s)];
+                const auto colour = db < -12.0 ? colours::critical : db < -6.0 ? colours::warning : db > 6.0 ? colours::warning : colours::good;
+                g.setColour(colour.withAlpha(0.18f));
+                g.fillRoundedRectangle(cell, 3.0f);
+                g.setColour(colour);
+                g.drawText((db >= 0.0 ? "+" : "") + juce::String(juce::roundToInt(db)) + " dB", cell, juce::Justification::centred);
+            }
+        }
+        area.removeFromTop(6.0f);
+        g.setColour(colours::quiet);
+        g.drawFittedText(pl("Ile kanał traci albo zyskuje względem reszty miksu na danym systemie. Poniżej -12 dB prawie "
+                            "znika. Posłuchaj sam: „Odsłuch” u góry."),
+                         area.removeFromTop(36.0f).toNearestInt(), juce::Justification::topLeft, 2);
+    }
+
+private:
+    struct Row
+    {
+        juce::String name;
+        std::array<double, ma::kPlaybackSystems> change {};
+        bool valid = false;
+    };
+    std::vector<Row> rows;
+    bool valid = false;
+};
+
 // The solver's proposal: one entry per change with a checkbox, wrapped to the width. Click toggles it.
 class ProposalView : public juce::Component
 {
@@ -496,6 +584,12 @@ public:
     }
 
     void resized() override { layoutRows(); }
+
+    // Height that shows every entry, for the scrolling container.
+    int contentHeight() const
+    {
+        return items.empty() ? 40 : juce::roundToInt(items.back().bounds.getBottom() + 6.0f);
+    }
 
     void paint(juce::Graphics& g) override
     {
