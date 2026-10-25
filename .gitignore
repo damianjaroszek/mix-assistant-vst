@@ -1,0 +1,7 @@
+build*/
+dist/
+.vs/
+.vscode/
+.idea/
+*.user
+.DS_Store
