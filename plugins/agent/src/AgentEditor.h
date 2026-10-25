@@ -17,17 +17,34 @@ public:
 private:
     void timerCallback() override;
     void toggleLearning();
+    void showResult(const AgentProcessor::LearnResult&);
 
     AgentProcessor& processor;
+    int shownResultSerial = 0;
 
-    juce::Label title, inputLabel, inputValue, lufsLabel, lufsValue, outputLabel, outputValue, status;
+    juce::Label title;
+    juce::Label roleLabel, priorityLabel;
+    juce::ComboBox roleBox;
+    juce::Slider prioritySlider;
+
+    juce::Label inputLabel, inputValue, lufsLabel, lufsValue, outputLabel, outputValue;
     ma::ui::LevelBar inputBar, outputBar;
-    juce::TextButton learnButton;
-    juce::Slider targetSlider, trimSlider;
-    juce::Label targetLabel, trimLabel;
 
-    using Attachment = juce::AudioProcessorValueTreeState::SliderAttachment;
-    std::unique_ptr<Attachment> targetAttachment, trimAttachment;
+    juce::Label measureLabel, trimLabel, ceilingLabel, learnTimeLabel;
+    juce::ComboBox measureBox;
+    juce::Slider targetSlider, trimSlider, ceilingSlider, learnTimeSlider;
+
+    juce::TextButton learnButton;
+    juce::Label status;
+
+    juce::Label spectrumLabel;
+    juce::ToggleButton showProfileButton;
+    ma::ui::SpectrumView spectrumView { -84.0 };
+
+    using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;
+    using ComboAttachment = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
+    std::unique_ptr<SliderAttachment> priorityAttachment, targetAttachment, trimAttachment, ceilingAttachment, learnTimeAttachment;
+    std::unique_ptr<ComboAttachment> roleAttachment, measureAttachment;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AgentEditor)
 };

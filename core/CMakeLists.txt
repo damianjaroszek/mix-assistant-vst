@@ -4,7 +4,10 @@ add_library(ma_core STATIC
     src/LoudnessMeter.cpp
     src/TruePeakMeter.cpp
     src/SpectrumAnalyzer.cpp
-    src/LevelStats.cpp)
+    src/LevelStats.cpp
+    src/EqualLoudness.cpp
+    src/GainStaging.cpp
+    src/ChannelAnalyzer.cpp)
 target_include_directories(ma_core PUBLIC include)
 
 # WAV reading/writing, used by the lab and tests only.

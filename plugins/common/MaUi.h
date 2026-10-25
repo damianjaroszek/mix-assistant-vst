@@ -2,6 +2,7 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <array>
 #include <cmath>
 
 namespace ma::ui
@@ -77,6 +78,77 @@ public:
 private:
     double db = -INFINITY;
     double targetDb = -INFINITY;
+};
+
+// Bar spectrum on a log-frequency axis from 20 Hz to 20 kHz, so third-octave and
+// ERB layouts read the same way. Levels from floorDb (bottom) to 0 dB (top).
+class SpectrumView : public juce::Component
+{
+public:
+    static constexpr int kMaxBands = 40;
+
+    explicit SpectrumView(double floor = -72.0) : floorDb(floor) {}
+
+    void setBands(const double* levelsDb, const double* centresHz, int count)
+    {
+        numBands = juce::jmin(count, kMaxBands);
+        for (int b = 0; b < numBands; ++b)
+        {
+            levels[static_cast<size_t>(b)] = levelsDb[b];
+            centres[static_cast<size_t>(b)] = centresHz[b];
+        }
+        repaint();
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        auto area = getLocalBounds().toFloat();
+        g.setColour(colours::panel);
+        g.fillRoundedRectangle(area, 4.0f);
+
+        auto plot = area.reduced(8.0f, 6.0f);
+        const auto labelArea = plot.removeFromBottom(14.0f);
+
+        const auto xOf = [&plot](double hz) {
+            return plot.getX() + static_cast<float>(plot.getWidth() * std::log(hz / 20.0) / std::log(1000.0));
+        };
+
+        g.setColour(colours::quiet.withAlpha(0.2f));
+        for (double db = 0.0; db >= floorDb; db -= 12.0)
+        {
+            const auto y = plot.getY() + static_cast<float>(plot.getHeight() * (db / floorDb));
+            g.drawHorizontalLine(juce::roundToInt(y), plot.getX(), plot.getRight());
+        }
+
+        g.setColour(colours::accent);
+        for (int b = 0; b < numBands; ++b)
+        {
+            // Each bar spans halfway to its neighbours on the log axis.
+            const double hz = centres[static_cast<size_t>(b)];
+            const double lowHz = b > 0 ? std::sqrt(hz * centres[static_cast<size_t>(b - 1)]) : hz * hz / std::sqrt(hz * centres[1]);
+            const double highHz = b + 1 < numBands ? std::sqrt(hz * centres[static_cast<size_t>(b + 1)]) : hz * hz / lowHz;
+            const double db = levels[static_cast<size_t>(b)];
+            const double proportion = std::isfinite(db) ? juce::jlimit(0.0, 1.0, 1.0 - db / floorDb) : 0.0;
+            const float h = static_cast<float>(plot.getHeight() * proportion);
+            const float x0 = juce::jmax(plot.getX(), xOf(lowHz)) + 0.5f;
+            const float x1 = juce::jmin(plot.getRight(), xOf(highHz)) - 0.5f;
+            g.fillRect(x0, plot.getBottom() - h, juce::jmax(1.0f, x1 - x0), h);
+        }
+
+        g.setColour(colours::quiet);
+        g.setFont(juce::FontOptions(10.0f));
+        for (double hz : { 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0 })
+        {
+            const auto text = hz >= 1000.0 ? juce::String(juce::roundToInt(hz / 1000.0)) + "k" : juce::String(juce::roundToInt(hz));
+            g.drawText(text, juce::Rectangle<float>(xOf(hz) - 16.0f, labelArea.getY(), 32.0f, 14.0f), juce::Justification::centred);
+        }
+    }
+
+private:
+    double floorDb;
+    int numBands = 0;
+    std::array<double, kMaxBands> levels {};
+    std::array<double, kMaxBands> centres {};
 };
 
 } // namespace ma::ui

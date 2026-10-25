@@ -30,6 +30,16 @@ jobs:
         run: cmake --build build --config Release --parallel
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
+      - name: Validate plugins (pluginval)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://github.com/Tracktion/pluginval/releases/download/v1.0.4/pluginval_Windows.zip -OutFile pluginval.zip
+          Expand-Archive pluginval.zip -DestinationPath pluginval
+          foreach ($plugin in "build/plugins/agent/MixAssistantAgent_artefacts/Release/VST3/Mix Assistant Agent.vst3",
+                              "build/plugins/brain/MixAssistantBrain_artefacts/Release/VST3/Mix Assistant Brain.vst3") {
+            ./pluginval/pluginval.exe --strictness-level 5 --skip-gui-tests --validate "$plugin"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - name: Collect artifacts
         shell: pwsh
         run: |

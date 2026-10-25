@@ -69,14 +69,16 @@ void TruePeakMeter::process(const float* const* channels, int numChannels, int n
             const double x = channels[c][i];
             maxSamplePeak = std::max(maxSamplePeak, std::abs(x));
 
-            pos = (pos + kTapsPerPhase - 1) % kTapsPerPhase;
+            pos = pos == 0 ? kTapsPerPhase - 1 : pos - 1;
             h[static_cast<size_t>(pos)] = x;
+            h[static_cast<size_t>(pos + kTapsPerPhase)] = x;
+            const double* newestFirst = h.data() + pos;
 
             for (const auto& phase : coefficients)
             {
                 double y = 0.0;
                 for (int k = 0; k < kTapsPerPhase; ++k)
-                    y += phase[static_cast<size_t>(k)] * h[static_cast<size_t>((pos + k) % kTapsPerPhase)];
+                    y += phase[static_cast<size_t>(k)] * newestFirst[k];
                 maxTruePeak = std::max(maxTruePeak, std::abs(y));
             }
         }

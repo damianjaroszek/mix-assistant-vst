@@ -25,7 +25,8 @@ private:
     static constexpr int kTapsPerPhase = 12;
 
     std::array<std::array<double, kTapsPerPhase>, kPhases> coefficients {};
-    std::vector<std::array<double, kTapsPerPhase>> history;
+    // Each channel's history is stored twice in a row so the filter reads it without wrapping.
+    std::vector<std::array<double, 2 * kTapsPerPhase>> history;
     std::vector<int> historyPos;
     double maxTruePeak = 0.0;
     double maxSamplePeak = 0.0;
