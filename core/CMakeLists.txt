@@ -10,7 +10,9 @@ add_library(ma_core STATIC
     src/ChannelAnalyzer.cpp
     src/MixBus.cpp
     src/Masking.cpp
-    src/CorrelationMeter.cpp)
+    src/CorrelationMeter.cpp
+    src/ChannelEq.cpp
+    src/Solver.cpp)
 target_include_directories(ma_core PUBLIC include)
 
 # WAV reading/writing, used by the lab and tests only.

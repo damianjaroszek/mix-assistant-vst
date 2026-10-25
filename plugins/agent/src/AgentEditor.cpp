@@ -54,6 +54,23 @@ AgentEditor::AgentEditor(AgentProcessor& p)
     styleLabel(status, pl("Puść najgęstszy fragment utworu i kliknij „Naucz poziom”."), colours::quiet, 13.0f);
     status.setJustificationType(juce::Justification::topLeft);
     styleLabel(spectrumLabel, pl("Widmo tak, jak słyszy je ucho"), colours::quiet, 13.0f);
+    styleLabel(eqLabel, pl("Korekcja od Mózgu"), colours::quiet);
+    styleLabel(eqStatus, {}, colours::quiet, 13.0f);
+    eqStatus.setJustificationType(juce::Justification::topLeft);
+    addAndMakeVisible(eqLabel);
+    addAndMakeVisible(eqStatus);
+    addAndMakeVisible(eqCurve);
+
+    eqBypassButton.setButtonText(pl("Wyłącz"));
+    eqBypassButton.setColour(juce::ToggleButton::textColourId, colours::quiet);
+    addAndMakeVisible(eqBypassButton);
+    eqBypassAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        processor.parameters, AgentProcessor::eqBypassId, eqBypassButton);
+
+    eqClearButton.setButtonText(pl("Wyzeruj"));
+    eqClearButton.setColour(juce::TextButton::buttonColourId, colours::panel);
+    eqClearButton.onClick = [this] { processor.clearEq(); };
+    addAndMakeVisible(eqClearButton);
 
     connection.setJustificationType(juce::Justification::centredRight);
     connection.setFont(juce::FontOptions(13.0f));
@@ -107,7 +124,7 @@ AgentEditor::AgentEditor(AgentProcessor& p)
 
     shownResultSerial = processor.lastResult().serial;
     processor.setSpectrumVisible(true);
-    setSize(520, 600);
+    setSize(520, 720);
     startTimerHz(30);
 }
 
@@ -186,6 +203,24 @@ void AgentEditor::timerCallback()
         showResult(result);
     }
 
+    const auto eqSettings = processor.currentEq();
+    eqCurve.setEq(eqSettings, processor.eqBypassed());
+    juce::StringArray cuts;
+    for (const auto& band : eqSettings)
+        if (ma::isOn(band))
+            cuts.add(juce::String(band.gainDb, 1) + " dB @ " + juce::String(juce::roundToInt(band.hz)) + " Hz");
+    if (processor.isComparingBefore())
+    {
+        eqStatus.setText(pl("Mózg porównuje: słychać wersję sprzed „Zastosuj”."), juce::dontSendNotification);
+        eqStatus.setColour(juce::Label::textColourId, colours::warning);
+    }
+    else
+    {
+        eqStatus.setText(cuts.isEmpty() ? pl("Brak korekcji. Ustawia je „Zastosuj” w Mózgu.") : cuts.joinIntoString("\n"),
+                         juce::dontSendNotification);
+        eqStatus.setColour(juce::Label::textColourId, colours::quiet);
+    }
+
     std::array<double, ma::ui::SpectrumView::kMaxBands> levels {}, centres {};
     const bool profile = showProfileButton.getToggleState() && processor.hasProfile();
     if (profile)
@@ -255,6 +290,17 @@ void AgentEditor::resized()
     status.setBounds(area.removeFromTop(52));
 
     area.removeFromTop(6);
+    row = area.removeFromTop(22);
+    eqClearButton.setBounds(row.removeFromRight(80));
+    row.removeFromRight(6);
+    eqBypassButton.setBounds(row.removeFromRight(80));
+    eqLabel.setBounds(row);
+    area.removeFromTop(4);
+    auto eqRow = area.removeFromTop(90);
+    eqStatus.setBounds(eqRow.removeFromRight(170).withTrimmedLeft(10));
+    eqCurve.setBounds(eqRow);
+
+    area.removeFromTop(10);
     row = area.removeFromTop(22);
     showProfileButton.setBounds(row.removeFromRight(190));
     spectrumLabel.setBounds(row);

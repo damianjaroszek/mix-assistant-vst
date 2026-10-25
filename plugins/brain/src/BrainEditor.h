@@ -31,6 +31,10 @@ private:
     juce::TextButton resetButton;
     juce::ToggleButton profilesButton;
 
+    juce::Label proposalLabel, proposalStatus;
+    juce::TextButton proposeButton, applyButton, undoButton, compareButton;
+    brain::ProposalView proposalView;
+
     brain::ReportView report;
     brain::ChannelTable table;
     brain::OverlayView overlay;

@@ -13,7 +13,10 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   measurements through atomics; editors poll them on a timer.
 - Agents talk to the Brain through `ma::bus` (`core/include/ma/MixBus.h`), a seqlock slot table
   in a memory-mapped temp file (`plugins/common/SharedSession.h`), so it works across processes.
-  Bump `bus::kVersion` whenever `AgentData` changes. Spectra on the bus are raw ERB dBFS, pre-trim.
+  Bump `bus::kVersion` whenever `AgentData`, `Command` or the layout changes. Spectra on the bus are
+  raw ERB dBFS, pre-trim and pre-EQ; the Brain adds trim and the Agent's EQ to get what the mix hears.
+- The Brain only writes `Command`s (apply / undo) into Agent slots; Agents change their own parameters.
+  `ma::solve` works from pre-EQ spectra, so solving again is idempotent rather than stacking cuts.
 
 ## Commands
 

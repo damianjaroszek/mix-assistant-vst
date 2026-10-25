@@ -69,19 +69,63 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     profilesButton.onClick = [this] { processor.setUseLearnedProfiles(profilesButton.getToggleState()); };
     addAndMakeVisible(profilesButton);
 
+    styleLabel(proposalLabel, pl("Propozycja poprawek"), colours::text, 15.0f);
+    styleLabel(proposalStatus, {}, colours::quiet, 13.0f);
+    addAndMakeVisible(proposalLabel);
+    addAndMakeVisible(proposalStatus);
+
+    const auto styleButton = [this](juce::TextButton& button, const juce::String& text) {
+        button.setButtonText(text);
+        button.setColour(juce::TextButton::buttonColourId, colours::panel);
+        button.setColour(juce::TextButton::buttonOnColourId, colours::warning.darker(0.3f));
+        addAndMakeVisible(button);
+    };
+    styleButton(proposeButton, pl("Zaproponuj"));
+    styleButton(applyButton, pl("Zastosuj zaznaczone"));
+    styleButton(undoButton, pl("Cofnij"));
+    styleButton(compareButton, pl("Przed / po"));
+    compareButton.setClickingTogglesState(true);
+    compareButton.setTooltip(pl("Słuchaj wersji sprzed „Zastosuj”, z wyrównaną głośnością."));
+
+    proposeButton.onClick = [this] {
+        processor.propose();
+        proposalStatus.setText({}, juce::dontSendNotification);
+        timerCallback();
+    };
+    applyButton.onClick = [this] {
+        const int sent = processor.applySelected();
+        proposalStatus.setText(sent > 0 ? pl("Zastosowano na ") + juce::String(sent) + pl(" kanałach. Pomiar sumy wyzerowany.")
+                                        : pl("Nic nie zaznaczono."),
+                               juce::dontSendNotification);
+        timerCallback();
+    };
+    undoButton.onClick = [this] {
+        const int sent = processor.undoLast();
+        proposalStatus.setText(pl("Cofnięto na ") + juce::String(sent) + pl(" kanałach."), juce::dontSendNotification);
+        timerCallback();
+    };
+    compareButton.onClick = [this] { processor.setComparing(compareButton.getToggleState()); };
+    proposalView.onToggle = [this](int index) {
+        processor.toggleProposalItem(index);
+        timerCallback();
+    };
+    addAndMakeVisible(proposalView);
+
     table.onSelect = [this](std::uint64_t owner) { select(owner); };
     issues.onSelect = [this](std::uint64_t owner) { select(owner == selected ? 0 : owner); };
     for (auto* view : std::initializer_list<juce::Component*> { &report, &table, &overlay, &issues })
         addAndMakeVisible(view);
 
     processor.setEditorOpen(true);
-    setSize(1000, 740);
+    setSize(1000, 920);
     startTimerHz(10);
 }
 
 BrainEditor::~BrainEditor()
 {
     stopTimer();
+    if (processor.isComparing())
+        processor.setComparing(false);
     processor.setEditorOpen(false);
 }
 
@@ -140,6 +184,35 @@ void BrainEditor::timerCallback()
         lines.push_back(line);
     }
     issues.setLines(std::move(lines));
+
+    const auto& proposal = processor.proposal();
+    proposalView.setProposal(proposal);
+    const bool anySelected = std::any_of(proposal.items.begin(), proposal.items.end(), [](const auto& i) { return i.selected; });
+    applyButton.setEnabled(anySelected);
+    const bool undoable = processor.canUndo();
+    undoButton.setEnabled(undoable);
+    compareButton.setEnabled(undoable || processor.isComparing());
+    compareButton.setToggleState(processor.isComparing(), juce::dontSendNotification);
+    if (processor.isComparing())
+    {
+        const double gain = processor.compareGainDb();
+        proposalStatus.setText(std::isfinite(gain) ? pl("Słychać wersję PRZED, głośność wyrównana o ") + juce::String(gain, 1) + " dB."
+                                                   : pl("Słychać wersję PRZED. Mierzę głośność, wyrównanie za kilka sekund..."),
+                               juce::dontSendNotification);
+        proposalStatus.setColour(juce::Label::textColourId, colours::warning);
+    }
+    else if (proposal.made && !proposal.items.empty() && proposalStatus.getText().isEmpty())
+    {
+        proposalStatus.setText(pl("Kolizje: ") + juce::String(proposal.crowdingBefore, 2) + pl(" → ")
+                                   + juce::String(proposal.crowdingAfter, 2) + pl(". Odznacz to, czego nie chcesz."),
+                               juce::dontSendNotification);
+        proposalStatus.setColour(juce::Label::textColourId, colours::quiet);
+    }
+    else if (!processor.isComparing() && proposalStatus.getText().startsWith(pl("Słychać")))
+    {
+        proposalStatus.setText({}, juce::dontSendNotification);
+        proposalStatus.setColour(juce::Label::textColourId, colours::quiet);
+    }
 }
 
 void BrainEditor::paint(juce::Graphics& g)
@@ -192,5 +265,18 @@ void BrainEditor::resized()
     area.removeFromTop(10);
     issuesLabel.setBounds(area.removeFromTop(22));
     area.removeFromTop(4);
-    issues.setBounds(area);
+    issues.setBounds(area.removeFromTop(110));
+
+    area.removeFromTop(10);
+    auto proposalHeader = area.removeFromTop(26);
+    proposalLabel.setBounds(proposalHeader.removeFromLeft(170));
+    for (auto* button : { &proposeButton, &applyButton, &undoButton, &compareButton })
+    {
+        button->setBounds(proposalHeader.removeFromLeft(button == &applyButton ? 150 : 100));
+        proposalHeader.removeFromLeft(6);
+    }
+    area.removeFromTop(4);
+    proposalStatus.setBounds(area.removeFromTop(20));
+    area.removeFromTop(2);
+    proposalView.setBounds(area);
 }

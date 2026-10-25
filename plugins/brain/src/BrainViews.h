@@ -357,4 +357,74 @@ private:
     std::vector<Line> lines;
 };
 
+// The solver's proposal: one line per change with a checkbox. Click toggles it.
+class ProposalView : public juce::Component
+{
+public:
+    std::function<void(int)> onToggle;
+
+    void setProposal(const Proposal& proposal)
+    {
+        items.clear();
+        for (const auto& item : proposal.items)
+            items.push_back({ item.text, item.selected });
+        made = proposal.made;
+        repaint();
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        namespace colours = ma::ui::colours;
+        using ma::ui::pl;
+        auto area = getLocalBounds().toFloat();
+        g.setColour(colours::panel);
+        g.fillRoundedRectangle(area, 4.0f);
+        area.reduce(10.0f, 6.0f);
+
+        g.setFont(juce::FontOptions(13.0f));
+        if (items.empty())
+        {
+            g.setColour(colours::quiet);
+            g.drawText(made ? pl("Nic do poprawienia: brak kolizji, które warto ciąć, i zapas na mastering jest OK.")
+                            : pl("Puść najgęstszy fragment utworu (drop) i kliknij „Zaproponuj”."),
+                       area, juce::Justification::topLeft);
+            return;
+        }
+        for (const auto& item : items)
+        {
+            auto row = area.removeFromTop(rowHeight);
+            if (row.getBottom() > getHeight())
+                break;
+            const auto box = row.removeFromLeft(16.0f).withSizeKeepingCentre(12.0f, 12.0f);
+            g.setColour(colours::quiet);
+            g.drawRoundedRectangle(box, 2.0f, 1.2f);
+            if (item.selected)
+            {
+                g.setColour(colours::accent);
+                g.fillRoundedRectangle(box.reduced(2.5f), 1.5f);
+            }
+            row.removeFromLeft(6.0f);
+            g.setColour(item.selected ? colours::text : colours::quiet);
+            g.drawText(item.text, row, juce::Justification::centredLeft, true);
+        }
+    }
+
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        const int index = static_cast<int>((static_cast<float>(e.y) - 6.0f) / rowHeight);
+        if (index >= 0 && index < static_cast<int>(items.size()) && onToggle != nullptr)
+            onToggle(index);
+    }
+
+private:
+    struct Line
+    {
+        juce::String text;
+        bool selected = true;
+    };
+    static constexpr float rowHeight = 22.0f;
+    std::vector<Line> items;
+    bool made = false;
+};
+
 } // namespace brain

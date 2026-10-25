@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ma/ChannelEq.h"
+
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <array>
@@ -156,6 +158,65 @@ private:
     int numBands = 0;
     std::array<double, kMaxBands> levels {};
     std::array<double, kMaxBands> centres {};
+};
+
+// Frequency response of the Brain's EQ on a channel, -12..+6 dB, log axis 20 Hz..20 kHz.
+class EqCurveView : public juce::Component
+{
+public:
+    void setEq(const ma::EqSettings& newEq, bool newBypassed)
+    {
+        bool changed = newBypassed != bypassed;
+        for (int b = 0; b < ma::kEqBands; ++b)
+        {
+            const auto& a = newEq[static_cast<size_t>(b)];
+            const auto& c = eq[static_cast<size_t>(b)];
+            changed = changed || !ma::sameBand(a, c);
+        }
+        if (!changed)
+            return;
+        eq = newEq;
+        bypassed = newBypassed;
+        repaint();
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        auto area = getLocalBounds().toFloat();
+        g.setColour(colours::panel);
+        g.fillRoundedRectangle(area, 4.0f);
+        auto plot = area.reduced(8.0f, 6.0f);
+
+        const auto yOf = [&plot](double db) {
+            return plot.getY() + static_cast<float>(plot.getHeight() * (6.0 - juce::jlimit(-12.0, 6.0, db)) / 18.0);
+        };
+        g.setColour(colours::quiet.withAlpha(0.25f));
+        for (double db : { 0.0, -6.0, -12.0 })
+            g.drawHorizontalLine(juce::roundToInt(yOf(db)), plot.getX(), plot.getRight());
+
+        juce::Path curve;
+        const int steps = juce::jmax(2, static_cast<int>(plot.getWidth()));
+        for (int i = 0; i < steps; ++i)
+        {
+            const double hz = 20.0 * std::pow(1000.0, static_cast<double>(i) / (steps - 1));
+            const auto point = juce::Point<float>(plot.getX() + static_cast<float>(i), yOf(ma::eqResponseDb(eq, hz)));
+            if (i == 0)
+                curve.startNewSubPath(point);
+            else
+                curve.lineTo(point);
+        }
+        g.setColour(bypassed ? colours::quiet : colours::accent);
+        g.strokePath(curve, juce::PathStrokeType(2.0f));
+
+        g.setColour(colours::quiet);
+        g.setFont(juce::FontOptions(10.0f));
+        g.drawText("0 dB", plot.withHeight(12.0f).translated(0.0f, yOf(0.0) - plot.getY() - 12.0f), juce::Justification::left);
+        g.drawText("-12", plot.withHeight(12.0f).translated(0.0f, plot.getHeight() - 12.0f), juce::Justification::left);
+    }
+
+private:
+    ma::EqSettings eq {};
+    bool bypassed = false;
 };
 
 } // namespace ma::ui

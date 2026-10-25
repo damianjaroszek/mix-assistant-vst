@@ -38,6 +38,12 @@ private:
     juce::TextButton learnButton;
     juce::Label status;
 
+    juce::Label eqLabel, eqStatus;
+    ma::ui::EqCurveView eqCurve;
+    juce::ToggleButton eqBypassButton;
+    juce::TextButton eqClearButton;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> eqBypassAttachment;
+
     juce::Label spectrumLabel;
     juce::ToggleButton showProfileButton;
     ma::ui::SpectrumView spectrumView { -84.0 };
