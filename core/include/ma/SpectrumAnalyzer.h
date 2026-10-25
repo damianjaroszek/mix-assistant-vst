@@ -25,6 +25,8 @@ public:
 
     static int numBandsFor(BandScale scale);
     static double bandCentreHz(BandScale scale, int band);
+    // Lower edge of a band; edge numBands is the upper edge of the last band.
+    static double bandEdgeHz(BandScale scale, int edge);
 
     // Kept for the third-octave layout, which the Brain and the lab report on.
     static constexpr int kNumBands = 31;

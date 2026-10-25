@@ -22,7 +22,8 @@ private:
     AgentProcessor& processor;
     int shownResultSerial = 0;
 
-    juce::Label title;
+    juce::Label title, connection;
+    juce::TextEditor nameEditor;
     juce::Label roleLabel, priorityLabel;
     juce::ComboBox roleBox;
     juce::Slider prioritySlider;

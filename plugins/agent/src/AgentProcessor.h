@@ -1,5 +1,6 @@
 #pragma once
 
+#include "SharedSession.h"
 #include "ma/ChannelAnalyzer.h"
 #include "ma/LoudnessMeter.h"
 #include "ma/SpectrumAnalyzer.h"
@@ -43,6 +44,13 @@ public:
 
     void getStateInformation(juce::MemoryBlock& destData) override;
     void setStateInformation(const void* data, int sizeInBytes) override;
+    void updateTrackProperties(const TrackProperties& properties) override;
+
+    // Channel name shown in the Brain: the user's own name, else the host's track name.
+    juce::String getUserName() const;
+    void setUserName(const juce::String& name);
+    juce::String getDisplayName() const;
+    bool isConnectedToBrain() const { return brainAlive.load(); }
 
     // Message thread API.
     void startLearning();
@@ -67,7 +75,7 @@ public:
     double inputShortTermLufs() const { return inputLufs.load(); }
     double outputPeakDb() const { return outputPeak.load(); }
 
-    // The live perceived spectrum is only computed while an editor is showing it.
+    // The live spectrum is only computed while an editor or the Brain is looking at it.
     void setSpectrumVisible(bool visible) { spectrumVisible.store(visible); }
     void copyLiveSpectrum(double* levelsDb, double* centresHz) const;
     void copyProfile(double* levelsDb, double* centresHz) const; // learned, ear-weighted
@@ -94,6 +102,7 @@ private:
     void timerCallback() override;
     void applyLearned();
     bool measuresLufs() const;
+    void publishToBrain();
 
     std::atomic<float>* trimParam = nullptr;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> trimGain;
@@ -101,7 +110,6 @@ private:
     ma::ChannelAnalyzer learnAnalyzer;
     ma::LoudnessMeter liveLoudness;
     ma::SpectrumAnalyzer liveSpectrum;
-    ma::SpectrumAnalyzer::Bands liveWeights {};
     double displayRmsMeanSquare = 0.0;
     double displaySmoothing = 0.0;
 
@@ -115,7 +123,8 @@ private:
     std::atomic<bool> profileValid { false };
 
     std::atomic<bool> spectrumVisible { false };
-    std::array<std::atomic<double>, kBands> liveBands;
+    std::atomic<bool> brainWantsSpectra { false };
+    std::array<std::atomic<double>, kBands> liveBands; // raw dBFS, not ear-weighted
 
     std::atomic<double> inputRms { -INFINITY };
     std::atomic<double> inputLufs { -INFINITY };
@@ -123,5 +132,13 @@ private:
 
     LearnResult result; // message thread only
 
+    // Connection to the Brain (message thread only).
+    std::shared_ptr<ma::SharedSession> session = ma::SharedSession::get();
+    std::uint64_t instanceId = ma::SharedSession::newInstanceId();
+    int slotIndex = -1;
+    std::atomic<bool> brainAlive { false };
+    juce::String userName, trackName;
+
+    JUCE_DECLARE_WEAK_REFERENCEABLE(AgentProcessor)
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AgentProcessor)
 };

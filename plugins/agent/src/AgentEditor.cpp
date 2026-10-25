@@ -55,7 +55,18 @@ AgentEditor::AgentEditor(AgentProcessor& p)
     status.setJustificationType(juce::Justification::topLeft);
     styleLabel(spectrumLabel, pl("Widmo tak, jak słyszy je ucho"), colours::quiet, 13.0f);
 
-    for (auto* label : { &title, &roleLabel, &priorityLabel, &inputLabel, &lufsLabel, &outputLabel, &measureLabel,
+    connection.setJustificationType(juce::Justification::centredRight);
+    connection.setFont(juce::FontOptions(13.0f));
+
+    nameEditor.setText(processor.getUserName(), false);
+    nameEditor.setTextToShowWhenEmpty(processor.getDisplayName(), colours::quiet);
+    nameEditor.setColour(juce::TextEditor::backgroundColourId, colours::panel);
+    nameEditor.setColour(juce::TextEditor::textColourId, colours::text);
+    nameEditor.setTooltip(pl("Nazwa w Mózgu. Pusta = nazwa ścieżki z FL."));
+    nameEditor.onTextChange = [this] { processor.setUserName(nameEditor.getText()); };
+    addAndMakeVisible(nameEditor);
+
+    for (auto* label : { &title, &connection, &roleLabel, &priorityLabel, &inputLabel, &lufsLabel, &outputLabel, &measureLabel,
                          &trimLabel, &ceilingLabel, &learnTimeLabel, &inputValue, &lufsValue, &outputValue, &status,
                          &spectrumLabel })
         addAndMakeVisible(label);
@@ -138,6 +149,12 @@ void AgentEditor::showResult(const AgentProcessor::LearnResult& r)
 
 void AgentEditor::timerCallback()
 {
+    const bool connected = processor.isConnectedToBrain();
+    connection.setText(connected ? pl("Połączony z Mózgiem") : pl("Brak Mózgu na masterze"), juce::dontSendNotification);
+    connection.setColour(juce::Label::textColourId, connected ? colours::good : colours::quiet);
+    if (processor.getUserName().isEmpty())
+        nameEditor.setTextToShowWhenEmpty(processor.getDisplayName(), colours::quiet);
+
     const bool lufs = measureBox.getSelectedItemIndex() == 1;
     const double rms = processor.inputRmsDb();
     inputBar.setLevel(rms);
@@ -188,7 +205,10 @@ void AgentEditor::resized()
 {
     constexpr int labelWidth = 130;
     auto area = getLocalBounds().reduced(16);
-    title.setBounds(area.removeFromTop(28));
+    auto top = area.removeFromTop(28);
+    title.setBounds(top.removeFromLeft(190));
+    connection.setBounds(top.removeFromRight(170));
+    nameEditor.setBounds(top.reduced(6, 2));
     area.removeFromTop(6);
 
     auto row = area.removeFromTop(26);

@@ -7,11 +7,18 @@
 #include "ma/GainStaging.h"
 
 #include <cmath>
+#include <cstring>
 
 namespace
 {
 const juce::Identifier profileProperty { "profile" };
+const juce::Identifier nameProperty { "name" };
+
+float toShared(double db)
+{
+    return std::isfinite(db) ? static_cast<float>(db) : ma::bus::kSilentDb;
 }
+} // namespace
 
 AgentProcessor::AgentProcessor()
     : AudioProcessor(BusesProperties()
@@ -32,13 +39,13 @@ AgentProcessor::AgentProcessor()
 AgentProcessor::~AgentProcessor()
 {
     stopTimer();
+    if (auto* region = session->region())
+        ma::bus::releaseSlot(*region, slotIndex, instanceId);
 }
 
 juce::StringArray AgentProcessor::roleNames()
 {
-    using ma::ui::pl;
-    return { pl("Inny"), pl("Stopa"), pl("Bas"), pl("Perkusja"), pl("Wokal"), pl("Lead"),
-             pl("Pad"), pl("Efekty"), pl("Bus"), pl("Wysyłka (pogłos, delay)") };
+    return ma::ui::roleNames();
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout AgentProcessor::createLayout()
@@ -90,7 +97,6 @@ void AgentProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     learnAnalyzer.prepare(sampleRate, channels);
     liveLoudness.prepare(sampleRate, channels);
     liveSpectrum.prepare(sampleRate, ma::BandScale::erb);
-    liveWeights = ma::equalLoudnessWeights(liveSpectrum);
     trimGain.reset(sampleRate, 0.05);
     trimGain.setCurrentAndTargetValue(static_cast<float>(ma::dbToGain(trimParam->load())));
 
@@ -131,11 +137,10 @@ void AgentProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     liveLoudness.process(input, numChannels, numSamples);
     inputLufs.store(liveLoudness.shortTermLufs());
 
-    if (spectrumVisible.load())
+    if (spectrumVisible.load() || brainWantsSpectra.load())
     {
         liveSpectrum.process(input, numChannels, numSamples);
-        auto bands = liveSpectrum.recentDb();
-        ma::applyWeights(bands, liveWeights, liveSpectrum.numBands());
+        const auto bands = liveSpectrum.recentDb();
         for (size_t b = 0; b < kBands; ++b)
             liveBands[b].store(bands[b]);
     }
@@ -211,6 +216,77 @@ void AgentProcessor::timerCallback()
     auto state = LearnState::finished;
     if (learnState.compare_exchange_strong(state, LearnState::idle))
         applyLearned();
+    publishToBrain();
+}
+
+void AgentProcessor::publishToBrain()
+{
+    auto* region = session->region();
+    if (region == nullptr)
+        return;
+
+    const auto now = ma::SharedSession::nowMs();
+    brainAlive.store(ma::bus::isAlive(region->header.brainHeartbeatMs.load(), now));
+    brainWantsSpectra.store(now < region->header.spectraWantedUntil.load());
+
+    if (slotIndex < 0 || region->slots[slotIndex].owner.load() != instanceId)
+        slotIndex = ma::bus::claimSlot(*region, instanceId, now);
+    if (slotIndex < 0)
+        return;
+
+    ma::bus::AgentData data {};
+    const auto name = getDisplayName().toRawUTF8();
+    std::strncpy(data.name, name, sizeof(data.name) - 1);
+    data.role = static_cast<std::int32_t>(parameters.getRawParameterValue(roleId)->load());
+    data.priority = static_cast<std::int32_t>(parameters.getRawParameterValue(priorityId)->load());
+    data.measureLufs = measuresLufs() ? 1 : 0;
+    data.hasProfile = profileValid.load() ? 1 : 0;
+    data.trimLimited = result.applied && result.limitedByPeak ? 1 : 0;
+    data.trimDb = trimParam->load();
+    data.targetDb = parameters.getRawParameterValue(targetId)->load();
+    data.inputRmsDb = toShared(inputRms.load());
+    data.inputLufs = toShared(inputLufs.load());
+    data.outputPeakDb = toShared(outputPeak.load());
+    data.learnedDb = toShared(result.applied ? result.measuredDb : -INFINITY);
+    data.learnedTruePeakDb = toShared(result.applied ? result.truePeakDb : -INFINITY);
+    data.liveValid = spectrumVisible.load() || brainWantsSpectra.load() ? 1 : 0;
+
+    // The profile is stored ear-weighted; the Brain gets raw levels like the live spectrum.
+    const auto& weights = ma::erbEqualLoudnessWeights();
+    for (int b = 0; b < ma::bus::kBands; ++b)
+    {
+        data.liveDb[b] = toShared(liveBands[static_cast<size_t>(b)].load());
+        data.profileDb[b] = toShared(profile[static_cast<size_t>(b)].load() + weights[static_cast<size_t>(b)]);
+    }
+    ma::bus::publish(region->slots[slotIndex], data, now);
+}
+
+void AgentProcessor::updateTrackProperties(const TrackProperties& properties)
+{
+    // Hosts may call this off the message thread; hop over to keep the strings single-threaded.
+    juce::MessageManager::callAsync([safe = juce::WeakReference<AgentProcessor>(this), name = properties.name] {
+        if (safe != nullptr)
+            safe->trackName = name;
+    });
+}
+
+juce::String AgentProcessor::getUserName() const
+{
+    return userName;
+}
+
+void AgentProcessor::setUserName(const juce::String& name)
+{
+    userName = name.trim();
+}
+
+juce::String AgentProcessor::getDisplayName() const
+{
+    if (userName.isNotEmpty())
+        return userName;
+    if (trackName.isNotEmpty())
+        return trackName;
+    return ma::ui::pl("Kanał ") + juce::String(slotIndex + 1);
 }
 
 void AgentProcessor::applyLearned()
@@ -251,9 +327,10 @@ AgentProcessor::LearnResult AgentProcessor::lastResult() const
 
 void AgentProcessor::copyLiveSpectrum(double* levelsDb, double* centresHz) const
 {
+    const auto& weights = ma::erbEqualLoudnessWeights();
     for (int b = 0; b < numSpectrumBands(); ++b)
     {
-        levelsDb[b] = liveBands[static_cast<size_t>(b)].load();
+        levelsDb[b] = liveBands[static_cast<size_t>(b)].load() - weights[static_cast<size_t>(b)];
         centresHz[b] = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
     }
 }
@@ -270,6 +347,7 @@ void AgentProcessor::copyProfile(double* levelsDb, double* centresHz) const
 void AgentProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
     auto state = parameters.copyState();
+    state.setProperty(nameProperty, userName, nullptr);
 
     // The learned profile goes with the project, as dB values separated by spaces.
     if (profileValid.load())
@@ -298,6 +376,7 @@ void AgentProcessor::setStateInformation(const void* data, int sizeInBytes)
         return;
 
     auto state = juce::ValueTree::fromXml(*xml);
+    userName = state.getProperty(nameProperty).toString();
     const auto values = juce::StringArray::fromTokens(state.getProperty(profileProperty).toString(), " ", {});
     if (values.size() == numSpectrumBands())
     {
