@@ -65,6 +65,17 @@ struct Proposal
         juce::String text;
         bool selected = true;
         bool advisory = false; // advice only, nothing to apply
+
+        // Phase 4: besides the solver's EQ changes, a dynamic give-way or a polarity flip.
+        enum class Action
+        {
+            solver,
+            duck,
+            polarity
+        };
+        Action action = Action::solver;
+        ma::DuckSettings duck {};
+        int duckSync = 0;
     };
 
     std::vector<Item> items;
@@ -119,6 +130,7 @@ public:
     float peakCeilingDb() const { return peakCeiling->load(); }
     double lowCorrelation() const { return correlationLow.load(); }
     double fullCorrelation() const { return correlationFull.load(); }
+    double tempoBpm() const { return hostBpm.load(); } // 0 until the host reports it
 
     const MixSnapshot& snapshot() const { return mix; }
     // Collision analysis on the learned profiles instead of the live spectra.
@@ -164,6 +176,8 @@ private:
     void buildReport();
     void updateLoudnessMatch(std::uint64_t now);
     void sendCommand(std::uint64_t owner, const ma::bus::Command& command);
+    void proposeDynamics();
+    juce::String kickName() const; // the channel most likely feeding the sidechains
     static juce::File targetFolder();
     void saveTarget();
 
@@ -186,6 +200,7 @@ private:
     std::atomic<double> correlationLow { 1.0 };
     std::atomic<double> correlationFull { 1.0 };
     std::atomic<bool> stereo { true };
+    std::atomic<double> hostBpm { 0.0 };
     std::atomic<float> outputGainDb { 0.0f };
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> outputGain;
 

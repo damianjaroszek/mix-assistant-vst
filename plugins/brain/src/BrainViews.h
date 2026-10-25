@@ -479,7 +479,7 @@ private:
     std::vector<Line> lines;
 };
 
-// The solver's proposal: one line per change with a checkbox. Click toggles it.
+// The solver's proposal: one entry per change with a checkbox, wrapped to the width. Click toggles it.
 class ProposalView : public juce::Component
 {
 public:
@@ -489,10 +489,13 @@ public:
     {
         items.clear();
         for (const auto& item : proposal.items)
-            items.push_back({ item.text, item.selected, item.advisory });
+            items.push_back({ item.text, item.selected, item.advisory, {} });
         made = proposal.made;
+        layoutRows();
         repaint();
     }
+
+    void resized() override { layoutRows(); }
 
     void paint(juce::Graphics& g) override
     {
@@ -514,36 +517,34 @@ public:
         }
         for (const auto& item : items)
         {
-            auto row = area.removeFromTop(rowHeight);
-            if (row.getBottom() > getHeight())
+            if (item.bounds.getBottom() > static_cast<float>(getHeight()))
                 break;
-            const auto box = row.removeFromLeft(16.0f).withSizeKeepingCentre(12.0f, 12.0f);
+            const auto box = juce::Rectangle<float>(item.bounds.getX(), item.bounds.getY() + 3.0f, 12.0f, 12.0f);
             if (item.advisory)
             {
                 g.setColour(colours::warning);
                 g.drawText("i", box, juce::Justification::centred);
-                row.removeFromLeft(6.0f);
-                g.drawText(item.text, row, juce::Justification::centredLeft, true);
-                continue;
             }
-            g.setColour(colours::quiet);
-            g.drawRoundedRectangle(box, 2.0f, 1.2f);
-            if (item.selected)
+            else
             {
-                g.setColour(colours::accent);
-                g.fillRoundedRectangle(box.reduced(2.5f), 1.5f);
+                g.setColour(colours::quiet);
+                g.drawRoundedRectangle(box, 2.0f, 1.2f);
+                if (item.selected)
+                {
+                    g.setColour(colours::accent);
+                    g.fillRoundedRectangle(box.reduced(2.5f), 1.5f);
+                }
             }
-            row.removeFromLeft(6.0f);
-            g.setColour(item.selected ? colours::text : colours::quiet);
-            g.drawText(item.text, row, juce::Justification::centredLeft, true);
+            const auto colour = item.advisory ? colours::warning : item.selected ? colours::text : colours::quiet;
+            layoutFor(item.text, colour, textWidth()).draw(g, item.bounds.withTrimmedLeft(textIndent));
         }
     }
 
     void mouseDown(const juce::MouseEvent& e) override
     {
-        const int index = static_cast<int>((static_cast<float>(e.y) - 6.0f) / rowHeight);
-        if (index >= 0 && index < static_cast<int>(items.size()) && onToggle != nullptr)
-            onToggle(index);
+        for (size_t i = 0; i < items.size(); ++i)
+            if (items[i].bounds.contains(e.position) && onToggle != nullptr)
+                onToggle(static_cast<int>(i));
     }
 
 private:
@@ -552,8 +553,35 @@ private:
         juce::String text;
         bool selected = true;
         bool advisory = false;
+        juce::Rectangle<float> bounds;
     };
-    static constexpr float rowHeight = 22.0f;
+
+    static constexpr float textIndent = 22.0f;
+    static constexpr float gap = 5.0f;
+
+    float textWidth() const { return juce::jmax(50.0f, static_cast<float>(getWidth()) - 20.0f - textIndent); }
+
+    static juce::TextLayout layoutFor(const juce::String& text, juce::Colour colour, float width)
+    {
+        juce::AttributedString attributed;
+        attributed.append(text, juce::FontOptions(13.0f), colour);
+        attributed.setWordWrap(juce::AttributedString::byWord);
+        juce::TextLayout layout;
+        layout.createLayout(attributed, width);
+        return layout;
+    }
+
+    void layoutRows()
+    {
+        float y = 6.0f;
+        for (auto& item : items)
+        {
+            const float height = juce::jmax(18.0f, layoutFor(item.text, juce::Colours::white, textWidth()).getHeight());
+            item.bounds = { 10.0f, y, static_cast<float>(getWidth()) - 20.0f, height };
+            y += height + gap;
+        }
+    }
+
     std::vector<Line> items;
     bool made = false;
 };

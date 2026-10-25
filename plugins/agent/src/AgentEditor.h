@@ -44,6 +44,13 @@ private:
     juce::TextButton eqClearButton;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> eqBypassAttachment;
 
+    juce::Label duckLabel, duckStatus;
+    juce::ToggleButton duckOnButton, polarityButton;
+    juce::ComboBox duckModeBox, duckSyncBox;
+    juce::Label duckFreqLabel, duckDepthLabel, duckThresholdLabel, duckAttackLabel, duckReleaseLabel;
+    juce::Slider duckFreqSlider, duckDepthSlider, duckThresholdSlider, duckAttackSlider, duckReleaseSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> duckOnAttachment, polarityAttachment;
+
     juce::Label spectrumLabel;
     juce::ToggleButton showProfileButton;
     ma::ui::SpectrumView spectrumView { -84.0 };
@@ -51,7 +58,10 @@ private:
     using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;
     using ComboAttachment = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
     std::unique_ptr<SliderAttachment> priorityAttachment, targetAttachment, trimAttachment, ceilingAttachment, learnTimeAttachment;
-    std::unique_ptr<ComboAttachment> roleAttachment, measureAttachment;
+    std::unique_ptr<ComboAttachment> roleAttachment, measureAttachment, duckModeAttachment, duckSyncAttachment;
+    std::unique_ptr<SliderAttachment> duckFreqAttachment, duckDepthAttachment, duckThresholdAttachment, duckAttackAttachment,
+        duckReleaseAttachment;
+    void updateDuckStatus();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AgentEditor)
 };

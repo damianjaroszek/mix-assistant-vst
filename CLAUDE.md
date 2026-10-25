@@ -17,6 +17,9 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   raw ERB dBFS, pre-trim and pre-EQ; the Brain adds trim and the Agent's EQ to get what the mix hears.
 - The Brain only writes `Command`s (apply / undo) into Agent slots; Agents change their own parameters.
   `ma::solve` works from pre-EQ spectra, so solving again is idempotent rather than stacking cuts.
+- Dynamic unmasking (`ma/Ducker.h`): the Agent has an optional sidechain input bus; the duck dips a bell
+  (or the whole channel) by how far the sidechain's band envelope is over the threshold. Commands carry
+  the full Agent state (trim, EQ, duck, polarity), so the Brain fills unchanged fields from `AgentData`.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

@@ -113,6 +113,37 @@ AgentEditor::AgentEditor(AgentProcessor& p)
     addAndMakeVisible(showProfileButton);
     addAndMakeVisible(spectrumView);
 
+    styleLabel(duckLabel, pl("Ustępowanie (sidechain)"), colours::quiet);
+    styleLabel(duckStatus, {}, colours::quiet, 13.0f);
+    duckStatus.setJustificationType(juce::Justification::topLeft);
+    styleLabel(duckFreqLabel, pl("Pasmo"), colours::quiet, 13.0f);
+    styleLabel(duckDepthLabel, pl("Głębokość"), colours::quiet, 13.0f);
+    styleLabel(duckThresholdLabel, pl("Próg"), colours::quiet, 13.0f);
+    styleLabel(duckAttackLabel, pl("Atak"), colours::quiet, 13.0f);
+    styleLabel(duckReleaseLabel, pl("Powrót"), colours::quiet, 13.0f);
+    for (auto* label : { &duckLabel, &duckStatus, &duckFreqLabel, &duckDepthLabel, &duckThresholdLabel, &duckAttackLabel,
+                         &duckReleaseLabel })
+        addAndMakeVisible(label);
+    duckOnButton.setButtonText(pl("Włącz"));
+    polarityButton.setButtonText(pl("Odwróć polaryzację"));
+    polarityButton.setTooltip(pl("Odwraca fazę kanału o 180°. Pomaga, gdy stopa i bas się znoszą."));
+    for (auto* button : { &duckOnButton, &polarityButton })
+    {
+        button->setColour(juce::ToggleButton::textColourId, colours::quiet);
+        addAndMakeVisible(button);
+    }
+    styleCombo(duckModeBox, AgentProcessor::duckModeNames());
+    styleCombo(duckSyncBox, AgentProcessor::duckSyncNames());
+    duckSyncBox.setTooltip(pl("Czas powrotu dopasowany do tempa utworu."));
+    addAndMakeVisible(duckModeBox);
+    addAndMakeVisible(duckSyncBox);
+    for (auto* slider : { &duckFreqSlider, &duckDepthSlider, &duckThresholdSlider, &duckAttackSlider, &duckReleaseSlider })
+    {
+        styleSlider(*slider);
+        slider->setTextBoxStyle(juce::Slider::TextBoxRight, false, 70, 20);
+        addAndMakeVisible(slider);
+    }
+
     auto& state = processor.parameters;
     roleAttachment = std::make_unique<ComboAttachment>(state, AgentProcessor::roleId, roleBox);
     measureAttachment = std::make_unique<ComboAttachment>(state, AgentProcessor::measureId, measureBox);
@@ -121,10 +152,20 @@ AgentEditor::AgentEditor(AgentProcessor& p)
     trimAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::trimId, trimSlider);
     ceilingAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::peakCeilingId, ceilingSlider);
     learnTimeAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::learnTimeId, learnTimeSlider);
+    duckOnAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(state, AgentProcessor::duckOnId, duckOnButton);
+    polarityAttachment
+        = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(state, AgentProcessor::polarityId, polarityButton);
+    duckModeAttachment = std::make_unique<ComboAttachment>(state, AgentProcessor::duckModeId, duckModeBox);
+    duckSyncAttachment = std::make_unique<ComboAttachment>(state, AgentProcessor::duckSyncId, duckSyncBox);
+    duckFreqAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::duckFreqId, duckFreqSlider);
+    duckDepthAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::duckDepthId, duckDepthSlider);
+    duckThresholdAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::duckThresholdId, duckThresholdSlider);
+    duckAttackAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::duckAttackId, duckAttackSlider);
+    duckReleaseAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::duckReleaseId, duckReleaseSlider);
 
     shownResultSerial = processor.lastResult().serial;
     processor.setSpectrumVisible(true);
-    setSize(520, 720);
+    setSize(520, 900);
     startTimerHz(30);
 }
 
@@ -221,6 +262,8 @@ void AgentEditor::timerCallback()
         eqStatus.setColour(juce::Label::textColourId, colours::quiet);
     }
 
+    updateDuckStatus();
+
     std::array<double, ma::ui::SpectrumView::kMaxBands> levels {}, centres {};
     const bool profile = showProfileButton.getToggleState() && processor.hasProfile();
     if (profile)
@@ -229,6 +272,51 @@ void AgentEditor::timerCallback()
         processor.copyLiveSpectrum(levels.data(), centres.data());
     spectrumView.setBands(levels.data(), centres.data(), AgentProcessor::numSpectrumBands());
     showProfileButton.setEnabled(processor.hasProfile());
+}
+
+void AgentEditor::updateDuckStatus()
+{
+    const auto dynamics = processor.currentDynamics();
+    const bool on = dynamics.duck.on > 0.5f;
+    const bool synced = dynamics.sync > 0;
+    duckReleaseSlider.setEnabled(!synced || processor.hostTempo() <= 0.0);
+    duckFreqSlider.setEnabled(dynamics.duck.wholeSignal < 0.5f);
+
+    juce::String text;
+    auto colour = colours::quiet;
+    if (!processor.sidechainConnected())
+    {
+        text = on ? pl("Brak sygnału na wejściu sidechain. W mikserze FL: na kanale stopy kliknij prawym strzałkę "
+                       "wysyłki do tego kanału, wybierz „Sidechain to this track”, potem w oknie wtyczki (ikona "
+                       "wtyczki, Processing) ustaw wejście sidechain.")
+                  : pl("Wyłączone. Mózg może je zaproponować dla basu pod stopą.");
+        colour = on ? colours::warning : colours::quiet;
+    }
+    else
+    {
+        text = "Sidechain " + ma::ui::formatDb(processor.sidechainLevelDb(), "dBFS");
+        if (on)
+            text += pl(", ustępuje o ") + juce::String(processor.duckReductionDb(), 1) + " dB";
+        if (synced && processor.hostTempo() > 0.0)
+            text += pl(", powrót ") + juce::String(juce::roundToInt(processor.effectiveReleaseMs())) + " ms ("
+                    + duckSyncBox.getText() + ")";
+        else if (synced)
+            text += pl(", host nie podał tempa, powrót ") + juce::String(juce::roundToInt(processor.effectiveReleaseMs())) + " ms";
+        if (processor.correlationValid())
+        {
+            const double r = processor.sidechainLowCorrelation();
+            text += pl("\nFaza z sidechainem w basie: ") + juce::String(r, 2);
+            if (r < -0.2)
+            {
+                text += pl(" (znoszą się, spróbuj odwrócić polaryzację)");
+                colour = colours::warning;
+            }
+        }
+        if (colour != colours::warning)
+            colour = on ? colours::good : colours::quiet;
+    }
+    duckStatus.setText(text, juce::dontSendNotification);
+    duckStatus.setColour(juce::Label::textColourId, colour);
 }
 
 void AgentEditor::paint(juce::Graphics& g)
@@ -301,6 +389,35 @@ void AgentEditor::resized()
     eqCurve.setBounds(eqRow);
 
     area.removeFromTop(10);
+    row = area.removeFromTop(24);
+    duckLabel.setBounds(row.removeFromLeft(150));
+    duckOnButton.setBounds(row.removeFromLeft(72));
+    duckModeBox.setBounds(row.removeFromLeft(105).reduced(0, 1));
+    row.removeFromLeft(8);
+    polarityButton.setBounds(row);
+    area.removeFromTop(4);
+    const auto halfRow = [&](juce::Rectangle<int> r, juce::Label& label, juce::Component& control) {
+        label.setBounds(r.removeFromLeft(70));
+        control.setBounds(r);
+    };
+    for (auto pair : { std::pair { std::pair { &duckFreqLabel, &duckFreqSlider }, std::pair { &duckDepthLabel, &duckDepthSlider } },
+                       std::pair { std::pair { &duckThresholdLabel, &duckThresholdSlider },
+                                   std::pair { &duckAttackLabel, &duckAttackSlider } } })
+    {
+        row = area.removeFromTop(24);
+        auto left = row.removeFromLeft(row.getWidth() / 2);
+        halfRow(left.withTrimmedRight(8), *pair.first.first, *pair.first.second);
+        halfRow(row, *pair.second.first, *pair.second.second);
+        area.removeFromTop(2);
+    }
+    row = area.removeFromTop(24);
+    duckSyncBox.setBounds(row.removeFromRight(100).reduced(0, 1));
+    row.removeFromRight(8);
+    halfRow(row, duckReleaseLabel, duckReleaseSlider);
+    area.removeFromTop(4);
+    duckStatus.setBounds(area.removeFromTop(62));
+
+    area.removeFromTop(8);
     row = area.removeFromTop(22);
     showProfileButton.setBounds(row.removeFromRight(190));
     spectrumLabel.setBounds(row);

@@ -14,6 +14,9 @@ constexpr int kUpdateHz = 5;
 constexpr double kSmoothingSeconds = 3.0;
 constexpr std::uint64_t kSpectraRequestMs = 3000;
 constexpr std::uint64_t kAgentSwitchMs = 400; // Agents poll the bus at 10 Hz
+constexpr double kCancellingCorrelation = -0.2;  // low-band correlation with the sidechain that loses low end
+constexpr double kDuckMaxHz = 300.0;             // collisions below this are timing problems (kick vs bass)
+constexpr int kDuckSync = 2;                     // release in a sixteenth: back before the next off-beat
 
 juce::String quoted(const juce::String& name)
 {
@@ -120,6 +123,11 @@ void BrainProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         spectrum.reset();
         correlation.reset();
     }
+
+    if (auto* head = getPlayHead())
+        if (const auto position = head->getPosition())
+            if (const auto bpm = position->getBpm())
+                hostBpm.store(*bpm);
 
     // Analysis only: the audio passes through untouched.
     const auto* const* input = buffer.getArrayOfReadPointers();
@@ -415,6 +423,53 @@ void BrainProcessor::buildReport()
         report.push_back(item);
     }
 
+    // Kick and bass in time: dynamic give-way and polarity, measured by Agents with a sidechain.
+    {
+        juce::StringArray noSignal, cancelling, ducking;
+        bool kick = false, bass = false, anySidechain = false;
+        for (const auto& channel : mix.channels)
+        {
+            kick = kick || channel.data.role == 1;
+            bass = bass || channel.data.role == 2;
+            const bool connected = channel.data.sidechainConnected != 0;
+            anySidechain = anySidechain || connected;
+            if (channel.data.duck.on > 0.5f && !connected)
+                noSignal.add(channel.name);
+            if (connected && channel.data.correlationValid != 0 && channel.data.sidechainLowCorrelation < kCancellingCorrelation)
+                cancelling.add(channel.name + " (" + juce::String(channel.data.sidechainLowCorrelation, 2) + ")");
+            if (connected && channel.data.duck.on > 0.5f)
+                ducking.add(channel.name + pl(" do ") + juce::String(channel.data.duckReductionDb, 1) + " dB");
+        }
+
+        MixSnapshot::ReportItem item;
+        item.title = pl("Stopa i bas w czasie");
+        if (!cancelling.isEmpty())
+        {
+            item.status = Status::problem;
+            item.detail = pl("W basie znosi się z sidechainem: ") + joinNames(cancelling)
+                          + pl(". „Zaproponuj” odwróci polaryzację, porównaj „Przed / po”.");
+        }
+        else if (!noSignal.isEmpty())
+        {
+            item.status = Status::warning;
+            item.detail = pl("Ustępowanie włączone, ale brak sygnału sidechain: ") + joinNames(noSignal)
+                          + pl(". W mikserze FL na kanale stopy kliknij prawym strzałkę wysyłki do tego kanału i wybierz "
+                               "„Sidechain to this track”.");
+        }
+        else if (anySidechain)
+        {
+            item.status = Status::good;
+            item.detail = ducking.isEmpty() ? pl("Sidechain podłączony, faza w basie w porządku.")
+                                            : pl("Faza w porządku. Ustępuje: ") + joinNames(ducking) + ".";
+        }
+        else if (kick && bass)
+        {
+            item.detail = pl("Podłącz stopę jako sidechain do Agenta basu, żeby sprawdzić fazę i ustępować dynamicznie.");
+        }
+        if (item.detail.isNotEmpty())
+            report.push_back(item);
+    }
+
     // Collisions.
     {
         int valid = 0;
@@ -525,10 +580,136 @@ void BrainProcessor::propose()
                         + hzText(change.lowHz) + pl("–") + hzText(change.highHz) + " ("
                         + juce::String(juce::roundToInt(change.scoreBefore * 100.0)) + pl("% → ")
                         + juce::String(juce::roundToInt(change.scoreAfter * 100.0)) + "%)";
-            // Stopa and bas: a static cut is a first step; the dynamic one comes in phase 4.
-            if (masker.data.role == 2 && masked.data.role == 1)
-                item.text += pl(". Docelowo dynamicznie (faza 4)");
         }
+        currentProposal.items.push_back(item);
+    }
+    proposeDynamics();
+}
+
+juce::String BrainProcessor::kickName() const
+{
+    for (const auto& channel : mix.channels)
+        if (channel.data.role == 1)
+            return quoted(channel.name);
+    return pl("stopy");
+}
+
+void BrainProcessor::proposeDynamics()
+{
+    const double bpm = tempoBpm();
+    const double releaseMs = bpm > 0.0 ? ma::syncedReleaseMs(bpm, ma::bus::duckSyncFraction(kDuckSync)) : 120.0;
+    const auto syncName = ma::ui::pl("1/16");
+
+    // Low collisions with the kick happen only when it hits, so the other channel gives way
+    // in that band only then. Candidates: low masking issues where the kick is masked (or the
+    // bass masks), and any bass sitting within 10 dB of the kick in the kick's strongest low
+    // band; the masking score alone misses that when the kick's click spreads over many bands.
+    struct Candidate
+    {
+        int masker, masked;
+        double lowHz, highHz, strength;
+    };
+    std::vector<Candidate> candidates;
+    for (const auto& issue : mix.masking.issues)
+    {
+        if (issue.score < 0.3 || issue.highHz > kDuckMaxHz)
+            continue;
+        const auto& masker = mix.channels[static_cast<size_t>(issue.masker)];
+        const auto& masked = mix.channels[static_cast<size_t>(issue.masked)];
+        if (masker.data.role != 1 && (masked.data.role == 1 || masker.data.role == 2))
+            candidates.push_back({ issue.masker, issue.masked, issue.lowHz, issue.highHz, issue.score });
+    }
+    for (size_t k = 0; k < mix.channels.size(); ++k)
+    {
+        const auto& kick = mix.channels[k];
+        if (kick.data.role != 1 || !kick.spectrumValid)
+            continue;
+        int peak = -1;
+        for (int b = 0; b < ma::bus::kBands && ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b) < kDuckMaxHz; ++b)
+            if (peak < 0 || kick.heardDb[static_cast<size_t>(b)] > kick.heardDb[static_cast<size_t>(peak)])
+                peak = b;
+        if (peak < 0 || kick.heardDb[static_cast<size_t>(peak)] < -90.0)
+            continue;
+        for (size_t c = 0; c < mix.channels.size(); ++c)
+        {
+            const auto& other = mix.channels[c];
+            if (other.data.role != 2 || !other.spectrumValid)
+                continue;
+            const double gap = other.heardDb[static_cast<size_t>(peak)] - kick.heardDb[static_cast<size_t>(peak)];
+            if (gap < -10.0)
+                continue;
+            const double low = ma::SpectrumAnalyzer::bandEdgeHz(ma::BandScale::erb, std::max(0, peak - 1));
+            const double high = ma::SpectrumAnalyzer::bandEdgeHz(ma::BandScale::erb, std::min(ma::bus::kBands, peak + 2));
+            candidates.push_back({ static_cast<int>(c), static_cast<int>(k), low, high, juce::jlimit(0.0, 1.0, (gap + 10.0) / 10.0) });
+        }
+    }
+
+    std::vector<int> ducked;
+    for (const auto& candidate : candidates)
+    {
+        if (std::find(ducked.begin(), ducked.end(), candidate.masker) != ducked.end())
+            continue;
+        ducked.push_back(candidate.masker);
+        const auto& masker = mix.channels[static_cast<size_t>(candidate.masker)];
+        const auto& masked = mix.channels[static_cast<size_t>(candidate.masked)];
+        const ma::MaskingIssue issue { candidate.masker, candidate.masked, candidate.strength, candidate.lowHz, candidate.highHz, 0, 0 };
+
+        const bool connected = masker.data.sidechainConnected != 0;
+        const bool alreadyOn = masker.data.duck.on > 0.5f && connected;
+
+        // The static cut for the same pair is the weaker fix; leave it for the user to pick.
+        for (auto& item : currentProposal.items)
+            if (item.action == Proposal::Item::Action::solver && item.change.kind == ma::SolverChange::Kind::eqCut
+                && item.change.channel == issue.masker && item.change.maskedChannel == issue.masked)
+            {
+                item.selected = false;
+                item.text += alreadyOn ? pl(". Ustępowanie dynamiczne już działa, cięcie zwykle zbędne")
+                                       : pl(". Lepiej ustępowanie dynamiczne niżej");
+            }
+        if (alreadyOn)
+            continue;
+
+        Proposal::Item item;
+        item.action = Proposal::Item::Action::duck;
+        item.owner = masker.owner;
+        item.maskedOwner = masked.owner;
+        const double centre = std::sqrt(issue.lowHz * issue.highHz);
+        auto& duck = item.duck;
+        duck.on = 1.0f;
+        duck.wholeSignal = 0.0f;
+        duck.hz = static_cast<float>(std::round(centre));
+        duck.q = static_cast<float>(juce::jlimit(0.5, 3.0, centre / std::max(1.0, issue.highHz - issue.lowHz)));
+        duck.depthDb = static_cast<float>(std::round((6.0 + 4.0 * issue.score) * 2.0) / 2.0);
+        // Full depth on the kick's peaks: the detector reaches it 6 dB over the threshold.
+        duck.thresholdDb = connected ? static_cast<float>(juce::jlimit(-50.0, -6.0, std::round(masker.data.sidechainDb - 18.0)))
+                                     : -30.0f;
+        duck.attackMs = 3.0f;
+        duck.releaseMs = static_cast<float>(std::round(releaseMs));
+        item.duckSync = bpm > 0.0 ? kDuckSync : 0;
+
+        item.text = quoted(masker.name) + pl(": ustępuje ") + quoted(masked.name) + pl(" dynamicznie, do -")
+                    + juce::String(duck.depthDb, 1) + pl(" dB przy ") + hzText(duck.hz) + pl(", tylko gdy stopa gra (powrót ")
+                    + (bpm > 0.0 ? syncName + " = " : juce::String()) + juce::String(juce::roundToInt(duck.releaseMs)) + " ms)";
+        if (connected)
+            item.text += pl(". Sidechain podłączony");
+        else
+            item.text += pl(". Potrzebny sidechain: w mikserze FL na kanale ") + kickName()
+                         + pl(" kliknij prawym strzałkę wysyłki pod kanałem ") + quoted(masker.name)
+                         + pl(" i wybierz „Sidechain to this track”");
+        currentProposal.items.push_back(item);
+    }
+
+    // Polarity: a channel that cancels the sidechain in the low end loses the low end in the mix.
+    for (const auto& channel : mix.channels)
+    {
+        if (channel.data.sidechainConnected == 0 || channel.data.correlationValid == 0
+            || channel.data.sidechainLowCorrelation >= kCancellingCorrelation)
+            continue;
+        Proposal::Item item;
+        item.action = Proposal::Item::Action::polarity;
+        item.owner = channel.owner;
+        item.text = quoted(channel.name) + pl(": odwróć polaryzację, bo w basie znosi się z sidechainem (korelacja ")
+                    + juce::String(channel.data.sidechainLowCorrelation, 2) + pl("). Sprawdź „Przed / po”");
         currentProposal.items.push_back(item);
     }
 }
@@ -661,7 +842,7 @@ int BrainProcessor::applySelected()
 
     double globalGain = 0.0;
     for (const auto& item : currentProposal.items)
-        if (item.selected && item.change.kind == ma::SolverChange::Kind::globalGain)
+        if (item.selected && item.action == Proposal::Item::Action::solver && item.change.kind == ma::SolverChange::Kind::globalGain)
             globalGain += item.change.gainDb;
 
     int sent = 0;
@@ -675,16 +856,40 @@ int BrainProcessor::applySelected()
         bool eqChanges = false;
         for (const auto& item : currentProposal.items)
         {
-            const bool eqKind = item.change.kind == ma::SolverChange::Kind::eqCut
+            const bool eqKind = item.action == Proposal::Item::Action::solver
+                                && (item.change.kind == ma::SolverChange::Kind::eqCut
                                 || item.change.kind == ma::SolverChange::Kind::tonalBoost
-                                || item.change.kind == ma::SolverChange::Kind::tonalCut;
+                                || item.change.kind == ma::SolverChange::Kind::tonalCut);
             if (!item.selected || !eqKind || item.owner != channel.owner)
                 continue;
             if (proposed != currentProposal.eq.end())
                 eq[static_cast<size_t>(item.change.eqSlot)] = proposed->second[static_cast<size_t>(item.change.eqSlot)];
             eqChanges = true;
         }
-        if (!eqChanges && std::abs(globalGain) < 0.05)
+        auto duck = channel.data.duck;
+        auto duckSync = channel.data.duckSync;
+        auto polarity = channel.data.polarityInverted;
+        bool dynamicChanges = false;
+        for (const auto& item : currentProposal.items)
+        {
+            if (!item.selected || item.owner != channel.owner)
+                continue;
+            if (item.action == Proposal::Item::Action::duck)
+            {
+                duck = item.duck;
+                // The threshold follows the kick's level, which the global gain moves too.
+                duck.thresholdDb = static_cast<float>(juce::jlimit(-60.0, 0.0, duck.thresholdDb + globalGain));
+                duckSync = item.duckSync;
+                dynamicChanges = true;
+            }
+            else if (item.action == Proposal::Item::Action::polarity)
+            {
+                polarity = polarity != 0 ? 0 : 1;
+                dynamicChanges = true;
+            }
+        }
+
+        if (!eqChanges && !dynamicChanges && std::abs(globalGain) < 0.05)
             continue;
         if (!eqChanges)
             for (int b = 0; b < ma::kEqBands; ++b)
@@ -697,6 +902,9 @@ int BrainProcessor::applySelected()
         command.trimDb = static_cast<float>(juce::jlimit(-24.0, 24.0, channel.data.trimDb + globalGain));
         for (int b = 0; b < ma::kEqBands; ++b)
             command.eq[b] = eq[static_cast<size_t>(b)];
+        command.duck = duck;
+        command.duckSync = duckSync;
+        command.polarityInverted = polarity;
         sendCommand(channel.owner, command);
         ++sent;
     }
