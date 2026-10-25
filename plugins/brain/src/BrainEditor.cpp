@@ -1,5 +1,6 @@
 #include "BrainEditor.h"
 
+#include <array>
 #include <cmath>
 
 using ma::ui::pl;
@@ -13,54 +14,7 @@ void styleLabel(juce::Label& label, const juce::String& text, juce::Colour colou
     label.setColour(juce::Label::textColourId, colour);
     label.setFont(juce::FontOptions(size));
 }
-
-constexpr double kSpectrumFloorDb = -72.0;
 } // namespace
-
-void SpectrumView::setBands(const std::array<double, ma::SpectrumAnalyzer::kNumBands>& newBands)
-{
-    bands = newBands;
-    repaint();
-}
-
-void SpectrumView::paint(juce::Graphics& g)
-{
-    auto area = getLocalBounds().toFloat();
-    g.setColour(colours::panel);
-    g.fillRoundedRectangle(area, 4.0f);
-
-    auto plot = area.reduced(8.0f, 6.0f);
-    const auto labelArea = plot.removeFromBottom(14.0f);
-
-    // Grid every 12 dB.
-    g.setColour(colours::quiet.withAlpha(0.2f));
-    for (double db = 0.0; db >= kSpectrumFloorDb; db -= 12.0)
-    {
-        const auto y = plot.getY() + static_cast<float>(plot.getHeight() * (db / kSpectrumFloorDb));
-        g.drawHorizontalLine(static_cast<int>(y), plot.getX(), plot.getRight());
-    }
-
-    const int n = ma::SpectrumAnalyzer::kNumBands;
-    const float slot = plot.getWidth() / n;
-    for (int b = 0; b < n; ++b)
-    {
-        const double db = bands[static_cast<size_t>(b)];
-        const double proportion = std::isfinite(db) ? juce::jlimit(0.0, 1.0, 1.0 - db / kSpectrumFloorDb) : 0.0;
-        const float h = static_cast<float>(plot.getHeight() * proportion);
-        g.setColour(colours::accent);
-        g.fillRect(plot.getX() + b * slot + 1.0f, plot.getBottom() - h, slot - 2.0f, h);
-    }
-
-    g.setColour(colours::quiet);
-    g.setFont(juce::FontOptions(10.0f));
-    for (int b : { 2, 7, 12, 17, 22, 27 }) // 31.5, 100, 315, 1k, 3.15k, 10k Hz
-    {
-        const double hz = ma::SpectrumAnalyzer::bandCentreHz(b);
-        const auto text = hz >= 1000.0 ? juce::String(hz / 1000.0, hz < 3000.0 ? 0 : 1) + "k" : juce::String(juce::roundToInt(hz));
-        g.drawText(text, juce::Rectangle<float>(plot.getX() + b * slot - 10.0f, labelArea.getY(), slot + 20.0f, 14.0f),
-                   juce::Justification::centred);
-    }
-}
 
 BrainEditor::BrainEditor(BrainProcessor& p)
     : AudioProcessorEditor(&p), processor(p)
@@ -133,10 +87,13 @@ void BrainEditor::timerCallback()
         headroomStatus.setColour(juce::Label::textColourId, colours::critical);
     }
 
-    std::array<double, ma::SpectrumAnalyzer::kNumBands> bands {};
+    std::array<double, ma::SpectrumAnalyzer::kNumBands> bands {}, centres {};
     for (int b = 0; b < ma::SpectrumAnalyzer::kNumBands; ++b)
+    {
         bands[static_cast<size_t>(b)] = processor.bandDb(b);
-    spectrumView.setBands(bands);
+        centres[static_cast<size_t>(b)] = ma::SpectrumAnalyzer::bandCentreHz(b);
+    }
+    spectrumView.setBands(bands.data(), centres.data(), ma::SpectrumAnalyzer::kNumBands);
 }
 
 void BrainEditor::paint(juce::Graphics& g)

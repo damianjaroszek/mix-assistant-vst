@@ -11,15 +11,50 @@ namespace
 {
 constexpr double kPi = 3.14159265358979323846;
 constexpr int kBandOf1kHz = 17;
-} // namespace
+constexpr int kErbBands = 40;
 
-double SpectrumAnalyzer::bandCentreHz(int band)
+// ERB-rate scale (Glasberg & Moore 1990): number of ERBs below a frequency.
+double erbRate(double hz)
 {
-    return 1000.0 * std::pow(2.0, (band - kBandOf1kHz) / 3.0);
+    return 21.4 * std::log10(1.0 + 0.00437 * hz);
 }
 
-void SpectrumAnalyzer::prepare(double newSampleRate, int fftOrder)
+double erbRateToHz(double erb)
 {
+    return (std::pow(10.0, erb / 21.4) - 1.0) / 0.00437;
+}
+
+const double kErbLow = erbRate(20.0);
+const double kErbStep = (erbRate(20000.0) - kErbLow) / kErbBands;
+
+// Band index for a frequency, or -1 outside the layout.
+int bandOf(BandScale scale, double hz)
+{
+    int band = -1;
+    if (scale == BandScale::thirdOctave)
+        band = static_cast<int>(std::floor(3.0 * std::log2(hz / 1000.0) + kBandOf1kHz + 0.5));
+    else
+        band = static_cast<int>(std::floor((erbRate(hz) - kErbLow) / kErbStep));
+    return band >= 0 && band < SpectrumAnalyzer::numBandsFor(scale) ? band : -1;
+}
+} // namespace
+
+int SpectrumAnalyzer::numBandsFor(BandScale scale)
+{
+    return scale == BandScale::thirdOctave ? kNumBands : kErbBands;
+}
+
+double SpectrumAnalyzer::bandCentreHz(BandScale scale, int band)
+{
+    if (scale == BandScale::thirdOctave)
+        return 1000.0 * std::pow(2.0, (band - kBandOf1kHz) / 3.0);
+    return erbRateToHz(kErbLow + (band + 0.5) * kErbStep);
+}
+
+void SpectrumAnalyzer::prepare(double newSampleRate, BandScale newScale, int fftOrder)
+{
+    bandScale = newScale;
+    bandCount = numBandsFor(newScale);
     sampleRate = newSampleRate;
     fftSize = 1 << fftOrder;
     hopSize = fftSize / 2;
@@ -41,11 +76,21 @@ void SpectrumAnalyzer::prepare(double newSampleRate, int fftOrder)
     binToBand.assign(static_cast<size_t>(fftSize / 2), -1);
     for (int bin = 1; bin < fftSize / 2; ++bin)
     {
-        const double hz = bin * sampleRate / fftSize;
-        const int band = static_cast<int>(std::floor(3.0 * std::log2(hz / 1000.0) + kBandOf1kHz + 0.5));
-        if (band >= 0 && band < kNumBands)
-            binToBand[static_cast<size_t>(bin)] = band;
+        binToBand[static_cast<size_t>(bin)] = bandOf(bandScale, bin * sampleRate / fftSize);
     }
+
+    bitReversed.assign(static_cast<size_t>(fftSize), 0);
+    for (int i = 1, j = 0; i < fftSize; ++i)
+    {
+        int bit = fftSize >> 1;
+        for (; j & bit; bit >>= 1)
+            j ^= bit;
+        j ^= bit;
+        bitReversed[static_cast<size_t>(i)] = j;
+    }
+    twiddles.resize(static_cast<size_t>(fftSize / 2));
+    for (int k = 0; k < fftSize / 2; ++k)
+        twiddles[static_cast<size_t>(k)] = std::polar(1.0, -2.0 * kPi * k / fftSize);
 
     input.assign(static_cast<size_t>(fftSize), 0.0);
     buffer.assign(static_cast<size_t>(fftSize), {});
@@ -99,7 +144,7 @@ void SpectrumAnalyzer::analyseFrame()
             frame[static_cast<size_t>(band)] += std::norm(buffer[static_cast<size_t>(bin)]) * powerScale;
     }
 
-    for (int b = 0; b < kNumBands; ++b)
+    for (int b = 0; b < bandCount; ++b)
     {
         sum[static_cast<size_t>(b)] += frame[static_cast<size_t>(b)];
         recent[static_cast<size_t>(b)] = frames == 0
@@ -113,31 +158,31 @@ void SpectrumAnalyzer::fft(std::vector<std::complex<double>>& data) const
 {
     const int n = static_cast<int>(data.size());
 
-    for (int i = 1, j = 0; i < n; ++i)
+    for (int i = 1; i < n; ++i)
     {
-        int bit = n >> 1;
-        for (; j & bit; bit >>= 1)
-            j ^= bit;
-        j ^= bit;
+        const int j = bitReversed[static_cast<size_t>(i)];
         if (i < j)
             std::swap(data[static_cast<size_t>(i)], data[static_cast<size_t>(j)]);
     }
 
+    // Iterative radix-2. Products are written out because std::complex multiplication
+    // carries NaN/infinity handling that makes it several times slower.
     for (int len = 2; len <= n; len <<= 1)
     {
-        const double angle = -2.0 * kPi / len;
-        const std::complex<double> step(std::cos(angle), std::sin(angle));
-        for (int start = 0; start < n; start += len)
+        const int half = len / 2;
+        const int stride = n / len;
+        for (int k = 0; k < half; ++k)
         {
-            std::complex<double> w(1.0, 0.0);
-            for (int k = 0; k < len / 2; ++k)
+            const double wr = twiddles[static_cast<size_t>(k * stride)].real();
+            const double wi = twiddles[static_cast<size_t>(k * stride)].imag();
+            for (int start = k; start < n; start += len)
             {
-                auto& a = data[static_cast<size_t>(start + k)];
-                auto& b = data[static_cast<size_t>(start + k + len / 2)];
-                const auto t = w * b;
-                b = a - t;
-                a = a + t;
-                w *= step;
+                auto& a = data[static_cast<size_t>(start)];
+                auto& b = data[static_cast<size_t>(start + half)];
+                const double tr = wr * b.real() - wi * b.imag();
+                const double ti = wr * b.imag() + wi * b.real();
+                b = { a.real() - tr, a.imag() - ti };
+                a = { a.real() + tr, a.imag() + ti };
             }
         }
     }
@@ -146,7 +191,8 @@ void SpectrumAnalyzer::fft(std::vector<std::complex<double>>& data) const
 SpectrumAnalyzer::Bands SpectrumAnalyzer::averageDb() const
 {
     Bands out {};
-    for (int b = 0; b < kNumBands; ++b)
+    out.fill(kMinusInfinityDb);
+    for (int b = 0; b < bandCount; ++b)
         out[static_cast<size_t>(b)] = frames > 0 ? powerToDb(sum[static_cast<size_t>(b)] / frames) : kMinusInfinityDb;
     return out;
 }
@@ -154,7 +200,8 @@ SpectrumAnalyzer::Bands SpectrumAnalyzer::averageDb() const
 SpectrumAnalyzer::Bands SpectrumAnalyzer::recentDb() const
 {
     Bands out {};
-    for (int b = 0; b < kNumBands; ++b)
+    out.fill(kMinusInfinityDb);
+    for (int b = 0; b < bandCount; ++b)
         out[static_cast<size_t>(b)] = frames > 0 ? powerToDb(recent[static_cast<size_t>(b)]) : kMinusInfinityDb;
     return out;
 }

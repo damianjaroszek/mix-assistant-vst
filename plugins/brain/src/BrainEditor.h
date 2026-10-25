@@ -5,19 +5,6 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
-#include <array>
-
-// Third-octave spectrum of the mix, -72 dB to 0 dB per band.
-class SpectrumView : public juce::Component
-{
-public:
-    void setBands(const std::array<double, ma::SpectrumAnalyzer::kNumBands>& newBands);
-    void paint(juce::Graphics&) override;
-
-private:
-    std::array<double, ma::SpectrumAnalyzer::kNumBands> bands {};
-};
-
 class BrainEditor : public juce::AudioProcessorEditor, private juce::Timer
 {
 public:
@@ -38,7 +25,7 @@ private:
     juce::Label ceilingLabel, headroomStatus;
     juce::Slider ceilingSlider;
     juce::TextButton resetButton;
-    SpectrumView spectrumView;
+    ma::ui::SpectrumView spectrumView;
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> ceilingAttachment;
 

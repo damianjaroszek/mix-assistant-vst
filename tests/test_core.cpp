@@ -1,12 +1,16 @@
 // Unit tests for the DSP core. Plain asserts, no framework, so they build anywhere.
 
+#include "ma/ChannelAnalyzer.h"
 #include "ma/Decibels.h"
+#include "ma/EqualLoudness.h"
+#include "ma/GainStaging.h"
 #include "ma/LevelStats.h"
 #include "ma/LoudnessMeter.h"
 #include "ma/SpectrumAnalyzer.h"
 #include "ma/TruePeakMeter.h"
 #include "ma/Wav.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <functional>
@@ -156,6 +160,86 @@ void testLevelsAndTrim()
     checkNear(gated.rmsDb(), -15.01, 0.05, "gate ignores near-silent passages");
 }
 
+void testErbSpectrum()
+{
+    checkNear(ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, 0), 33.5, 2.0, "lowest ERB band sits just above 20 Hz");
+    check(ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, 39) < 20000.0, "highest ERB band stays below 20 kHz");
+
+    // ERB bands are narrow in Hz at the bottom and wide at the top, like the ear.
+    const double lowWidth = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, 1) - ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, 0);
+    const double highWidth = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, 39) - ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, 38);
+    check(highWidth > 20.0 * lowWidth, "ERB bands widen with frequency");
+
+    const auto a = sine(48000.0, 5.0, 2, 1000.0, 0.5);
+    ma::SpectrumAnalyzer s;
+    s.prepare(48000.0, ma::BandScale::erb);
+    run(a, [&](const float* const* c, int nc, int n) { s.process(c, nc, n); });
+    const auto bands = s.averageDb();
+    double total = 0.0;
+    int peakBand = 0;
+    for (int b = 0; b < s.numBands(); ++b)
+    {
+        total += std::pow(10.0, bands[static_cast<size_t>(b)] / 10.0);
+        if (bands[static_cast<size_t>(b)] > bands[static_cast<size_t>(peakBand)])
+            peakBand = b;
+    }
+    check(s.centreHz(peakBand) > 850.0 && s.centreHz(peakBand) < 1150.0, "1 kHz sine peaks in the ERB band around 1 kHz");
+    checkNear(10.0 * std::log10(total), ma::gainToDb(0.5 / std::sqrt(2.0)), 0.2, "ERB bands add up to the RMS level");
+}
+
+void testEqualLoudness()
+{
+    checkNear(ma::equalLoudnessSpl(1000.0, 40.0), 40.0, 0.2, "1 kHz at 40 phon is 40 dB SPL");
+    checkNear(ma::equalLoudnessSpl(1000.0, 80.0), 80.0, 0.2, "1 kHz at 80 phon is 80 dB SPL");
+    checkNear(ma::equalLoudnessWeightDb(1000.0), 0.0, 1e-9, "no weighting at 1 kHz");
+    check(ma::equalLoudnessWeightDb(50.0) > 15.0, "the ear hears 50 Hz much quieter than 1 kHz");
+    check(ma::equalLoudnessWeightDb(3150.0) < 0.0, "the ear is most sensitive around 3 kHz");
+    check(ma::equalLoudnessWeightDb(50.0, 40.0) > ma::equalLoudnessWeightDb(50.0, 80.0), "bass drops away more at low listening levels");
+}
+
+void testTrimPlan()
+{
+    auto plan = ma::planTrim(-24.0, -10.0, -18.0, -1.0);
+    check(plan.valid && !plan.limitedByPeak, "plain trim is not limited");
+    checkNear(plan.trimDb, 6.0, 1e-9, "trim brings -24 to -18");
+
+    plan = ma::planTrim(-24.0, -4.0, -18.0, -1.0);
+    check(plan.limitedByPeak, "trim is limited when the peak would cross the ceiling");
+    checkNear(plan.trimDb, 3.0, 1e-9, "limited trim leaves the true peak at the ceiling");
+
+    plan = ma::planTrim(ma::kMinusInfinityDb, ma::kMinusInfinityDb, -18.0, -1.0);
+    check(!plan.valid && plan.trimDb == 0.0, "silence gives no trim");
+}
+
+void testChannelAnalyzerSpeed()
+{
+    // The Agent's whole measurement chain on 60 s of stereo noise at 48 kHz.
+    const double rate = 48000.0;
+    ma::AudioData a;
+    a.sampleRate = rate;
+    a.channels.assign(2, std::vector<float>(static_cast<size_t>(rate * 60.0)));
+    unsigned state = 12345u;
+    for (auto& ch : a.channels)
+        for (auto& v : ch)
+        {
+            state = state * 1664525u + 1013904223u;
+            v = static_cast<float>(state >> 8) / 16777216.0f - 0.5f;
+        }
+
+    ma::ChannelAnalyzer analyzer;
+    analyzer.prepare(rate, 2);
+    const auto start = std::chrono::steady_clock::now();
+    run(a, [&](const float* const* c, int nc, int n) { analyzer.process(c, nc, n); });
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    const double realtime = 60.0 / seconds;
+    std::printf("INFO  Agent analysis runs %.0fx faster than real time (40 Agents learning at once use about %.1f%% of one core)\n",
+                realtime, 4000.0 / realtime);
+#ifdef NDEBUG
+    check(realtime > 100.0, "Agent analysis is fast enough for 40 channels");
+#endif
+    check(std::isfinite(analyzer.integratedLufs()) && analyzer.gatedSeconds() > 59.0, "analyser measured the whole passage");
+}
+
 void testWavRoundTrip()
 {
     const auto a = sine(44100.0, 0.5, 2, 440.0, 0.25);
@@ -173,6 +257,10 @@ int main()
     testTruePeak();
     testSpectrum();
     testLevelsAndTrim();
+    testErbSpectrum();
+    testEqualLoudness();
+    testTrimPlan();
+    testChannelAnalyzerSpeed();
     testWavRoundTrip();
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "OK" : "FAILED", failures, failures == 1 ? "" : "s");

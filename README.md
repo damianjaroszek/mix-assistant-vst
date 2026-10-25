@@ -10,9 +10,9 @@ Koncepcja, architektura i plan faz: [rewizja koncepcji](https://claude.ai/artifa
 
 | Część | Gdzie | Co robi |
 | --- | --- | --- |
-| **Agent** | `plugins/agent` | Wtyczka na końcu każdego kanału. Mierzy wejście (RMS, szczyt, LUFS) i przyciskiem „Naucz poziom” ustawia trim tak, żeby kanał siedział na docelowym poziomie (domyślnie -18 dBFS RMS). |
+| **Agent** | `plugins/agent` | Wtyczka na końcu każdego kanału. Ma rolę (stopa, bas, wokal...) i priorytet. „Naucz poziom” mierzy fragment utworu (RMS albo LUFS, true peak, widmo w pasmach ERB), kończy sam po ustawionym czasie i ustawia trim do poziomu docelowego (domyślnie -18 dBFS RMS), nigdy nie przekraczając limitu szczytu (domyślnie -1 dBTP). Pokazuje widmo ważone krzywą jednakowej głośności (ISO 226), czyli tak, jak słyszy je ucho; nauczony profil zapisuje się w projekcie. |
 | **Mózg** | `plugins/brain` | Wtyczka na końcu mastera. Mierzy sumę: LUFS (integrated, short-term), true peak, PLR, widmo w 31 pasmach 1/3 oktawy i sprawdza zapas na mastering. |
-| **Rdzeń DSP** | `core` | Pomiary wspólne dla wtyczek i laboratorium, bez zależności od JUCE: LUFS wg ITU-R BS.1770-4, true peak (4x oversampling), RMS z bramką, widmo 1/3 oktawy. |
+| **Rdzeń DSP** | `core` | Pomiary wspólne dla wtyczek i laboratorium, bez zależności od JUCE: LUFS wg ITU-R BS.1770-4, true peak (4x oversampling), RMS z bramką, widmo w pasmach 1/3 oktawy albo ERB, krzywe jednakowej głośności ISO 226:2003. |
 | **Laboratorium** | `lab` | `ma-lab`: ta sama analiza na stemach WAV wyeksportowanych z FL, plus analiza ich sumy. |
 | **Testy** | `tests` | Testy rdzenia, m.in. przypadki z EBU Tech 3341. |
 

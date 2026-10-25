@@ -1,5 +1,7 @@
 #include "AgentEditor.h"
 
+#include <array>
+
 using ma::ui::pl;
 namespace colours = ma::ui::colours;
 
@@ -19,26 +21,55 @@ void styleSlider(juce::Slider& slider)
     slider.setColour(juce::Slider::thumbColourId, colours::accent);
     slider.setColour(juce::Slider::trackColourId, colours::accent.withAlpha(0.5f));
 }
+
+void styleCombo(juce::ComboBox& box, const juce::StringArray& items)
+{
+    box.addItemList(items, 1);
+    box.setColour(juce::ComboBox::backgroundColourId, colours::panel);
+    box.setColour(juce::ComboBox::textColourId, colours::text);
+}
+
+juce::String signedDb(double db)
+{
+    return (db >= 0.0 ? "+" : "") + juce::String(db, 1) + " dB";
+}
 } // namespace
 
 AgentEditor::AgentEditor(AgentProcessor& p)
     : AudioProcessorEditor(&p), processor(p)
 {
     styleLabel(title, "Mix Assistant Agent", colours::text, 18.0f);
+    styleLabel(roleLabel, pl("Rola"), colours::quiet);
+    styleLabel(priorityLabel, pl("Priorytet"), colours::quiet);
     styleLabel(inputLabel, pl("Wejście (RMS)"), colours::quiet);
     styleLabel(lufsLabel, "LUFS (3 s)", colours::quiet);
     styleLabel(outputLabel, pl("Wyjście (szczyt)"), colours::quiet);
-    styleLabel(targetLabel, pl("Cel RMS"), colours::quiet);
+    styleLabel(measureLabel, pl("Miara i cel"), colours::quiet);
     styleLabel(trimLabel, "Trim", colours::quiet);
+    styleLabel(ceilingLabel, pl("Limit szczytu"), colours::quiet);
+    styleLabel(learnTimeLabel, pl("Czas nauki"), colours::quiet);
     styleLabel(inputValue, {}, colours::text);
     styleLabel(lufsValue, {}, colours::text);
     styleLabel(outputValue, {}, colours::text);
     styleLabel(status, pl("Puść najgęstszy fragment utworu i kliknij „Naucz poziom”."), colours::quiet, 13.0f);
     status.setJustificationType(juce::Justification::topLeft);
+    styleLabel(spectrumLabel, pl("Widmo tak, jak słyszy je ucho"), colours::quiet, 13.0f);
 
-    for (auto* label : { &title, &inputLabel, &lufsLabel, &outputLabel, &targetLabel, &trimLabel,
-                         &inputValue, &lufsValue, &outputValue, &status })
+    for (auto* label : { &title, &roleLabel, &priorityLabel, &inputLabel, &lufsLabel, &outputLabel, &measureLabel,
+                         &trimLabel, &ceilingLabel, &learnTimeLabel, &inputValue, &lufsValue, &outputValue, &status,
+                         &spectrumLabel })
         addAndMakeVisible(label);
+
+    styleCombo(roleBox, AgentProcessor::roleNames());
+    styleCombo(measureBox, { "RMS (dBFS)", "LUFS" });
+    addAndMakeVisible(roleBox);
+    addAndMakeVisible(measureBox);
+
+    for (auto* slider : { &prioritySlider, &targetSlider, &trimSlider, &ceilingSlider, &learnTimeSlider })
+    {
+        styleSlider(*slider);
+        addAndMakeVisible(slider);
+    }
 
     addAndMakeVisible(inputBar);
     addAndMakeVisible(outputBar);
@@ -49,20 +80,30 @@ AgentEditor::AgentEditor(AgentProcessor& p)
     learnButton.onClick = [this] { toggleLearning(); };
     addAndMakeVisible(learnButton);
 
-    styleSlider(targetSlider);
-    styleSlider(trimSlider);
-    addAndMakeVisible(targetSlider);
-    addAndMakeVisible(trimSlider);
-    targetAttachment = std::make_unique<Attachment>(processor.parameters, AgentProcessor::targetId, targetSlider);
-    trimAttachment = std::make_unique<Attachment>(processor.parameters, AgentProcessor::trimId, trimSlider);
+    showProfileButton.setButtonText(pl("Pokaż nauczony profil"));
+    showProfileButton.setColour(juce::ToggleButton::textColourId, colours::quiet);
+    addAndMakeVisible(showProfileButton);
+    addAndMakeVisible(spectrumView);
 
-    setSize(460, 330);
+    auto& state = processor.parameters;
+    roleAttachment = std::make_unique<ComboAttachment>(state, AgentProcessor::roleId, roleBox);
+    measureAttachment = std::make_unique<ComboAttachment>(state, AgentProcessor::measureId, measureBox);
+    priorityAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::priorityId, prioritySlider);
+    targetAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::targetId, targetSlider);
+    trimAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::trimId, trimSlider);
+    ceilingAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::peakCeilingId, ceilingSlider);
+    learnTimeAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::learnTimeId, learnTimeSlider);
+
+    shownResultSerial = processor.lastResult().serial;
+    processor.setSpectrumVisible(true);
+    setSize(520, 600);
     startTimerHz(30);
 }
 
 AgentEditor::~AgentEditor()
 {
     stopTimer();
+    processor.setSpectrumVisible(false);
 }
 
 void AgentEditor::toggleLearning()
@@ -70,35 +111,37 @@ void AgentEditor::toggleLearning()
     if (!processor.isLearning())
     {
         processor.startLearning();
-        learnButton.setButtonText(pl("Zakończ i ustaw"));
-        learnButton.setToggleState(true, juce::dontSendNotification);
-        status.setText(pl("Słucham... puść drop albo refren przez kilka sekund."), juce::dontSendNotification);
+        return;
+    }
+    processor.stopLearning();
+}
+
+void AgentEditor::showResult(const AgentProcessor::LearnResult& r)
+{
+    const juce::String unit = measureBox.getSelectedItemIndex() == 1 ? "LUFS" : "dBFS";
+    if (!r.applied)
+    {
+        status.setText(pl("Nic nie było słychać, trim bez zmian."), juce::dontSendNotification);
+        status.setColour(juce::Label::textColourId, colours::quiet);
         return;
     }
 
-    const double measured = processor.learnedRmsDb();
-    const bool applied = processor.stopLearningAndApply();
-    learnButton.setButtonText(pl("Naucz poziom"));
-    learnButton.setToggleState(false, juce::dontSendNotification);
-
-    if (applied)
-    {
-        const auto trim = processor.parameters.getRawParameterValue(AgentProcessor::trimId)->load();
-        status.setText(pl("Zmierzone RMS: ") + ma::ui::formatDb(measured, "dBFS")
-                           + pl(". Ustawiono trim ") + (trim >= 0 ? "+" : "") + juce::String(trim, 1) + " dB.",
-                       juce::dontSendNotification);
-    }
-    else
-    {
-        status.setText(pl("Nic nie było słychać, trim bez zmian."), juce::dontSendNotification);
-    }
+    juce::String text = pl("Zmierzone: ") + ma::ui::formatDb(r.measuredDb, unit.toRawUTF8())
+                        + ", true peak " + ma::ui::formatDb(r.truePeakDb, "dBTP")
+                        + pl(". Ustawiono trim ") + signedDb(r.trimDb) + ".";
+    if (r.limitedByPeak)
+        text += pl("\nTrim ograniczony, żeby szczyt nie przekroczył limitu. Kanał ma duże szczyty: "
+                   "rozważ kompresję albo limiter przed Agentem.");
+    status.setText(text, juce::dontSendNotification);
+    status.setColour(juce::Label::textColourId, r.limitedByPeak ? colours::warning : colours::good);
 }
 
 void AgentEditor::timerCallback()
 {
+    const bool lufs = measureBox.getSelectedItemIndex() == 1;
     const double rms = processor.inputRmsDb();
     inputBar.setLevel(rms);
-    inputBar.setTarget(processor.parameters.getRawParameterValue(AgentProcessor::targetId)->load());
+    inputBar.setTarget(lufs ? -INFINITY : processor.parameters.getRawParameterValue(AgentProcessor::targetId)->load());
     inputValue.setText(ma::ui::formatDb(rms, "dBFS"), juce::dontSendNotification);
     lufsValue.setText(ma::ui::formatDb(processor.inputShortTermLufs(), "LUFS"), juce::dontSendNotification);
 
@@ -106,10 +149,34 @@ void AgentEditor::timerCallback()
     outputBar.setLevel(out);
     outputValue.setText(ma::ui::formatDb(out, "dBFS"), juce::dontSendNotification);
 
-    if (processor.isLearning())
-        status.setText(pl("Słucham: ") + juce::String(processor.learnedSeconds(), 1) + " s, RMS "
-                           + ma::ui::formatDb(processor.learnedRmsDb(), "dBFS"),
+    const bool learning = processor.isLearning();
+    learnButton.setButtonText(learning ? pl("Zakończ teraz i ustaw") : pl("Naucz poziom"));
+    learnButton.setToggleState(learning, juce::dontSendNotification);
+    if (learning)
+    {
+        const double needed = processor.parameters.getRawParameterValue(AgentProcessor::learnTimeId)->load();
+        status.setText(pl("Słucham: ") + juce::String(processor.learningSeconds(), 1) + " / " + juce::String(needed, 0)
+                           + " s, " + ma::ui::formatDb(processor.learningMeasuredDb(), lufs ? "LUFS" : "dBFS")
+                           + pl("\nCisza się nie liczy. Skończę sam."),
                        juce::dontSendNotification);
+        status.setColour(juce::Label::textColourId, colours::text);
+    }
+
+    const auto result = processor.lastResult();
+    if (result.serial != shownResultSerial)
+    {
+        shownResultSerial = result.serial;
+        showResult(result);
+    }
+
+    std::array<double, ma::ui::SpectrumView::kMaxBands> levels {}, centres {};
+    const bool profile = showProfileButton.getToggleState() && processor.hasProfile();
+    if (profile)
+        processor.copyProfile(levels.data(), centres.data());
+    else
+        processor.copyLiveSpectrum(levels.data(), centres.data());
+    spectrumView.setBands(levels.data(), centres.data(), AgentProcessor::numSpectrumBands());
+    showProfileButton.setEnabled(processor.hasProfile());
 }
 
 void AgentEditor::paint(juce::Graphics& g)
@@ -119,33 +186,57 @@ void AgentEditor::paint(juce::Graphics& g)
 
 void AgentEditor::resized()
 {
+    constexpr int labelWidth = 130;
     auto area = getLocalBounds().reduced(16);
     title.setBounds(area.removeFromTop(28));
-    area.removeFromTop(8);
+    area.removeFromTop(6);
+
+    auto row = area.removeFromTop(26);
+    roleLabel.setBounds(row.removeFromLeft(labelWidth));
+    roleBox.setBounds(row.removeFromLeft(170));
+    row.removeFromLeft(12);
+    priorityLabel.setBounds(row.removeFromLeft(70));
+    prioritySlider.setBounds(row);
+    area.removeFromTop(10);
 
     const auto meterRow = [&](juce::Label& label, juce::Label& value, ma::ui::LevelBar* bar) {
-        auto row = area.removeFromTop(24);
-        label.setBounds(row.removeFromLeft(130));
-        value.setBounds(row.removeFromRight(100));
+        auto r = area.removeFromTop(24);
+        label.setBounds(r.removeFromLeft(labelWidth));
+        value.setBounds(r.removeFromRight(100));
         if (bar != nullptr)
-            bar->setBounds(row.reduced(4, 6));
-        area.removeFromTop(4);
+            bar->setBounds(r.reduced(4, 6));
+        area.removeFromTop(2);
     };
     meterRow(inputLabel, inputValue, &inputBar);
     meterRow(lufsLabel, lufsValue, nullptr);
     meterRow(outputLabel, outputValue, &outputBar);
-
     area.removeFromTop(8);
-    auto row = area.removeFromTop(26);
-    targetLabel.setBounds(row.removeFromLeft(130));
-    targetSlider.setBounds(row);
-    area.removeFromTop(6);
+
     row = area.removeFromTop(26);
-    trimLabel.setBounds(row.removeFromLeft(130));
-    trimSlider.setBounds(row);
+    measureLabel.setBounds(row.removeFromLeft(labelWidth));
+    measureBox.setBounds(row.removeFromLeft(110));
+    row.removeFromLeft(8);
+    targetSlider.setBounds(row);
+    area.removeFromTop(4);
 
-    area.removeFromTop(12);
-    learnButton.setBounds(area.removeFromTop(32).removeFromLeft(180));
+    const auto sliderRow = [&](juce::Label& label, juce::Slider& slider) {
+        auto r = area.removeFromTop(26);
+        label.setBounds(r.removeFromLeft(labelWidth));
+        slider.setBounds(r);
+        area.removeFromTop(4);
+    };
+    sliderRow(trimLabel, trimSlider);
+    sliderRow(ceilingLabel, ceilingSlider);
+    sliderRow(learnTimeLabel, learnTimeSlider);
+
     area.removeFromTop(8);
-    status.setBounds(area);
+    learnButton.setBounds(area.removeFromTop(32).removeFromLeft(200));
+    area.removeFromTop(6);
+    status.setBounds(area.removeFromTop(52));
+
+    area.removeFromTop(6);
+    row = area.removeFromTop(22);
+    showProfileButton.setBounds(row.removeFromRight(190));
+    spectrumLabel.setBounds(row);
+    spectrumView.setBounds(area);
 }
