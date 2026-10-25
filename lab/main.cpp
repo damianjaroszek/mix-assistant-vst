@@ -1,14 +1,18 @@
 // ma-lab: offline analysis of WAV stems.
 //
 //   ma-lab [--target-rms -18] [--json] stem1.wav stem2.wav ...
+//   ma-lab --make-target "House" --out House.matarget ref1.wav ref2.wav ...
 //
 // Prints loudness, peaks, RMS, crest factor and the gain-staging trim for each
 // file. With more than one file it also analyses their sum, i.e. the mix.
+// --make-target builds a tonal-balance target from reference tracks, the same file
+// the Brain writes when it records references; copy it to the Brain's targets folder.
 
 #include "ma/Decibels.h"
 #include "ma/LevelStats.h"
 #include "ma/LoudnessMeter.h"
 #include "ma/SpectrumAnalyzer.h"
+#include "ma/TonalBalance.h"
 #include "ma/TruePeakMeter.h"
 #include "ma/Wav.h"
 
@@ -17,6 +21,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -174,8 +179,46 @@ void printJson(const std::vector<Report>& reports, double targetRmsDb)
 
 int usage()
 {
-    std::fprintf(stderr, "usage: ma-lab [--target-rms dBFS] [--json] file.wav [file2.wav ...]\n");
+    std::fprintf(stderr, "usage: ma-lab [--target-rms dBFS] [--json] file.wav [file2.wav ...]\n"
+                         "       ma-lab --make-target NAME --out FILE.matarget ref.wav [ref2.wav ...]\n");
     return 2;
+}
+
+ma::Curve tonalCurve(const ma::AudioData& audio)
+{
+    constexpr int blockSize = 512;
+    ma::SpectrumAnalyzer spectrum;
+    spectrum.prepare(audio.sampleRate, ma::kTonalScale);
+    std::vector<const float*> pointers(static_cast<size_t>(audio.numChannels()));
+    for (int start = 0; start < audio.numSamples(); start += blockSize)
+    {
+        const int n = std::min(blockSize, audio.numSamples() - start);
+        for (int c = 0; c < audio.numChannels(); ++c)
+            pointers[static_cast<size_t>(c)] = audio.channels[static_cast<size_t>(c)].data() + start;
+        spectrum.process(pointers.data(), audio.numChannels(), n);
+    }
+    return ma::normaliseCurve(spectrum.averageDb());
+}
+
+int makeTarget(const std::string& name, const std::string& out, const std::vector<std::string>& paths)
+{
+    ma::TonalTarget target;
+    target.name = name;
+    for (const auto& path : paths)
+    {
+        target.references.push_back(tonalCurve(ma::readWav(path)));
+        std::printf("reference: %s\n", path.c_str());
+    }
+    target.rebuild();
+    std::ofstream file(out);
+    file << ma::serialiseTarget(target);
+    if (!file)
+    {
+        std::fprintf(stderr, "error: cannot write %s\n", out.c_str());
+        return 1;
+    }
+    std::printf("target \"%s\" with %zu references written to %s\n", name.c_str(), target.references.size(), out.c_str());
+    return 0;
 }
 
 } // namespace
@@ -185,12 +228,17 @@ int main(int argc, char** argv)
     double targetRmsDb = -18.0;
     bool asJson = false;
     std::vector<std::string> paths;
+    std::string targetName, targetOut;
 
     for (int i = 1; i < argc; ++i)
     {
         const std::string arg = argv[i];
         if (arg == "--json")
             asJson = true;
+        else if (arg == "--make-target" && i + 1 < argc)
+            targetName = argv[++i];
+        else if (arg == "--out" && i + 1 < argc)
+            targetOut = argv[++i];
         else if (arg == "--target-rms" && i + 1 < argc)
             targetRmsDb = std::atof(argv[++i]);
         else if (arg == "-h" || arg == "--help")
@@ -198,11 +246,14 @@ int main(int argc, char** argv)
         else
             paths.push_back(arg);
     }
-    if (paths.empty())
+    if (paths.empty() || (!targetName.empty() && targetOut.empty()))
         return usage();
 
     try
     {
+        if (!targetName.empty())
+            return makeTarget(targetName, targetOut, paths);
+
         std::vector<ma::AudioData> stems;
         std::vector<Report> reports;
         for (const auto& path : paths)

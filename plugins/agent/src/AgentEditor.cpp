@@ -189,7 +189,7 @@ void AgentEditor::timerCallback()
     if (learning)
     {
         const double needed = processor.parameters.getRawParameterValue(AgentProcessor::learnTimeId)->load();
-        status.setText(pl("Słucham: ") + juce::String(processor.learningSeconds(), 1) + " / " + juce::String(needed, 0)
+        status.setText(pl("Słucham: ") + juce::String(processor.learningSeconds(), 1) + " / " + juce::String(juce::roundToInt(needed))
                            + " s, " + ma::ui::formatDb(processor.learningMeasuredDb(), lufs ? "LUFS" : "dBFS")
                            + pl("\nCisza się nie liczy. Skończę sam."),
                        juce::dontSendNotification);

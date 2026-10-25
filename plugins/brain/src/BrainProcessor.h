@@ -5,6 +5,7 @@
 #include "ma/LoudnessMeter.h"
 #include "ma/Masking.h"
 #include "ma/Solver.h"
+#include "ma/TonalBalance.h"
 #include "ma/SpectrumAnalyzer.h"
 #include "ma/TruePeakMeter.h"
 
@@ -49,6 +50,7 @@ struct MixSnapshot
     std::vector<Channel> channels;
     ma::MaskingResult masking;
     std::vector<ReportItem> report;
+    ma::TonalComparison tonal; // valid once a target is chosen and enough of the mix was heard
 };
 
 // The solver's proposal, waiting for the user to pick what to apply.
@@ -62,6 +64,7 @@ struct Proposal
         ma::EqBand band;
         juce::String text;
         bool selected = true;
+        bool advisory = false; // advice only, nothing to apply
     };
 
     std::vector<Item> items;
@@ -108,7 +111,11 @@ public:
     double shortTermLufs() const { return shortTerm.load(); }
     double momentaryLufs() const { return momentary.load(); }
     double truePeakDb() const { return truePeak.load(); }
+    // Master spectrum on ERB bands: recent (display) and averaged since the last reset (tonal balance).
     double bandDb(int band) const { return bands[static_cast<size_t>(band)].load(); }
+    static int numMasterBands() { return ma::SpectrumAnalyzer::numBandsFor(ma::kTonalScale); }
+    ma::Curve averageSpectrum() const;
+    double secondsAnalysed() const { return analysedSeconds.load(); }
     float peakCeilingDb() const { return peakCeiling->load(); }
     double lowCorrelation() const { return correlationLow.load(); }
     double fullCorrelation() const { return correlationFull.load(); }
@@ -133,6 +140,19 @@ public:
     // Loudness matching for the comparison: dB added while playing "before", NaN until measured.
     double compareGainDb() const;
 
+    // Tonal targets built from reference tracks, kept as files in the user's app data folder.
+    juce::StringArray targetNames() const;
+    const ma::TonalTarget& target() const { return currentTarget; }
+    bool selectTarget(const juce::String& name);
+    bool createTarget(const juce::String& name);
+    void removeLastReference();
+    // Capture: reset the measurement, play a reference through the master, then finish.
+    void startCapture();
+    bool finishCapture(); // false when too little was heard
+    void cancelCapture();
+    bool isCapturing() const { return capturing; }
+    static constexpr double kMinimumSeconds = 10.0;
+
     juce::AudioProcessorValueTreeState parameters;
 
     static constexpr const char* peakCeilingId = "peakCeiling";
@@ -144,6 +164,8 @@ private:
     void buildReport();
     void updateLoudnessMatch(std::uint64_t now);
     void sendCommand(std::uint64_t owner, const ma::bus::Command& command);
+    static juce::File targetFolder();
+    void saveTarget();
 
     std::atomic<float>* peakCeiling = nullptr;
 
@@ -157,7 +179,10 @@ private:
     std::atomic<double> shortTerm { -INFINITY };
     std::atomic<double> momentary { -INFINITY };
     std::atomic<double> truePeak { -INFINITY };
-    std::array<std::atomic<double>, ma::SpectrumAnalyzer::kNumBands> bands;
+    std::array<std::atomic<double>, ma::SpectrumAnalyzer::kMaxBands> bands;
+    std::array<std::atomic<double>, ma::SpectrumAnalyzer::kMaxBands> averageBands;
+    std::atomic<double> analysedSeconds { 0.0 };
+    double hopSeconds = 2048.0 / 48000.0;
     std::atomic<double> correlationLow { 1.0 };
     std::atomic<double> correlationFull { 1.0 };
     std::atomic<bool> stereo { true };
@@ -175,6 +200,8 @@ private:
     std::uint64_t compareSwitchedMs = 0;
     std::uint64_t resetAtMs = 0; // re-measure once the Agents have switched (they poll at 10 Hz)
     double loudnessBefore = -INFINITY, loudnessAfter = -INFINITY;
+    ma::TonalTarget currentTarget;
+    bool capturing = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(BrainProcessor)
 };

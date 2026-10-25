@@ -30,6 +30,15 @@ private:
     juce::Slider ceilingSlider;
     juce::TextButton resetButton;
     juce::ToggleButton profilesButton;
+    juce::TextButton channelsViewButton, tonalViewButton;
+    juce::ComboBox targetBox;
+    juce::TextButton newTargetButton, captureButton, removeReferenceButton;
+    brain::TonalView tonalView;
+    void showTonal(bool tonal);
+    void refreshTargets();
+    void askForNewTarget();
+    std::unique_ptr<juce::AlertWindow> nameDialog;
+    juce::String shownTarget;
 
     juce::Label proposalLabel, proposalStatus;
     juce::TextButton proposeButton, applyButton, undoButton, compareButton;
