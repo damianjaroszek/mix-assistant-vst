@@ -77,12 +77,14 @@ struct Proposal
             solver,
             duck,
             polarity,
-            harmonics
+            harmonics,
+            transients
         };
         Action action = Action::solver;
         ma::DuckSettings duck {};
         int duckSync = 0;
         ma::HarmonicSettings harmonics {};
+        ma::TransientSettings transients {};
     };
 
     std::vector<Item> items;
@@ -190,7 +192,7 @@ private:
     void updateLoudnessMatch(std::uint64_t now);
     void sendCommand(std::uint64_t owner, const ma::bus::Command& command);
     void proposeDynamics();
-    void proposeHarmonics();
+    void proposeHarmonics(); // translation steps and harmonics for tonal holes
     juce::String kickName() const; // the channel most likely feeding the sidechains
     static juce::File targetFolder();
     void saveTarget();

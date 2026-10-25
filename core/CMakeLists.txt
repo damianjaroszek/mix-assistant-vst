@@ -16,7 +16,8 @@ add_library(ma_core STATIC
     src/TonalBalance.cpp
     src/Ducker.cpp
     src/Harmonics.cpp
-    src/Translation.cpp)
+    src/Translation.cpp
+    src/Transient.cpp)
 target_include_directories(ma_core PUBLIC include)
 
 # WAV reading/writing, used by the lab and tests only.

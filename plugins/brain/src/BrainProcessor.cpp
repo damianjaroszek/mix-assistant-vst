@@ -4,6 +4,7 @@
 #include "MaUi.h"
 
 #include <algorithm>
+#include <functional>
 #include <cmath>
 
 using ma::ui::pl;
@@ -17,9 +18,14 @@ constexpr std::uint64_t kAgentSwitchMs = 400; // Agents poll the bus at 10 Hz
 constexpr double kCancellingCorrelation = -0.2;  // low-band correlation with the sidechain that loses low end
 constexpr double kDuckMaxHz = 300.0;             // collisions below this are timing problems (kick vs bass)
 constexpr int kDuckSync = 2;                     // release in a sixteenth: back before the next off-beat
-constexpr double kPhoneGoalDb = -12.0;           // a channel may sound this much quieter (vs the mix) on a phone ...
-constexpr double kLaptopGoalDb = -8.0;           // ... or a laptop before it counts as lost there
+constexpr double kPhoneGoalDb = -12.0;           // a channel this much quieter (vs the mix) on a phone ...
+constexpr double kLaptopGoalDb = -8.0;           // ... or a laptop counts as lost there
+constexpr double kPhoneAimDb = -6.0;             // what the proposals aim for: still clearly there ...
+constexpr double kLaptopAimDb = -4.0;            // ... on a phone and on a laptop
+constexpr double kOnsetShare = 0.5;              // share of a percussive channel's energy in its onsets
 constexpr float kMaxHarmonicsDb = -3.0f;
+constexpr float kMaxPercussiveHarmonicsDb = -8.0f;
+constexpr float kMaxAttackDb = 6.0f;
 
 juce::String quoted(const juce::String& name)
 {
@@ -534,19 +540,19 @@ void BrainProcessor::buildReport()
                 const double laptop = change[static_cast<size_t>(ma::PlaybackSystem::laptop)];
                 if (phone < kPhoneGoalDb - 6.0 || laptop < kLaptopGoalDb - 6.0)
                     lost.add(mix.channels[c].name);
-                else if (phone < kPhoneGoalDb || laptop < kLaptopGoalDb)
+                else if (phone < kPhoneAimDb || laptop < kLaptopAimDb)
                     weak.add(mix.channels[c].name);
             }
             if (!lost.isEmpty())
             {
                 item.status = Status::problem;
                 item.detail = pl("Na telefonie i laptopie prawie znika: ") + joinNames(lost)
-                              + pl(". „Zaproponuj” doda harmoniczne. Posłuchaj w „Odsłuch: Telefon”.");
+                              + pl(". „Zaproponuj” dobierze kroki. Posłuchaj w „Odsłuch: Telefon”.");
             }
             else if (!weak.isEmpty())
             {
                 item.status = Status::warning;
-                item.detail = pl("Na małych głośnikach słabnie: ") + joinNames(weak) + ".";
+                item.detail = pl("Na małych głośnikach słabnie: ") + joinNames(weak) + pl(". „Zaproponuj” dobierze kroki.");
             }
             else
             {
@@ -691,51 +697,327 @@ void BrainProcessor::proposeHarmonics()
     const auto phoneIndex = static_cast<size_t>(ma::PlaybackSystem::phone);
     const auto laptopIndex = static_cast<size_t>(ma::PlaybackSystem::laptop);
 
-    // Channels lost on small speakers: overtones of their low end, as little as reaches the goal.
-    for (size_t c = 0; c < mix.channels.size() && before.valid; ++c)
+    // Channels that weaken on small speakers. Most important first; every accepted step goes
+    // into `trial`, so later channels are judged on the mix as it will be. For each channel:
+    // first make room in the band a phone plays (a cut on a less important channel covering
+    // it), then, if still short, the best own step for the kind of sound (attack emphasis for
+    // percussion, overtones for low content, a presence bell otherwise). Every step is sized
+    // by prediction to the smallest amount that reaches the goal, and rejected if it would
+    // push another channel under its goal.
+    auto trial = base;
+    std::vector<size_t> order(mix.channels.size());
+    for (size_t c = 0; c < order.size(); ++c)
+        order[c] = c;
+    std::stable_sort(order.begin(), order.end(),
+                     [&](size_t a, size_t b) { return mix.channels[a].data.priority < mix.channels[b].data.priority; });
+
+    const auto deficit = [&](const ma::TranslationResult& r, size_t c) {
+        return std::max(0.0, kPhoneAimDb - r.shareChangeDb[c][phoneIndex]) + std::max(0.0, kLaptopAimDb - r.shareChangeDb[c][laptopIndex]);
+    };
+    // How much a change hurts the other channels: what it adds to their deficits.
+    const auto harm = [&](const ma::TranslationResult& was, const ma::TranslationResult& now, size_t c) {
+        double total = 0.0;
+        for (size_t o = 0; o < mix.channels.size(); ++o)
+            if (o != c && trial[o].valid)
+                total += std::max(0.0, deficit(now, o) - deficit(was, o));
+        return total;
+    };
+    const auto shares = [&](const ma::TranslationResult& r, size_t c) {
+        return juce::String(juce::roundToInt(r.shareChangeDb[c][phoneIndex])) + "/" + juce::String(juce::roundToInt(r.shareChangeDb[c][laptopIndex]));
+    };
+    const auto proposedEq = [&](std::uint64_t owner) -> ma::EqSettings* {
+        for (auto& e : currentProposal.eq)
+            if (e.first == owner)
+                return &e.second;
+        return nullptr;
+    };
+    const auto freeSlot = [](const ma::EqSettings& eq) {
+        for (int b = 0; b < ma::kEqBands; ++b)
+            if (!ma::isOn(eq[static_cast<size_t>(b)]))
+                return b;
+        return -1;
+    };
+    const auto withBell = [](const ma::Curve& db, const ma::EqBand& band) {
+        ma::EqSettings eq {};
+        eq[0] = band;
+        auto out = db;
+        for (int b = 0; b < ma::bus::kBands; ++b)
+            out[static_cast<size_t>(b)] += ma::eqResponseDb(eq, ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b));
+        return out;
+    };
+    const auto bandRange = [](double lowHz, double highHz, int& first, int& last) {
+        first = ma::bus::kBands;
+        last = -1;
+        for (int b = 0; b < ma::bus::kBands; ++b)
+        {
+            const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+            if (hz >= lowHz && hz <= highHz)
+            {
+                first = std::min(first, b);
+                last = std::max(last, b);
+            }
+        }
+    };
+    const auto summary = [&](const juce::String& name, const ma::TranslationResult& was, const ma::TranslationResult& now, size_t c) {
+        return pl(", żeby ") + quoted(name) + pl(" był słyszalny na małych głośnikach (telefon/laptop ") + shares(was, c) + pl(" → ")
+               + shares(now, c) + pl(" dB względem reszty miksu)");
+    };
+
+    for (const size_t c : order)
     {
+        if (!before.valid || !trial[c].valid)
+            continue;
+        auto now = ma::analyseTranslation(trial);
+        if (deficit(now, c) <= 0.0)
+            continue;
         const auto& channel = mix.channels[c];
-        const double phone = before.shareChangeDb[c][phoneIndex];
-        const double laptop = before.shareChangeDb[c][laptopIndex];
-        if (!base[c].valid || channel.data.harmonics.on > 0.5f || (phone >= kPhoneGoalDb && laptop >= kLaptopGoalDb))
+        const auto start = now;
+
+        // Where this channel has content: measured against its loudest band.
+        const auto own = trial[c].rawDb; // copy: `trial` is replaced as steps are accepted
+        const double ownPeak = *std::max_element(own.begin(), own.begin() + ma::bus::kBands);
+
+        // 1. Room in what a phone plays (300 Hz - 6 kHz), taken from a less important channel.
+        {
+            int first = 0, last = -1;
+            bandRange(300.0, 6000.0, first, last);
+            // Try a -4 dB bell on every less important channel at every band where it covers this
+            // one, and keep the place that helps most for the least harm; then size it.
+            int bestMasker = -1, bestBand = -1;
+            double bestScore = 0.5;
+            for (size_t m = 0; m < mix.channels.size(); ++m)
+            {
+                if (m == c || !trial[m].valid || mix.channels[m].data.priority <= channel.data.priority)
+                    continue;
+                for (int b = first; b <= last; ++b)
+                {
+                    if (own[static_cast<size_t>(b)] < ownPeak - 45.0 || own[static_cast<size_t>(b)] < -110.0
+                        || trial[m].rawDb[static_cast<size_t>(b)] - own[static_cast<size_t>(b)] < 3.0)
+                        continue;
+                    auto test = trial;
+                    test[m].rawDb = withBell(trial[m].rawDb, { static_cast<float>(ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b)), -4.0f, 1.0f });
+                    const auto after = ma::analyseTranslation(test);
+                    const double score = deficit(now, c) - deficit(after, c) - harm(now, after, c);
+                    if (score > bestScore)
+                    {
+                        bestScore = score;
+                        bestMasker = static_cast<int>(m);
+                        bestBand = b;
+                    }
+                }
+            }
+            if (bestMasker >= 0)
+            {
+                const auto m = static_cast<size_t>(bestMasker);
+                const auto& masker = mix.channels[m];
+                auto* eq = proposedEq(masker.owner);
+                const int slot = eq != nullptr ? freeSlot(*eq) : -1;
+                if (slot >= 0)
+                {
+                    ma::EqBand band { static_cast<float>(std::round(ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, bestBand))), 0.0f, 1.0f };
+                    auto test = trial;
+                    ma::TranslationResult after = now;
+                    for (float cut = -2.0f; cut >= -6.0f; cut -= 1.0f)
+                    {
+                        band.gainDb = cut;
+                        test[m].rawDb = withBell(trial[m].rawDb, band);
+                        after = ma::analyseTranslation(test);
+                        if (deficit(after, c) <= 0.0)
+                            break;
+                    }
+                    const double gain = deficit(now, c) - deficit(after, c);
+                    if (gain >= 1.0 && harm(now, after, c) < 0.5 * gain)
+                    {
+                        (*eq)[static_cast<size_t>(slot)] = band;
+                        Proposal::Item item;
+                        item.change.kind = ma::SolverChange::Kind::eqCut;
+                        item.change.channel = bestMasker;
+                        item.change.maskedChannel = static_cast<int>(c);
+                        item.change.eqSlot = slot;
+                        item.owner = masker.owner;
+                        item.maskedOwner = channel.owner;
+                        item.band = band;
+                        item.text = quoted(masker.name) + ": " + juce::String(band.gainDb, 1) + pl(" dB przy ") + hzText(band.hz)
+                                    + " (Q 1.0)" + summary(channel.name, now, after, c);
+                        currentProposal.items.push_back(item);
+                        trial = test;
+                        now = after;
+                    }
+                }
+            }
+        }
+        if (deficit(now, c) <= 0.0)
             continue;
 
+        // 2. The channel's own step, by the kind of sound.
+        const bool percussive = channel.data.role == 1 || channel.data.role == 3;
         int peak = 0;
         for (int b = 1; b < ma::bus::kBands; ++b)
-            if (base[c].rawDb[static_cast<size_t>(b)] > base[c].rawDb[static_cast<size_t>(peak)])
+            if (own[static_cast<size_t>(b)] > own[static_cast<size_t>(peak)])
                 peak = b;
         const double peakHz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, peak);
-        if (peakHz > 250.0)
-            continue; // lost for another reason than missing lows
 
-        ma::HarmonicSettings settings;
-        settings.on = 1.0f;
-        settings.hz = static_cast<float>(juce::jlimit(60.0, 300.0, std::round(2.0 * peakHz / 5.0) * 5.0));
-        auto trial = base;
-        ma::TranslationResult after;
-        for (float amount = -24.0f; amount <= kMaxHarmonicsDb; amount += 1.0f)
+        // Where in 1-6 kHz the channel is least covered by the rest of the mix.
+        const auto clearestBand = [&](double lowHz, double highHz, double rangeDb) {
+            int first = 0, last = -1;
+            bandRange(lowHz, highHz, first, last);
+            int best = -1;
+            double bestMargin = -1e9;
+            for (int b = first; b <= last; ++b)
+            {
+                if (own[static_cast<size_t>(b)] < ownPeak - rangeDb || own[static_cast<size_t>(b)] < -110.0)
+                    continue;
+                double others = 0.0;
+                for (size_t o = 0; o < trial.size(); ++o)
+                    if (o != c && trial[o].valid)
+                        others += std::pow(10.0, trial[o].rawDb[static_cast<size_t>(b)] / 10.0);
+                const double margin = own[static_cast<size_t>(b)] - 10.0 * std::log10(std::max(others, 1e-20));
+                if (margin > bestMargin)
+                {
+                    bestMargin = margin;
+                    best = b;
+                }
+            }
+            return best;
+        };
+
+        const auto accept = [&](const ma::TranslationResult& after) {
+            const double gain = deficit(now, c) - deficit(after, c);
+            return gain >= 1.0 && harm(now, after, c) < 0.5 * gain;
+        };
+        const auto tryAttack = [&] {
+            if (channel.data.transients.on > 0.5f)
+                return;
+            const int band = clearestBand(1000.0, 6000.0, 45.0);
+            if (band >= 0)
+            {
+                ma::TransientSettings settings;
+                settings.on = 1.0f;
+                settings.hz = static_cast<float>(juce::jlimit(1000.0, 6000.0,
+                                                              std::round(ma::SpectrumAnalyzer::bandEdgeHz(ma::BandScale::erb, band) / 100.0) * 100.0));
+                auto test = trial;
+                ma::TranslationResult after = now;
+                for (float amount = 2.0f; amount <= kMaxAttackDb; amount += 1.0f)
+                {
+                    settings.amountDb = amount;
+                    test[c].rawDb = ma::predictTransients(trial[c].rawDb, settings, kOnsetShare);
+                    after = ma::analyseTranslation(test);
+                    if (deficit(after, c) <= 0.0)
+                        break;
+                }
+                if (accept(after))
+                {
+                    Proposal::Item item;
+                    item.action = Proposal::Item::Action::transients;
+                    item.owner = channel.owner;
+                    item.transients = settings;
+                    item.text = quoted(channel.name) + pl(": podkreślenie ataku powyżej ") + hzText(settings.hz) + pl(", do +")
+                                + juce::String(settings.amountDb, 0) + pl(" dB tylko na uderzeniach") + summary(channel.name, now, after, c)
+                                + pl(". Wynik ataku zależy od brzmienia, sprawdź „Przed / po”");
+                    currentProposal.items.push_back(item);
+                    trial = test;
+                    now = after;
+                }
+            }
+        };
+        const auto tryHarmonics = [&] {
+            if (peakHz > 250.0 || channel.data.harmonics.on > 0.5f)
+                return;
+            ma::HarmonicSettings settings;
+            settings.on = 1.0f;
+            settings.hz = static_cast<float>(juce::jlimit(60.0, 300.0, std::round(2.0 * peakHz / 5.0) * 5.0));
+            auto test = trial;
+            ma::TranslationResult after = now;
+            // Overtones on a kick soften its punch, so less of them there.
+            const float most = percussive ? kMaxPercussiveHarmonicsDb : kMaxHarmonicsDb;
+            for (float amount = -24.0f; amount <= most; amount += 1.0f)
+            {
+                settings.amountDb = amount;
+                test[c].rawDb = ma::predictHarmonics(trial[c].rawDb, settings);
+                after = ma::analyseTranslation(test);
+                if (deficit(after, c) <= 0.0)
+                    break;
+            }
+            if (accept(after))
+            {
+                Proposal::Item item;
+                item.action = Proposal::Item::Action::harmonics;
+                item.owner = channel.owner;
+                item.harmonics = settings;
+                item.text = quoted(channel.name) + pl(": harmoniczne poniżej ") + hzText(settings.hz) + ", "
+                            + juce::String(settings.amountDb, 0) + " dB" + summary(channel.name, now, after, c);
+                currentProposal.items.push_back(item);
+                trial = test;
+                now = after;
+            }
+        };
+        const auto tryPresence = [&] {
+            auto* eq = proposedEq(channel.owner);
+            const int slot = eq != nullptr ? freeSlot(*eq) : -1;
+            const int band = clearestBand(1000.0, 5000.0, 30.0);
+            if (slot >= 0 && band >= 0)
+            {
+                ma::EqBand bell { static_cast<float>(std::round(ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, band))), 0.0f, 1.0f };
+                auto test = trial;
+                ma::TranslationResult after = now;
+                for (float gain = 1.0f; gain <= 4.0f; gain += 0.5f)
+                {
+                    bell.gainDb = gain;
+                    test[c].rawDb = withBell(trial[c].rawDb, bell);
+                    after = ma::analyseTranslation(test);
+                    if (deficit(after, c) <= 0.0)
+                        break;
+                }
+                // No new collision with a more important channel.
+                std::vector<ma::MaskingChannel> was(trial.size()), will(trial.size());
+                for (size_t o = 0; o < trial.size(); ++o)
+                {
+                    was[o] = { trial[o].rawDb, mix.channels[o].data.priority, trial[o].valid };
+                    will[o] = { test[o].rawDb, mix.channels[o].data.priority, test[o].valid };
+                }
+                const auto maskWas = ma::analyseMasking(was);
+                const auto maskWill = ma::analyseMasking(will);
+                bool collides = false;
+                for (size_t o = 0; o < trial.size(); ++o)
+                    if (o != c && mix.channels[o].data.priority <= channel.data.priority)
+                        collides = collides || maskWill.amount[c][o] - maskWas.amount[c][o] > 0.05;
+                if (!collides && accept(after))
+                {
+                    (*eq)[static_cast<size_t>(slot)] = bell;
+                    Proposal::Item item;
+                    item.change.kind = ma::SolverChange::Kind::tonalBoost;
+                    item.change.channel = static_cast<int>(c);
+                    item.change.eqSlot = slot;
+                    item.owner = channel.owner;
+                    item.band = bell;
+                    item.text = quoted(channel.name) + ": +" + juce::String(bell.gainDb, 1) + pl(" dB obecności przy ") + hzText(bell.hz)
+                                + " (Q 1.0)" + summary(channel.name, now, after, c);
+                    currentProposal.items.push_back(item);
+                    trial = test;
+                    now = after;
+                }
+            }
+        };
+
+        // Gentlest step for the kind of sound first; the next only if still short.
+        const std::vector<std::function<void()>> steps = percussive ? std::vector<std::function<void()>> { tryAttack, tryHarmonics }
+                                                       : peakHz <= 250.0 ? std::vector<std::function<void()>> { tryHarmonics, tryPresence }
+                                                                         : std::vector<std::function<void()>> { tryPresence };
+        for (const auto& step : steps)
+            if (deficit(now, c) > 0.0)
+                step();
+
+        if (deficit(now, c) > 0.0 && deficit(now, c) >= deficit(start, c) - 0.5)
         {
-            settings.amountDb = amount;
-            trial[c].rawDb = ma::predictHarmonics(base[c].rawDb, settings);
-            after = ma::analyseTranslation(trial);
-            if (after.shareChangeDb[c][phoneIndex] >= kPhoneGoalDb && after.shareChangeDb[c][laptopIndex] >= kLaptopGoalDb)
-                break;
+            // Nothing in reach helped: say why rather than stay silent.
+            Proposal::Item item;
+            item.advisory = true;
+            item.selected = false;
+            item.text = quoted(channel.name) + pl(" słabnie na małych głośnikach (telefon/laptop ") + shares(now, c)
+                        + pl(" dB), a wtyczka nie znalazła kroku, który by pomógł bez szkody dla innych. Spróbuj innej barwy "
+                             "albo warstwy w paśmie 1–5 kHz");
+            currentProposal.items.push_back(item);
         }
-
-        const double gained = std::min(after.shareChangeDb[c][phoneIndex] - phone, after.shareChangeDb[c][laptopIndex] - laptop);
-        if (std::max(after.shareChangeDb[c][phoneIndex] - phone, after.shareChangeDb[c][laptopIndex] - laptop) < 2.0 || gained < 0.0)
-            continue; // overtones would not bring it back
-
-        Proposal::Item item;
-        item.action = Proposal::Item::Action::harmonics;
-        item.owner = channel.owner;
-        item.harmonics = settings;
-        item.text = quoted(channel.name) + pl(": harmoniczne poniżej ") + hzText(settings.hz) + ", "
-                    + juce::String(settings.amountDb, 0) + pl(" dB, bo ginie na małych głośnikach (telefon ")
-                    + juce::String(juce::roundToInt(phone)) + pl(" → ") + juce::String(juce::roundToInt(after.shareChangeDb[c][phoneIndex]))
-                    + pl(" dB, laptop ") + juce::String(juce::roundToInt(laptop)) + pl(" → ")
-                    + juce::String(juce::roundToInt(after.shareChangeDb[c][laptopIndex])) + pl(" dB względem reszty miksu)");
-        currentProposal.items.push_back(item);
     }
 
     // Tonal holes nothing plays in: overtones from the channel an octave below fill them.
@@ -772,19 +1054,19 @@ void BrainProcessor::proposeHarmonics()
                         power += std::pow(10.0, ch.rawDb[static_cast<size_t>(b)] / 10.0);
             return power;
         };
-        const double was = regionPower(base);
+        const double was = regionPower(trial);
         const double wanted = std::abs(item.change.deviationDb);
 
         ma::HarmonicSettings settings;
         settings.on = 1.0f;
         settings.hz = static_cast<float>(juce::jlimit(40.0, 8000.0, std::round(item.change.lowHz)));
-        auto trial = base;
+        auto holeTrial = trial;
         double gained = 0.0;
         for (float amount = -24.0f; amount <= kMaxHarmonicsDb; amount += 1.0f)
         {
             settings.amountDb = amount;
-            trial[source].rawDb = ma::predictHarmonics(base[source].rawDb, settings);
-            gained = 10.0 * std::log10(std::max(regionPower(trial), 1e-30) / std::max(was, 1e-30));
+            holeTrial[source].rawDb = ma::predictHarmonics(trial[source].rawDb, settings);
+            gained = 10.0 * std::log10(std::max(regionPower(holeTrial), 1e-30) / std::max(was, 1e-30));
             if (gained >= wanted)
                 break;
         }
@@ -1086,6 +1368,7 @@ int BrainProcessor::applySelected()
         auto duckSync = channel.data.duckSync;
         auto polarity = channel.data.polarityInverted;
         auto harmonics = channel.data.harmonics;
+        auto transients = channel.data.transients;
         bool dynamicChanges = false;
         for (const auto& item : currentProposal.items)
         {
@@ -1102,6 +1385,11 @@ int BrainProcessor::applySelected()
             else if (item.action == Proposal::Item::Action::harmonics)
             {
                 harmonics = item.harmonics;
+                dynamicChanges = true;
+            }
+            else if (item.action == Proposal::Item::Action::transients)
+            {
+                transients = item.transients;
                 dynamicChanges = true;
             }
             else if (item.action == Proposal::Item::Action::polarity)
@@ -1128,6 +1416,7 @@ int BrainProcessor::applySelected()
         command.duckSync = duckSync;
         command.polarityInverted = polarity;
         command.harmonics = harmonics;
+        command.transients = transients;
         sendCommand(channel.owner, command);
         ++sent;
     }

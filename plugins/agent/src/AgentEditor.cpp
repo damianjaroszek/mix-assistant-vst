@@ -160,6 +160,22 @@ AgentEditor::AgentEditor(AgentProcessor& p)
         addAndMakeVisible(slider);
     }
 
+    styleLabel(attackLabel, pl("Atak"), colours::quiet);
+    attackLabel.setTooltip(pl("Podkreśla tylko początek dźwięku (klik stopy, trzask werbla) w paśmie, które słychać na małych głośnikach."));
+    styleLabel(attackFreqLabel, pl("Powyżej"), colours::quiet, 13.0f);
+    styleLabel(attackAmountLabel, pl("Ilość"), colours::quiet, 13.0f);
+    for (auto* label : { &attackLabel, &attackFreqLabel, &attackAmountLabel })
+        addAndMakeVisible(label);
+    attackOnButton.setButtonText(pl("Włącz"));
+    attackOnButton.setColour(juce::ToggleButton::textColourId, colours::quiet);
+    addAndMakeVisible(attackOnButton);
+    for (auto* slider : { &attackFreqSlider, &attackAmountSlider })
+    {
+        styleSlider(*slider);
+        slider->setTextBoxStyle(juce::Slider::TextBoxRight, false, 70, 20);
+        addAndMakeVisible(slider);
+    }
+
     auto& state = processor.parameters;
     roleAttachment = std::make_unique<ComboAttachment>(state, AgentProcessor::roleId, roleBox);
     measureAttachment = std::make_unique<ComboAttachment>(state, AgentProcessor::measureId, measureBox);
@@ -182,10 +198,13 @@ AgentEditor::AgentEditor(AgentProcessor& p)
         = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(state, AgentProcessor::harmonicsOnId, harmonicsOnButton);
     harmonicsFreqAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::harmonicsFreqId, harmonicsFreqSlider);
     harmonicsAmountAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::harmonicsAmountId, harmonicsAmountSlider);
+    attackOnAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(state, AgentProcessor::attackOnId, attackOnButton);
+    attackFreqAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::attackFreqId, attackFreqSlider);
+    attackAmountAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::attackAmountId, attackAmountSlider);
 
     shownResultSerial = processor.lastResult().serial;
     processor.setSpectrumVisible(true);
-    setSize(520, 940);
+    setSize(520, 960);
     startTimerHz(30);
 }
 
@@ -439,14 +458,24 @@ void AgentEditor::resized()
 
     area.removeFromTop(4);
     row = area.removeFromTop(24);
-    harmonicsLabel.setBounds(row.removeFromLeft(150));
-    harmonicsOnButton.setBounds(row.removeFromLeft(72));
-    area.removeFromTop(2);
-    row = area.removeFromTop(24);
     {
         auto left = row.removeFromLeft(row.getWidth() / 2);
-        halfRow(left.withTrimmedRight(8), harmonicsFreqLabel, harmonicsFreqSlider);
-        halfRow(row, harmonicsAmountLabel, harmonicsAmountSlider);
+        harmonicsLabel.setBounds(left.removeFromLeft(110));
+        harmonicsOnButton.setBounds(left.removeFromLeft(72));
+        attackLabel.setBounds(row.removeFromLeft(110));
+        attackOnButton.setBounds(row.removeFromLeft(72));
+    }
+    area.removeFromTop(2);
+    for (auto group : { std::array<juce::Component*, 4> { &harmonicsFreqLabel, &harmonicsFreqSlider, &harmonicsAmountLabel, &harmonicsAmountSlider },
+                        std::array<juce::Component*, 4> { &attackFreqLabel, &attackFreqSlider, &attackAmountLabel, &attackAmountSlider } })
+    {
+        row = area.removeFromTop(24);
+        auto left = row.removeFromLeft(row.getWidth() / 2).withTrimmedRight(8);
+        group[0]->setBounds(left.removeFromLeft(70));
+        group[1]->setBounds(left);
+        group[2]->setBounds(row.removeFromLeft(70));
+        group[3]->setBounds(row);
+        area.removeFromTop(2);
     }
 
     area.removeFromTop(8);

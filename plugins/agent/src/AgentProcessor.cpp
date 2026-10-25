@@ -21,12 +21,13 @@ float toShared(double db)
 }
 
 // The dynamics as a flat list, for the audio-thread copy of the backup.
-std::array<float, 13> packDynamics(const AgentProcessor::DynamicState& s)
+std::array<float, 16> packDynamics(const AgentProcessor::DynamicState& s)
 {
     const auto& d = s.duck;
     const auto& h = s.harmonics;
+    const auto& t = s.transients;
     return { d.on, d.wholeSignal, d.hz, d.q, d.depthDb, d.thresholdDb, d.attackMs, d.releaseMs,
-             static_cast<float>(s.sync), s.polarityInverted ? 1.0f : 0.0f, h.on, h.hz, h.amountDb };
+             static_cast<float>(s.sync), s.polarityInverted ? 1.0f : 0.0f, h.on, h.hz, h.amountDb, t.on, t.hz, t.amountDb };
 }
 
 void storeMax(std::atomic<float>& target, float value)
@@ -172,6 +173,16 @@ juce::AudioProcessorValueTreeState::ParameterLayout AgentProcessor::createLayout
                                                            Range { -30.0f, 0.0f, 0.5f }, harmonic.amountDb,
                                                            juce::AudioParameterFloatAttributes().withLabel("dB")));
 
+    const ma::TransientSettings emphasis {};
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { attackOnId, 5 }, "Attack emphasis", false));
+    Range attackFreq { 500.0f, 8000.0f, 1.0f };
+    attackFreq.setSkewForCentre(2500.0f);
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { attackFreqId, 5 }, "Attack emphasis from", attackFreq,
+                                                           emphasis.hz, juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { attackAmountId, 5 }, "Attack emphasis amount",
+                                                           Range { 0.0f, 12.0f, 0.5f }, emphasis.amountDb,
+                                                           juce::AudioParameterFloatAttributes().withLabel("dB")));
+
     return layout;
 }
 
@@ -199,6 +210,7 @@ void AgentProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     eq.prepare(sampleRate);
     ducker.prepare(sampleRate);
     harmonics.prepare(sampleRate);
+    transients.prepare(sampleRate);
     outputSpectrum.prepare(sampleRate, ma::BandScale::erb);
     sidechainCorrelation.prepare(sampleRate);
     mainMono.assign(static_cast<size_t>(std::max(samplesPerBlock, 512)), 0.0f);
@@ -322,6 +334,7 @@ void AgentProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         dynamics.sync = static_cast<int>(v[8]);
         dynamics.polarityInverted = v[9] > 0.5f;
         dynamics.harmonics = { v[10], v[11], v[12] };
+        dynamics.transients = { v[13], v[14], v[15] };
     }
     else
     {
@@ -378,6 +391,8 @@ void AgentProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
 
     harmonics.setSettings(dynamics.harmonics);
     harmonics.process(mainBuffer.getArrayOfWritePointers(), numChannels, numSamples);
+    transients.setSettings(dynamics.transients);
+    transients.process(mainBuffer.getArrayOfWritePointers(), numChannels, numSamples);
 
     ducker.setSettings(dynamics.duck);
     ducker.process(mainBuffer.getArrayOfWritePointers(), numChannels, sidechain, numSidechain, numSamples);
@@ -499,6 +514,7 @@ void AgentProcessor::publishToBrain()
     data.duckSync = dynamics.sync;
     data.polarityInverted = dynamics.polarityInverted ? 1 : 0;
     data.harmonics = dynamics.harmonics;
+    data.transients = dynamics.transients;
     data.sidechainConnected = sidechainSeen ? 1 : 0;
     data.sidechainDb = toShared(sidechainShownDb);
     data.duckReductionDb = static_cast<float>(reductionShownDb);
@@ -544,7 +560,7 @@ void AgentProcessor::handleBrainCommand(ma::bus::Region& region)
         setParam(trimId, command.trimDb);
         setEqParams(next);
         setParam(eqBypassId, 0.0f);
-        setDynamics({ command.duck, command.duckSync, command.polarityInverted != 0, command.harmonics });
+        setDynamics({ command.duck, command.duckSync, command.polarityInverted != 0, command.harmonics, command.transients });
     }
     else if (command.kind == ma::bus::CommandKind::undo && backupValid)
     {
@@ -593,6 +609,9 @@ void AgentProcessor::setDynamics(const DynamicState& state)
     setParam(harmonicsOnId, state.harmonics.on);
     setParam(harmonicsFreqId, state.harmonics.hz);
     setParam(harmonicsAmountId, state.harmonics.amountDb);
+    setParam(attackOnId, state.transients.on);
+    setParam(attackFreqId, state.transients.hz);
+    setParam(attackAmountId, state.transients.amountDb);
 }
 
 AgentProcessor::DynamicState AgentProcessor::currentDynamics() const
@@ -612,6 +631,9 @@ AgentProcessor::DynamicState AgentProcessor::currentDynamics() const
     state.harmonics.on = value(harmonicsOnId) > 0.5f ? 1.0f : 0.0f;
     state.harmonics.hz = value(harmonicsFreqId);
     state.harmonics.amountDb = value(harmonicsAmountId);
+    state.transients.on = value(attackOnId) > 0.5f ? 1.0f : 0.0f;
+    state.transients.hz = value(attackFreqId);
+    state.transients.amountDb = value(attackAmountId);
     return state;
 }
 

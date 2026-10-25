@@ -23,7 +23,8 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
 - Translation (`ma/Translation.h`): rough playback-system curves (phone, laptop, earbuds, car, club) used both
   for analysis (ear-weighted share of each channel vs the mix) and for the Brain's listening preview.
   Agents publish `outputDb` (after their whole chain) for it; `ma/Harmonics.h` adds overtones and
-  `predictHarmonics` lets the Brain size a proposal before applying it.
+  `predictHarmonics` / `predictTransients` (`ma/Transient.h`, attack emphasis) let the Brain size a proposal
+  before applying it; the translation steps are chosen most important channel first on a running trial mix.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 
