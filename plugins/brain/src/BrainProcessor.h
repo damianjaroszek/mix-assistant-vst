@@ -1,6 +1,7 @@
 #pragma once
 
 #include "SharedSession.h"
+#include "ma/ChainPlanner.h"
 #include "ma/CorrelationMeter.h"
 #include "ma/LoudnessMeter.h"
 #include "ma/Masking.h"
@@ -34,8 +35,10 @@ struct MixSnapshot
         std::uint64_t owner = 0;
         ma::bus::AgentData data {};
         juce::String name;
-        // Raw ERB band levels after the Agent's trim, smoothed over a few seconds,
-        // before the Brain's EQ (what the solver works from) ...
+        // Raw ERB band levels after the Agent's trim, smoothed over a few seconds, before
+        // anything else (what the engineer pass plans the cleanup from) ...
+        std::array<double, ma::bus::kBands> rawDb {};
+        // ... after the cleanup (high-pass, mud), before the Brain's EQ (what the solver works from) ...
         std::array<double, ma::bus::kBands> bandsDb {};
         // ... and with it (what the mix hears).
         std::array<double, ma::bus::kBands> heardDb {};
@@ -79,8 +82,24 @@ struct Proposal
             duck,
             polarity,
             harmonics,
-            transients
+            transients,
+            chain
         };
+        // Phase 7: the engineer pass ("Ustaw cały miks") sets the channel's chain.
+        enum class ChainTool
+        {
+            none,
+            cleanup,
+            compressor,
+            clipper,
+            evener
+        };
+        ChainTool tool = ChainTool::none; // with Action::solver unused
+        ma::CleanupSettings cleanup {};
+        ma::CompressorSettings compressor {};
+        ma::ClipperSettings clipper {};
+        ma::BassEvenerSettings evener {};
+
         Action action = Action::solver;
         ma::DuckSettings duck {};
         int duckSync = 0;
@@ -90,6 +109,18 @@ struct Proposal
 
     std::vector<Item> items;
     std::vector<std::pair<std::uint64_t, ma::EqSettings>> eq; // complete proposed EQ per channel
+
+    // The engineer's verdict per channel, made with "Ustaw cały miks".
+    struct Verdict
+    {
+        std::uint64_t owner = 0;
+        juce::String name, role;
+        MixSnapshot::Status status = MixSnapshot::Status::unknown;
+        juce::String summary;
+        juce::StringArray reasons;
+    };
+    std::vector<Verdict> verdicts;
+    bool wholeMix = false;
     double crowdingBefore = 0.0, crowdingAfter = 0.0;
     bool made = false;
 };
@@ -159,6 +190,9 @@ public:
     // Phase 3: propose, apply, undo, compare.
     const Proposal& proposal() const { return currentProposal; }
     void propose();
+    // Phase 7: every channel's chain (cleanup, compression, clipper, bass notes) planned with the
+    // whole mix in view, then the usual proposal on top of it, plus a verdict per channel.
+    void proposeWholeMix();
     void toggleProposalItem(int index);
     int applySelected(); // returns how many Agents got a command
     int undoLast();
@@ -207,6 +241,8 @@ private:
     void sendCommand(std::uint64_t owner, const ma::bus::Command& command);
     void proposeDynamics();
     void proposeHarmonics(); // translation steps and harmonics for tonal holes
+    static void applyCleanup(MixSnapshot::Channel& channel, const ma::CleanupSettings& cleanup);
+    Proposal::Verdict judge(size_t channel, const ma::ChainPlan& plan) const;
     void adaptStep(std::uint64_t now);
     ma::SolverResult solveNow(double headroomGainDb) const;
     juce::String kickName() const; // the channel most likely feeding the sidechains

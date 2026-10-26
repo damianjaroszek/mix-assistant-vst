@@ -69,7 +69,7 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     profilesButton.onClick = [this] { processor.setUseLearnedProfiles(profilesButton.getToggleState()); };
     addAndMakeVisible(profilesButton);
 
-    styleLabel(proposalLabel, pl("Propozycja poprawek"), colours::text, 15.0f);
+    styleLabel(proposalLabel, pl("Propozycja"), colours::text, 15.0f);
     styleLabel(proposalStatus, {}, colours::quiet, 13.0f);
     addAndMakeVisible(proposalLabel);
     addAndMakeVisible(proposalStatus);
@@ -81,6 +81,10 @@ BrainEditor::BrainEditor(BrainProcessor& p)
         addAndMakeVisible(button);
     };
     styleButton(proposeButton, pl("Zaproponuj"));
+    styleButton(wholeMixButton, pl("Ustaw cały miks"));
+    wholeMixButton.setColour(juce::TextButton::buttonColourId, colours::accent.darker(0.5f));
+    wholeMixButton.setTooltip(pl("Inżynier miksu: porządki w dole i środku, kompresja, clipper i wyrównanie basu na każdym "
+                                 "kanale, ustawione względem całego miksu, plus zwykła propozycja i werdykt dla każdego kanału."));
     styleButton(applyButton, pl("Zastosuj zaznaczone"));
     styleButton(undoButton, pl("Cofnij"));
     styleButton(compareButton, pl("Przed / po"));
@@ -90,6 +94,13 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     proposeButton.onClick = [this] {
         processor.propose();
         proposalStatus.setText({}, juce::dontSendNotification);
+        timerCallback();
+    };
+    wholeMixButton.onClick = [this] {
+        processor.proposeWholeMix();
+        proposalStatus.setText({}, juce::dontSendNotification);
+        verdictViewButton.setToggleState(true, juce::dontSendNotification);
+        showView(View::verdict);
         timerCallback();
     };
     applyButton.onClick = [this] {
@@ -121,7 +132,7 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     proposalViewport.setScrollBarsShown(true, false);
     addAndMakeVisible(proposalViewport);
 
-    for (auto* button : { &channelsViewButton, &tonalViewButton, &translationViewButton })
+    for (auto* button : { &channelsViewButton, &tonalViewButton, &translationViewButton, &verdictViewButton })
     {
         button->setClickingTogglesState(true);
         button->setRadioGroupId(1);
@@ -135,6 +146,12 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     channelsViewButton.onClick = [this] { showView(View::channels); };
     tonalViewButton.onClick = [this] { showView(View::tonal); };
     translationViewButton.onClick = [this] { showView(View::translation); };
+    verdictViewButton.setButtonText(pl("Werdykt"));
+    verdictViewButton.onClick = [this] { showView(View::verdict); };
+    verdictView.onSelect = [this](std::uint64_t owner) { select(owner == selected ? 0 : owner); };
+    verdictViewport.setViewedComponent(&verdictView, false);
+    verdictViewport.setScrollBarsShown(true, false);
+    addChildComponent(verdictViewport);
     addChildComponent(translationView);
 
     styleLabel(previewLabel, pl("Odsłuch"), colours::quiet);
@@ -177,7 +194,7 @@ BrainEditor::BrainEditor(BrainProcessor& p)
         addAndMakeVisible(view);
 
     processor.setEditorOpen(true);
-    setSize(1000, 920);
+    setSize(1120, 920);
     startTimerHz(10);
 }
 
@@ -196,6 +213,7 @@ void BrainEditor::showView(View view)
     overlay.setVisible(view == View::channels);
     profilesButton.setVisible(view == View::channels);
     translationView.setVisible(view == View::translation);
+    verdictViewport.setVisible(view == View::verdict);
     overlayLabel.setVisible(false);
     for (auto* c : std::initializer_list<juce::Component*> { &tonalView, &targetBox, &newTargetButton, &captureButton, &removeReferenceButton })
         c->setVisible(tonal);
@@ -293,6 +311,13 @@ void BrainEditor::timerCallback()
                       + pl(" ref.), miks z ") + juce::String(juce::roundToInt(processor.secondsAnalysed())) + " s";
     tonalView.setData(target, mix.tonal, tonalStatus);
     translationView.setData(mix);
+    {
+        const auto& made = processor.proposal();
+        verdictView.setVerdicts(made.verdicts, made.wholeMix, selected);
+        const int width = verdictViewport.getMaximumVisibleWidth();
+        verdictView.setSize(width, 10);
+        verdictView.setSize(width, std::max(verdictViewport.getHeight(), verdictView.contentHeight()));
+    }
     if (previewBox.getSelectedId() != processor.previewSystemIndex() + 1)
         previewBox.setSelectedId(processor.previewSystemIndex() + 1, juce::dontSendNotification);
     previewBox.setColour(juce::ComboBox::backgroundColourId,
@@ -398,12 +423,15 @@ void BrainEditor::resized()
     tonalViewButton.setBounds(overlayHeader.removeFromLeft(120));
     overlayHeader.removeFromLeft(4);
     translationViewButton.setBounds(overlayHeader.removeFromLeft(100));
+    overlayHeader.removeFromLeft(4);
+    verdictViewButton.setBounds(overlayHeader.removeFromLeft(90));
     profilesButton.setBounds(overlayHeader.removeFromRight(170));
     overlayLabel.setBounds({});
     area.removeFromTop(4);
     auto viewArea = area.removeFromTop(250);
     overlay.setBounds(viewArea);
     translationView.setBounds(viewArea);
+    verdictViewport.setBounds(viewArea);
     if (tonalView.isVisible())
     {
         auto controls = viewArea.removeFromTop(26);
@@ -424,10 +452,10 @@ void BrainEditor::resized()
 
     area.removeFromTop(10);
     auto proposalHeader = area.removeFromTop(26);
-    proposalLabel.setBounds(proposalHeader.removeFromLeft(170));
-    for (auto* button : { &proposeButton, &applyButton, &undoButton, &compareButton })
+    proposalLabel.setBounds(proposalHeader.removeFromLeft(140));
+    for (auto* button : { &wholeMixButton, &proposeButton, &applyButton, &undoButton, &compareButton })
     {
-        button->setBounds(proposalHeader.removeFromLeft(button == &applyButton ? 150 : 100));
+        button->setBounds(proposalHeader.removeFromLeft(button == &applyButton || button == &wholeMixButton ? 140 : 95));
         proposalHeader.removeFromLeft(6);
     }
     area.removeFromTop(4);

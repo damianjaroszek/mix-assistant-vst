@@ -66,6 +66,21 @@ private:
     juce::Slider satDriveSlider, satMixSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> satOnAttachment, intentionalAttachment;
 
+    // Phase 7: the engineer's chain, right column.
+    juce::Label chainTitle, cleanLabel, compLabel, clipLabel, evenLabel;
+    juce::Label hpfLabel, monoLabel, mudFreqLabel, mudGainLabel;
+    juce::Slider hpfSlider, monoSlider, mudFreqSlider, mudGainSlider;
+    juce::ToggleButton compOnButton, clipOnButton, evenOnButton;
+    juce::Label compThresholdLabel, compRatioLabel, compAttackLabel, compReleaseLabel, compKneeLabel, compMakeupLabel;
+    juce::Slider compThresholdSlider, compRatioSlider, compAttackSlider, compReleaseSlider, compKneeSlider, compMakeupSlider;
+    juce::Label clipCeilingLabel, clipSoftnessLabel, evenAmountLabel, evenRefLabel;
+    juce::Slider clipCeilingSlider, clipSoftnessSlider, evenAmountSlider, evenRefSlider;
+    juce::Label cleanStatus, compStatus, clipStatus, evenStatus;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> compOnAttachment, clipOnAttachment, evenOnAttachment;
+    std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>> chainAttachments;
+    void updateChainStatus();
+    void layoutChain(juce::Rectangle<int> area);
+
     juce::Label spectrumLabel;
     juce::ToggleButton showProfileButton;
     ma::ui::SpectrumView spectrumView { -84.0 };

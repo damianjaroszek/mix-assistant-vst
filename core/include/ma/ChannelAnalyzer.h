@@ -14,6 +14,7 @@ class ChannelAnalyzer
 {
 public:
     void prepare(double sampleRate, int numChannels);
+    void setTrackBins(bool shouldTrack) { spectrum.setTrackBins(shouldTrack); } // before prepare(), for resonances
     void reset();
     void process(const float* const* channels, int numChannels, int numSamples);
 

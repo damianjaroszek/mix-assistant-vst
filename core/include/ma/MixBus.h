@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ChannelChain.h"
+#include "Resonance.h"
 #include "ChannelEq.h"
 #include "Ducker.h"
 #include "Harmonics.h"
@@ -24,7 +26,7 @@ namespace ma::bus
 {
 
 constexpr std::uint32_t kMagic = 0x4D414255; // "MABU"
-constexpr std::uint32_t kVersion = 6;
+constexpr std::uint32_t kVersion = 8;
 constexpr int kMaxSlots = 128;
 constexpr int kNameLength = 48;
 constexpr int kBands = 40;            // ERB bands, as SpectrumAnalyzer with BandScale::erb
@@ -72,6 +74,18 @@ struct AgentData
     std::int32_t intentionalDrive;  // the channel is meant to distort: no clipping warnings
     std::int32_t detectedRole;      // ma::Role recognised on the last Learn pass (0 = none)
     float detectedConfidence;
+    // Phase 7: the engineer's chain on the channel, and what the Learn pass measured for it.
+    CleanupSettings cleanup;
+    CompressorSettings compressor;
+    ClipperSettings clipper;
+    BassEvenerSettings evener;
+    std::int32_t statsValid;
+    float levelP10, levelP50, levelP95; // 100 ms RMS while playing, pre-trim (dBFS)
+    float lowNoteHz;                    // usual bass note, 0 = none
+    float compressorReductionDb;        // meters, about the last second
+    float clipperDb;
+    float evenerGainDb;
+    Resonance resonances[kMaxResonances]; // found on the last Learn pass, strongest first
 };
 
 // Note lengths for a tempo-synced duck release, indexed by AgentData::duckSync.
@@ -102,6 +116,10 @@ struct Command
     std::int32_t polarityInverted;
     HarmonicSettings harmonics;
     TransientSettings transients;
+    CleanupSettings cleanup;
+    CompressorSettings compressor;
+    ClipperSettings clipper;
+    BassEvenerSettings evener;
 };
 
 struct Slot

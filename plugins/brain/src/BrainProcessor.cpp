@@ -417,20 +417,14 @@ void BrainProcessor::collectChannels(ma::bus::Region& region, std::uint64_t now)
         {
             // The mix hears the channel after its trim.
             const double level = audible ? source[b] + channel.data.trimDb : -200.0;
-            auto& smoothed = channel.bandsDb[static_cast<size_t>(b)];
+            auto& smoothed = channel.rawDb[static_cast<size_t>(b)];
             if (useProfiles || !continuing)
                 smoothed = level;
             else
-                smoothed = previous->bandsDb[static_cast<size_t>(b)]
-                           + alpha * (level - previous->bandsDb[static_cast<size_t>(b)]);
+                smoothed = previous->rawDb[static_cast<size_t>(b)]
+                           + alpha * (level - previous->rawDb[static_cast<size_t>(b)]);
         }
-        ma::EqSettings eq {};
-        if (channel.data.eqBypass == 0)
-            for (int b = 0; b < ma::kEqBands; ++b)
-                eq[static_cast<size_t>(b)] = channel.data.eq[b];
-        for (int b = 0; b < ma::bus::kBands; ++b)
-            channel.heardDb[static_cast<size_t>(b)] = channel.bandsDb[static_cast<size_t>(b)]
-                + ma::eqResponseDb(eq, ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b));
+        applyCleanup(channel, channel.data.cleanup);
 
         // What the Agent actually sends on, smoothed like the rest.
         channel.outputValid = !useProfiles && channel.data.liveValid != 0
@@ -446,7 +440,7 @@ void BrainProcessor::collectChannels(ma::bus::Region& region, std::uint64_t now)
         }
 
         // Keep a channel that just went quiet in the picture while its average fades.
-        channel.spectrumValid = audible || (continuing && !useProfiles && *std::max_element(channel.bandsDb.begin(), channel.bandsDb.end()) > -120.0);
+        channel.spectrumValid = audible || (continuing && !useProfiles && *std::max_element(channel.rawDb.begin(), channel.rawDb.end()) > -120.0);
         next.push_back(channel);
     }
 
@@ -456,6 +450,21 @@ void BrainProcessor::collectChannels(ma::bus::Region& region, std::uint64_t now)
         return a.name.compareNatural(b.name) < 0;
     });
     mix.channels = std::move(next);
+}
+
+void BrainProcessor::applyCleanup(MixSnapshot::Channel& channel, const ma::CleanupSettings& cleanup)
+{
+    ma::EqSettings eq {};
+    if (channel.data.eqBypass == 0)
+        for (int b = 0; b < ma::kEqBands; ++b)
+            eq[static_cast<size_t>(b)] = channel.data.eq[b];
+    for (int b = 0; b < ma::bus::kBands; ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        const auto band = static_cast<size_t>(b);
+        channel.bandsDb[band] = std::max(-200.0, channel.rawDb[band] + ma::cleanupResponseDb(cleanup, hz));
+        channel.heardDb[band] = std::max(-200.0, channel.bandsDb[band] + ma::eqResponseDb(eq, hz));
+    }
 }
 
 void BrainProcessor::buildReport()
@@ -850,6 +859,287 @@ void BrainProcessor::propose()
     }
     proposeDynamics();
     proposeHarmonics();
+}
+
+namespace
+{
+bool sameCleanup(const ma::CleanupSettings& a, const ma::CleanupSettings& b)
+{
+    return std::abs(a.hpfHz - b.hpfHz) < 1.0f && std::abs(a.monoBelowHz - b.monoBelowHz) < 1.0f
+           && std::abs(a.mudDb - b.mudDb) < 0.1f && (a.mudDb > -0.05f || std::abs(a.mudHz - b.mudHz) < 5.0f)
+           && std::equal(a.notches.begin(), a.notches.end(), b.notches.begin(), [](const auto& x, const auto& y) {
+                  return std::abs(x.db - y.db) < 0.1f && (x.db > -0.05f || std::abs(std::log2(x.hz / y.hz)) < 0.02);
+              });
+}
+
+bool sameCompressor(const ma::CompressorSettings& a, const ma::CompressorSettings& b)
+{
+    return (a.on > 0.5f) == (b.on > 0.5f) && std::abs(a.thresholdDb - b.thresholdDb) < 0.5f && std::abs(a.ratio - b.ratio) < 0.1f
+           && std::abs(a.releaseMs - b.releaseMs) < 5.0f && std::abs(a.makeupDb - b.makeupDb) < 0.3f;
+}
+
+juce::String noteName(double hz)
+{
+    static const char* names[] { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+    const int midi = juce::roundToInt(69.0 + 12.0 * std::log2(hz / 440.0));
+    return juce::String(names[((midi % 12) + 12) % 12]) + juce::String(midi / 12 - 1);
+}
+
+juce::String cleanupText(const ma::CleanupSettings& cleanup, ma::ChainPlan::HighPass reason, int crowd, const ma::ChainPlan* plan = nullptr)
+{
+    juce::StringArray parts;
+    if (cleanup.hpfHz > 0.0f)
+    {
+        auto part = "HPF " + hzText(cleanup.hpfHz);
+        switch (reason)
+        {
+            case ma::ChainPlan::HighPass::junk: part += pl(" (poniżej są tylko śmieci i dudnienie)"); break;
+            case ma::ChainPlan::HighPass::lowEndOwned: part += pl(" (dół należy do stopy i basu, tu tylko go zamula)"); break;
+            case ma::ChainPlan::HighPass::subsonic: part += pl(" (tylko subsonic, dół zostaje)"); break;
+            case ma::ChainPlan::HighPass::none: break;
+        }
+        parts.add(part);
+    }
+    if (cleanup.monoBelowHz > 0.0f)
+        parts.add(pl("mono poniżej ") + hzText(cleanup.monoBelowHz));
+    if (cleanup.mudDb < 0.0f)
+        parts.add(pl("muł ") + juce::String(cleanup.mudDb, 1) + pl(" dB przy ") + hzText(cleanup.mudHz) + " ("
+                  + juce::String(crowd) + pl(" kanały tłoczą się w 200–500 Hz)"));
+    for (size_t n = 0; n < cleanup.notches.size(); ++n)
+    {
+        const auto& notch = cleanup.notches[n];
+        if (notch.db > -0.01f)
+            continue;
+        auto part = pl("rezonans ") + juce::String(notch.db, 1) + pl(" dB przy ") + hzText(notch.hz) + " (Q " + juce::String(notch.q, 1);
+        if (plan != nullptr && plan->notchProminenceDb[n] > 0.0)
+            part += pl(", wystaje ") + juce::String(juce::roundToInt(plan->notchProminenceDb[n])) + pl(" dB i dzwoni stale")
+                    + (plan->notchCoversImportant[n] ? pl(", zasłania ważniejszy kanał") : juce::String());
+        parts.add(part + ")");
+    }
+    return parts.joinIntoString(", ");
+}
+} // namespace
+
+void BrainProcessor::proposeWholeMix()
+{
+    std::vector<ma::ChainChannel> chain(mix.channels.size());
+    for (size_t c = 0; c < mix.channels.size(); ++c)
+    {
+        const auto& channel = mix.channels[c];
+        auto& in = chain[c];
+        in.role = static_cast<ma::Role>(juce::jlimit(0, static_cast<int>(ma::Role::send), static_cast<int>(channel.data.role)));
+        in.priority = channel.data.priority;
+        in.valid = channel.spectrumValid;
+        for (int b = 0; b < ma::bus::kBands; ++b)
+            in.bandsDb[static_cast<size_t>(b)] = channel.rawDb[static_cast<size_t>(b)];
+        // The Learn pass measured before the trim; the chain sits after it.
+        in.hasStats = channel.data.statsValid != 0;
+        in.levelP10 = channel.data.levelP10 + channel.data.trimDb;
+        in.levelP50 = channel.data.levelP50 + channel.data.trimDb;
+        in.levelP95 = channel.data.levelP95 + channel.data.trimDb;
+        in.truePeakDb = channel.data.learnedTruePeakDb + channel.data.trimDb;
+        in.lowNoteHz = channel.data.lowNoteHz;
+        in.intentionalDrive = channel.data.intentionalDrive != 0;
+        for (int r = 0; r < ma::kMaxResonances; ++r)
+            in.resonances[static_cast<size_t>(r)] = channel.data.resonances[r];
+    }
+    ma::ChainContext context;
+    context.bpm = tempoBpm();
+    const double peak = truePeakDb();
+    context.headroomShortDb = std::isfinite(peak) ? std::max(0.0, peak - peakCeilingDb()) : 0.0;
+    const auto plans = ma::planChains(chain, context);
+
+    // Collisions, kick and bass, translation: the usual proposal, made on the mix as it will
+    // sound with the planned cleanup, so the solver does not cut what the high-pass removes.
+    const auto saved = mix;
+    for (size_t c = 0; c < mix.channels.size(); ++c)
+        applyCleanup(mix.channels[c], plans[c].cleanup);
+    std::vector<ma::MaskingChannel> masking(mix.channels.size());
+    for (size_t c = 0; c < mix.channels.size(); ++c)
+    {
+        masking[c].valid = mix.channels[c].spectrumValid;
+        masking[c].priority = mix.channels[c].data.priority;
+        for (int b = 0; b < ma::bus::kBands; ++b)
+            masking[c].rawDb[static_cast<size_t>(b)] = mix.channels[c].heardDb[static_cast<size_t>(b)];
+    }
+    mix.masking = ma::analyseMasking(masking);
+    propose();
+
+    const double bpm = tempoBpm();
+    std::vector<Proposal::Item> chainItems;
+    for (size_t c = 0; c < mix.channels.size(); ++c)
+    {
+        const auto& channel = mix.channels[c];
+        const auto& plan = plans[c];
+        if (!channel.spectrumValid)
+            continue;
+        currentProposal.verdicts.push_back(judge(c, plan));
+
+        Proposal::Item item;
+        item.action = Proposal::Item::Action::chain;
+        item.owner = channel.owner;
+        const auto name = quoted(channel.name) + ": ";
+
+        if (!sameCleanup(plan.cleanup, channel.data.cleanup))
+        {
+            item.tool = Proposal::Item::ChainTool::cleanup;
+            item.cleanup = plan.cleanup;
+            const auto text = cleanupText(plan.cleanup, plan.highPassReason, plan.mudCrowd, &plan);
+            item.text = name + (text.isEmpty() ? pl("porządki wyłączone, nie są potrzebne") : text);
+            chainItems.push_back(item);
+        }
+        if (plan.compressor.on > 0.5f && !sameCompressor(plan.compressor, channel.data.compressor))
+        {
+            const auto& comp = plan.compressor;
+            item.tool = Proposal::Item::ChainTool::compressor;
+            item.compressor = comp;
+            item.text = name + pl("kompresja ") + juce::String(comp.ratio, 1) + pl(":1 od ") + juce::String(comp.thresholdDb, 1)
+                        + pl(" dB, atak ") + juce::String(juce::roundToInt(comp.attackMs)) + pl(" ms, powrót ")
+                        + juce::String(juce::roundToInt(comp.releaseMs)) + " ms" + (bpm > 0.0 ? pl(" (pod tempo)") : juce::String())
+                        + ", makeup +" + juce::String(comp.makeupDb, 1) + pl(" dB: głośne i ciche fragmenty dzieli ")
+                        + juce::String(plan.spreadDb, 1) + pl(" dB, po kompresji ok. ") + juce::String(plan.spreadAfterDb, 1)
+                        + pl(" dB (cel ") + juce::String(plan.targetSpreadDb, 1) + " dB)";
+            if (plan.lostInQuietParts)
+                item.text += pl(". Ciche fragmenty giną pod resztą miksu, więc trzymam go ciaśniej");
+            if (plan.arrangementDb > 0.0)
+                item.text += pl(". Pozostałe ") + juce::String(plan.arrangementDb, 1)
+                             + pl(" dB to dynamika aranżacji (cichsze takty), kompresor ich nie spłaszcza");
+            chainItems.push_back(item);
+        }
+        if (plan.clipper.on > 0.5f
+            && (channel.data.clipper.on < 0.5f || std::abs(plan.clipper.ceilingDb - channel.data.clipper.ceilingDb) > 0.3f))
+        {
+            item.tool = Proposal::Item::ChainTool::clipper;
+            item.clipper = plan.clipper;
+            item.text = name + pl("clipper ścina ") + juce::String(plan.clipDb, 1) + pl(" dB szczytów (sufit ")
+                        + juce::String(plan.clipper.ceilingDb, 1) + pl(" dBFS): szczyt jest ") + juce::String(plan.crestDb, 1)
+                        + pl(" dB nad głośną częścią, wystarczy ") + juce::String(plan.maxCrestDb, 0)
+                        + pl(". Zapas na mastering bez słyszalnej straty");
+            chainItems.push_back(item);
+        }
+        if (plan.evener.on > 0.5f
+            && (channel.data.evener.on < 0.5f || std::abs(plan.evener.referenceHz - channel.data.evener.referenceHz) > 2.0f))
+        {
+            item.tool = Proposal::Item::ChainTool::evener;
+            item.evener = plan.evener;
+            item.text = name + pl("wyrównanie nut basu względem ") + noteName(plan.evener.referenceHz) + " ("
+                        + hzText(plan.evener.referenceHz) + pl(", ") + juce::String(juce::roundToInt(plan.evener.amount * 100.0f))
+                        + pl("%): niższe nuty ucho słyszy ciszej, więc dostają więcej, wyższe mniej. Linia gra równo");
+            chainItems.push_back(item);
+        }
+    }
+    mix = saved;
+
+    currentProposal.items.insert(currentProposal.items.begin(), chainItems.begin(), chainItems.end());
+    currentProposal.wholeMix = true;
+}
+
+Proposal::Verdict BrainProcessor::judge(size_t index, const ma::ChainPlan& plan) const
+{
+    using Status = MixSnapshot::Status;
+    const auto& channel = mix.channels[index];
+    Proposal::Verdict verdict;
+    verdict.owner = channel.owner;
+    verdict.name = channel.name;
+    const auto roles = ma::ui::roleNames();
+    verdict.role = roles[juce::jlimit(0, roles.size() - 1, static_cast<int>(channel.data.role))];
+    verdict.status = Status::good;
+    juce::StringArray attention;
+
+    // Low end and mud.
+    const auto cleanup = cleanupText(plan.cleanup, plan.highPassReason, plan.mudCrowd, &plan);
+    verdict.reasons.add(cleanup.isEmpty() ? pl("Dół i środek: nic do sprzątania.") : pl("Porządki: ") + cleanup + ".");
+    if (plan.resonancesBuried > 0)
+        verdict.reasons.add(pl("Rezonanse, których miks nie słyszy (zakryte przez resztę): ") + juce::String(plan.resonancesBuried)
+                            + pl(", zostają bez cięcia."));
+
+    // Dynamics.
+    if (!plan.dynamicsKnown)
+    {
+        verdict.reasons.add(pl("Dynamika nieznana: kliknij „Naucz poziom” w Agencie na najgęstszym fragmencie."));
+        verdict.status = Status::unknown;
+    }
+    else if (channel.data.intentionalDrive != 0)
+    {
+        verdict.reasons.add(pl("Celowy przester: dynamika i szczyty zostają tak, jak są."));
+    }
+    else if (plan.overCompressed)
+    {
+        verdict.reasons.add(pl("Już mocno ściśnięty przed Agentem (szczyt tylko ") + juce::String(plan.crestDb, 1)
+                            + pl(" dB nad głośną częścią). Nie dokładam kompresji; jeśli brzmi płasko, zdejmij kompresję u źródła."));
+        attention.add(pl("przekompresowany u źródła"));
+    }
+    else if (plan.percussive)
+    {
+        verdict.reasons.add(pl("Perkusyjny: bez kompresora, uderzenia zostają."));
+    }
+    else if (plan.compressor.on > 0.5f)
+    {
+        verdict.reasons.add(pl("Dynamika: ") + juce::String(plan.spreadDb, 1) + pl(" dB między głośnymi i cichymi fragmentami, po kompresji ")
+                            + juce::String(plan.spreadAfterDb, 1) + pl(" dB (cel dla roli ") + juce::String(plan.targetSpreadDb, 1)
+                            + " dB).");
+        if (plan.arrangementDb > 0.0)
+            verdict.reasons.add(pl("Reszta różnicy (") + juce::String(plan.arrangementDb, 1)
+                                + pl(" dB) to aranżacja, np. cichszy takt. Kompresor tego nie spłaszcza; jeśli te fragmenty mają "
+                                     "być głośniej, zautomatyzuj głośność."));
+    }
+    else
+    {
+        verdict.reasons.add(pl("Dynamika w normie: ") + juce::String(plan.spreadDb, 1) + pl(" dB (cel ")
+                            + juce::String(plan.targetSpreadDb, 1) + pl(" dB), kompresja niepotrzebna."));
+    }
+    if (plan.lostInQuietParts)
+        verdict.reasons.add(pl("Ciche fragmenty giną pod resztą miksu: kompresja trzyma je wyżej."));
+
+    if (plan.clipper.on > 0.5f)
+        verdict.reasons.add(pl("Szczyty: ") + juce::String(plan.crestDb, 1) + pl(" dB nad głośną częścią, clipper zdejmuje ")
+                            + juce::String(plan.clipDb, 1) + " dB.");
+    else if (plan.dynamicsKnown && plan.crestDb > 0.0 && channel.data.intentionalDrive == 0)
+        verdict.reasons.add(pl("Szczyty w normie (") + juce::String(plan.crestDb, 1) + pl(" dB nad głośną częścią)."));
+
+    if (plan.evener.on > 0.5f)
+        verdict.reasons.add(pl("Linia basu wokół ") + noteName(plan.evener.referenceHz) + pl(": niskie nuty wyrównane dla ucha."));
+
+    // Its place in the mix: what still covers it, and the fixes on the way.
+    for (const auto& issue : mix.masking.issues)
+    {
+        if (issue.masked != static_cast<int>(index) || issue.score < 0.3)
+            continue;
+        const auto& masker = mix.channels[static_cast<size_t>(issue.masker)];
+        const bool fixed = std::any_of(currentProposal.items.begin(), currentProposal.items.end(), [&](const auto& item) {
+            return item.maskedOwner == channel.owner && item.owner == masker.owner && !item.advisory;
+        });
+        verdict.reasons.add(pl("Zasłania go ") + quoted(masker.name) + pl(" w ") + hzText(issue.lowHz) + pl("–") + hzText(issue.highHz)
+                            + " (" + juce::String(juce::roundToInt(issue.score * 100.0)) + "%)"
+                            + (fixed ? pl(": poprawka jest w propozycji.") : pl(": zostaje, bo ") + quoted(masker.name)
+                                                                                  + pl(" jest tam ważniejszy.")));
+        if (!fixed && issue.score >= 0.5)
+            attention.add(pl("ginie pod ") + quoted(masker.name));
+    }
+    if (index < mix.translation.shareChangeDb.size() && mix.translation.valid)
+    {
+        const double phone = mix.translation.shareChangeDb[index][static_cast<size_t>(ma::PlaybackSystem::phone)];
+        const bool helped = std::any_of(currentProposal.items.begin(), currentProposal.items.end(), [&](const auto& item) {
+            return item.owner == channel.owner
+                   && (item.action == Proposal::Item::Action::harmonics || item.action == Proposal::Item::Action::transients);
+        });
+        if (phone < kPhoneGoalDb && helped)
+            verdict.reasons.add(pl("Na telefonie ginie (") + juce::String(juce::roundToInt(phone))
+                                + pl(" dB względem reszty): harmoniczne albo atak są w propozycji."));
+        else if (phone < kPhoneGoalDb)
+            attention.add(pl("ginie na telefonie (") + juce::String(juce::roundToInt(phone)) + " dB)");
+    }
+
+    if (verdict.status == Status::unknown)
+        verdict.summary = pl("Porządki ustawione, reszta po nauce poziomu.");
+    else if (!attention.isEmpty())
+    {
+        verdict.status = Status::warning;
+        verdict.summary = pl("Do sprawdzenia: ") + attention.joinIntoString(", ") + ".";
+    }
+    else
+        verdict.summary = pl("Po zmianach ustawiony poprawnie w kontekście miksu.");
+    return verdict;
 }
 
 void BrainProcessor::proposeHarmonics()
@@ -1541,6 +1831,10 @@ int BrainProcessor::applySelected()
         auto polarity = channel.data.polarityInverted;
         auto harmonics = channel.data.harmonics;
         auto transients = channel.data.transients;
+        auto cleanup = channel.data.cleanup;
+        auto compressor = channel.data.compressor;
+        auto clipper = channel.data.clipper;
+        auto evener = channel.data.evener;
         bool dynamicChanges = false;
         for (const auto& item : currentProposal.items)
         {
@@ -1562,6 +1856,18 @@ int BrainProcessor::applySelected()
             else if (item.action == Proposal::Item::Action::transients)
             {
                 transients = item.transients;
+                dynamicChanges = true;
+            }
+            else if (item.action == Proposal::Item::Action::chain)
+            {
+                switch (item.tool)
+                {
+                    case Proposal::Item::ChainTool::cleanup: cleanup = item.cleanup; break;
+                    case Proposal::Item::ChainTool::compressor: compressor = item.compressor; break;
+                    case Proposal::Item::ChainTool::clipper: clipper = item.clipper; break;
+                    case Proposal::Item::ChainTool::evener: evener = item.evener; break;
+                    case Proposal::Item::ChainTool::none: break;
+                }
                 dynamicChanges = true;
             }
             else if (item.action == Proposal::Item::Action::polarity)
@@ -1589,6 +1895,13 @@ int BrainProcessor::applySelected()
         command.polarityInverted = polarity;
         command.harmonics = harmonics;
         command.transients = transients;
+        // The trim moves with the global gain, and the compressor and clipper levels with it.
+        compressor.thresholdDb = static_cast<float>(juce::jlimit(-60.0, 0.0, compressor.thresholdDb + globalGain));
+        clipper.ceilingDb = static_cast<float>(juce::jlimit(-30.0, 0.0, clipper.ceilingDb + globalGain));
+        command.cleanup = cleanup;
+        command.compressor = compressor;
+        command.clipper = clipper;
+        command.evener = evener;
         sendCommand(channel.owner, command);
         ++sent;
     }

@@ -1,7 +1,8 @@
 #pragma once
 
+#include "Oversampler.h"
+
 #include <array>
-#include <cstddef>
 
 namespace ma
 {
@@ -52,25 +53,9 @@ public:
     static double shape(SaturationMode mode, double x);
 
 private:
-    // Polyphase IIR half-band filter: two chains of first-order allpasses (Valenzuela and
-    // Constantinides). One instance either doubles or halves the rate of one signal.
-    template <size_t Coefs>
-    struct HalfBand
-    {
-        std::array<double, Coefs> c {};
-        std::array<double, Coefs> x1 {}, y1 {};
-        double pendingOdd = 0.0; // downsampling: the odd input waiting for the next pair
-
-        double allpasses(double in, int first);
-        void up(double in, double& even, double& odd);
-        double down(double even, double odd);
-        void reset();
-    };
-
     struct ChannelState
     {
-        HalfBand<8> up1, down1; // base rate <-> 2x
-        HalfBand<4> up2, down2; // 2x <-> 4x
+        Oversampler4x oversampler;
         double dcIn = 0.0, dcOut = 0.0;
     };
 

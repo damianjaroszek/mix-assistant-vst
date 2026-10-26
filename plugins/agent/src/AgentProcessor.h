@@ -2,6 +2,7 @@
 
 #include "SharedSession.h"
 #include "ma/ChannelAnalyzer.h"
+#include "ma/ChannelChain.h"
 #include "ma/ChannelEq.h"
 #include "ma/CorrelationMeter.h"
 #include "ma/Ducker.h"
@@ -79,6 +80,10 @@ public:
         // Role recognised from the same passage; set on the channel when it still had none.
         ma::RoleGuess guess {};
         bool roleSet = false, prioritySet = false;
+        // Dynamics of the passage for the Brain's engineer pass (pre-trim).
+        bool statsValid = false;
+        double levelP10 = -200.0, levelP50 = -200.0, levelP95 = -200.0, lowNoteHz = 0.0;
+        ma::Resonances resonances {}; // narrow peaks that stood out through the passage
     };
     LearnResult lastResult() const;
 
@@ -143,6 +148,33 @@ public:
     static constexpr const char* satDriveId = "satDrive";
     static constexpr const char* satMixId = "satMix";
     static constexpr const char* intentionalDriveId = "intentionalDrive";
+    // The mix engineer's chain (phase 7), set by "Ustaw cały miks" in the Brain or by hand.
+    static constexpr const char* hpfId = "cleanHpf";
+    static constexpr const char* monoBelowId = "cleanMono";
+    static constexpr const char* mudFreqId = "mudFreq";
+    static constexpr const char* mudGainId = "mudGain";
+    static constexpr const char* mudQId = "mudQ";
+    // Resonance cuts: frequency, gain, Q per notch. Plain strings, so the audio thread reads them without allocating.
+    static constexpr const char* notchIds[3][3] { { "res1Freq", "res1Gain", "res1Q" },
+                                                  { "res2Freq", "res2Gain", "res2Q" },
+                                                  { "res3Freq", "res3Gain", "res3Q" } };
+    static constexpr const char* compOnId = "compOn";
+    static constexpr const char* compThresholdId = "compThreshold";
+    static constexpr const char* compRatioId = "compRatio";
+    static constexpr const char* compAttackId = "compAttack";
+    static constexpr const char* compReleaseId = "compRelease";
+    static constexpr const char* compKneeId = "compKnee";
+    static constexpr const char* compMakeupId = "compMakeup";
+    static constexpr const char* clipOnId = "clipOn";
+    static constexpr const char* clipCeilingId = "clipCeiling";
+    static constexpr const char* clipSoftnessId = "clipSoftness";
+    static constexpr const char* evenOnId = "evenOn";
+    static constexpr const char* evenAmountId = "evenAmount";
+    static constexpr const char* evenRefId = "evenRef";
+    double compressorReductionDb() const { return compShownDb; }
+    double clipperDb() const { return clipShownDb; }
+    double evenerGainDb() const { return evenerGain.load(); }
+    double evenerNoteHz() const { return evenerNote.load(); }
     static juce::StringArray duckModeNames();
     static juce::StringArray duckSyncNames();
     static juce::StringArray saturationModeNames();
@@ -156,6 +188,10 @@ public:
         bool polarityInverted = false;
         ma::HarmonicSettings harmonics {};
         ma::TransientSettings transients {};
+        ma::CleanupSettings cleanup {};
+        ma::CompressorSettings compressor {};
+        ma::ClipperSettings clipper {};
+        ma::BassEvenerSettings evener {};
     };
     DynamicState currentDynamics() const;
     bool sidechainConnected() const { return sidechainSeen; }
@@ -192,6 +228,14 @@ private:
     ma::HarmonicEnhancer harmonics;
     ma::TransientEnhancer transients;
     ma::Saturator saturator;
+    ma::CleanupFilter cleanup;
+    ma::Compressor compressor;
+    ma::Clipper clipper;
+    ma::BassEvener evener;
+    std::atomic<float> compHold { 0.0f }, clipHold { 0.0f }; // dB, max since the timer last read them
+    std::atomic<double> evenerGain { 0.0 }, evenerNote { 0.0 };
+    std::array<float, 10> compHistory {}, clipHistory {};    // message thread: last second of maxima
+    double compShownDb = 0.0, clipShownDb = 0.0;
     ma::InstrumentFeatures learnFeatures; // audio thread while learning, read once it has finished
     ma::SpectrumAnalyzer outputSpectrum;
     std::array<std::atomic<double>, kBands> outputBands; // raw dBFS after the whole chain
@@ -252,7 +296,8 @@ private:
     std::atomic<bool> useBackup { false };
     std::atomic<float> backupTrimAudio { 0.0f };
     std::array<std::array<std::atomic<float>, 3>, ma::kEqBands> backupEqAudio {};
-    static constexpr int kDynamicValues = 16; // DuckSettings (8), sync, polarity, HarmonicSettings (3), TransientSettings (3)
+    // DuckSettings (8), sync, polarity, harmonics (3), transients (3), cleanup (5), compressor (7), clipper (3), evener (3)
+    static constexpr int kDynamicValues = 43;
     std::array<std::atomic<float>, kDynamicValues> backupDynamicsAudio {};
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(AgentProcessor)

@@ -14,20 +14,62 @@ namespace
 {
 const juce::Identifier profileProperty { "profile" };
 const juce::Identifier nameProperty { "name" };
+const juce::Identifier statsProperty { "stats" };
+const juce::Identifier resonancesProperty { "resonances" };
 
 float toShared(double db)
 {
     return std::isfinite(db) ? static_cast<float>(db) : ma::bus::kSilentDb;
 }
 
-// The dynamics as a flat list, for the audio-thread copy of the backup.
-std::array<float, 16> packDynamics(const AgentProcessor::DynamicState& s)
+// The dynamics as a flat list, for the audio-thread copy of the backup. Every settings
+// struct is plain floats, so they are copied field by field in declaration order.
+template <typename Settings>
+void put(float*& out, const Settings& settings)
 {
-    const auto& d = s.duck;
-    const auto& h = s.harmonics;
-    const auto& t = s.transients;
-    return { d.on, d.wholeSignal, d.hz, d.q, d.depthDb, d.thresholdDb, d.attackMs, d.releaseMs,
-             static_cast<float>(s.sync), s.polarityInverted ? 1.0f : 0.0f, h.on, h.hz, h.amountDb, t.on, t.hz, t.amountDb };
+    static_assert(sizeof(Settings) % sizeof(float) == 0, "settings are plain floats");
+    std::memcpy(out, static_cast<const void*>(&settings), sizeof(Settings));
+    out += sizeof(Settings) / sizeof(float);
+}
+
+template <typename Settings>
+void take(const float*& in, Settings& settings)
+{
+    std::memcpy(static_cast<void*>(&settings), in, sizeof(Settings));
+    in += sizeof(Settings) / sizeof(float);
+}
+
+std::array<float, 43> packDynamics(const AgentProcessor::DynamicState& s)
+{
+    std::array<float, 43> v {};
+    float* out = v.data();
+    put(out, s.duck);
+    *out++ = static_cast<float>(s.sync);
+    *out++ = s.polarityInverted ? 1.0f : 0.0f;
+    put(out, s.harmonics);
+    put(out, s.transients);
+    put(out, s.cleanup);
+    put(out, s.compressor);
+    put(out, s.clipper);
+    put(out, s.evener);
+    jassert(out == v.data() + v.size());
+    return v;
+}
+
+AgentProcessor::DynamicState unpackDynamics(const std::array<float, 43>& v)
+{
+    AgentProcessor::DynamicState s;
+    const float* in = v.data();
+    take(in, s.duck);
+    s.sync = static_cast<int>(*in++);
+    s.polarityInverted = *in++ > 0.5f;
+    take(in, s.harmonics);
+    take(in, s.transients);
+    take(in, s.cleanup);
+    take(in, s.compressor);
+    take(in, s.clipper);
+    take(in, s.evener);
+    return s;
 }
 
 void storeMax(std::atomic<float>& target, float value)
@@ -200,6 +242,53 @@ juce::AudioProcessorValueTreeState::ParameterLayout AgentProcessor::createLayout
                                                            juce::AudioParameterFloatAttributes().withLabel("%")));
     layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { intentionalDriveId, 6 }, "Intentional overdrive", false));
 
+    const auto floatParam = [&layout](const char* id, const char* name, Range range, float value, const char* label) {
+        layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { id, 7 }, name, range, value,
+                                                               juce::AudioParameterFloatAttributes().withLabel(label)));
+    };
+    Range hpf { 0.0f, 500.0f, 1.0f };
+    hpf.setSkewForCentre(100.0f);
+    floatParam(hpfId, "High-pass (0 = off)", hpf, 0.0f, "Hz");
+    floatParam(monoBelowId, "Mono below (0 = off)", Range { 0.0f, 300.0f, 1.0f }, 0.0f, "Hz");
+    Range mudFreq { 100.0f, 1000.0f, 1.0f };
+    mudFreq.setSkewForCentre(300.0f);
+    floatParam(mudFreqId, "Mud cut freq", mudFreq, 300.0f, "Hz");
+    floatParam(mudGainId, "Mud cut", Range { -12.0f, 0.0f, 0.1f }, 0.0f, "dB");
+    floatParam(mudQId, "Mud cut Q", Range { 0.3f, 4.0f, 0.01f }, 1.0f, "");
+    Range notchFreq { 100.0f, 16000.0f, 1.0f };
+    notchFreq.setSkewForCentre(2000.0f);
+    for (int n = 0; n < ma::CleanupSettings::kNotches; ++n)
+    {
+        const auto name = "Resonance cut " + juce::String(n + 1);
+        const auto add = [&](int what, const juce::String& suffix, Range range, float value, const char* label) {
+            layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { notchIds[n][what], 8 }, name + suffix, range,
+                                                                   value, juce::AudioParameterFloatAttributes().withLabel(label)));
+        };
+        add(0, " freq", notchFreq, 1000.0f * static_cast<float>(1 << n), "Hz");
+        add(1, "", Range { -12.0f, 0.0f, 0.1f }, 0.0f, "dB");
+        add(2, " Q", Range { 1.0f, 16.0f, 0.1f }, 6.0f, "");
+    }
+    const ma::CompressorSettings comp {};
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { compOnId, 7 }, "Compressor", false));
+    floatParam(compThresholdId, "Compressor threshold", Range { -60.0f, 0.0f, 0.5f }, comp.thresholdDb, "dB");
+    Range ratio { 1.0f, 20.0f, 0.1f };
+    ratio.setSkewForCentre(4.0f);
+    floatParam(compRatioId, "Compressor ratio", ratio, comp.ratio, ":1");
+    Range compAttack { 0.1f, 100.0f, 0.1f };
+    compAttack.setSkewForCentre(10.0f);
+    floatParam(compAttackId, "Compressor attack", compAttack, comp.attackMs, "ms");
+    Range compRelease { 10.0f, 1000.0f, 1.0f };
+    compRelease.setSkewForCentre(120.0f);
+    floatParam(compReleaseId, "Compressor release", compRelease, comp.releaseMs, "ms");
+    floatParam(compKneeId, "Compressor knee", Range { 0.0f, 12.0f, 0.5f }, comp.kneeDb, "dB");
+    floatParam(compMakeupId, "Compressor makeup", Range { -12.0f, 24.0f, 0.1f }, comp.makeupDb, "dB");
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { clipOnId, 7 }, "Clipper", false));
+    floatParam(clipCeilingId, "Clipper ceiling", Range { -30.0f, 0.0f, 0.1f }, -6.0f, "dBFS");
+    floatParam(clipSoftnessId, "Clipper softness", Range { 0.0f, 100.0f, 1.0f }, 50.0f, "%");
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { evenOnId, 7 }, "Bass note evener", false));
+    floatParam(evenAmountId, "Bass note evener amount", Range { 0.0f, 100.0f, 1.0f }, 60.0f, "%");
+    floatParam(evenRefId, "Bass note evener reference", Range { 25.0f, 160.0f, 0.5f }, 55.0f, "Hz");
+
     return layout;
 }
 
@@ -221,6 +310,7 @@ bool AgentProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
 void AgentProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     const int channels = getMainBusNumInputChannels();
+    learnAnalyzer.setTrackBins(true);
     learnAnalyzer.prepare(sampleRate, channels);
     liveLoudness.prepare(sampleRate, channels);
     liveSpectrum.prepare(sampleRate, ma::BandScale::erb);
@@ -229,6 +319,10 @@ void AgentProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     harmonics.prepare(sampleRate);
     transients.prepare(sampleRate);
     saturator.prepare(sampleRate);
+    cleanup.prepare(sampleRate);
+    compressor.prepare(sampleRate);
+    clipper.prepare(sampleRate);
+    evener.prepare(sampleRate);
     learnFeatures.prepare(sampleRate);
     outputSpectrum.prepare(sampleRate, ma::BandScale::erb);
     sidechainCorrelation.prepare(sampleRate);
@@ -355,11 +449,7 @@ void AgentProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         std::array<float, kDynamicValues> v {};
         for (size_t i = 0; i < v.size(); ++i)
             v[i] = backupDynamicsAudio[i].load();
-        dynamics.duck = { v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7] };
-        dynamics.sync = static_cast<int>(v[8]);
-        dynamics.polarityInverted = v[9] > 0.5f;
-        dynamics.harmonics = { v[10], v[11], v[12] };
-        dynamics.transients = { v[13], v[14], v[15] };
+        dynamics = unpackDynamics(v);
     }
     else
     {
@@ -395,6 +485,9 @@ void AgentProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         lowCorrelation.store(sidechainCorrelation.lowBand());
     }
 
+    cleanup.setSettings(dynamics.cleanup);
+    cleanup.process(mainBuffer.getArrayOfWritePointers(), numChannels, numSamples);
+
     ma::EqSettings bands {};
     const bool bypass = !before && eqBypassParam->load() > 0.5f;
     for (int b = 0; b < ma::kEqBands && !bypass; ++b)
@@ -413,6 +506,19 @@ void AgentProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     }
     eq.setBands(bands);
     eq.process(mainBuffer.getArrayOfWritePointers(), numChannels, numSamples);
+
+    // Peaks first (the clipper's ceiling comes from the measured peak), then the compressor
+    // on what is left, then the bass notes evened for the ear.
+    clipper.setSettings(dynamics.clipper);
+    clipper.process(mainBuffer.getArrayOfWritePointers(), numChannels, numSamples);
+    storeMax(clipHold, static_cast<float>(clipper.clippedDb()));
+    compressor.setSettings(dynamics.compressor);
+    compressor.process(mainBuffer.getArrayOfWritePointers(), numChannels, numSamples);
+    storeMax(compHold, static_cast<float>(compressor.reductionDb()));
+    evener.setSettings(dynamics.evener);
+    evener.process(mainBuffer.getArrayOfWritePointers(), numChannels, numSamples);
+    evenerGain.store(evener.currentGainDb());
+    evenerNote.store(evener.currentNoteHz());
 
     // Saturation sees the gain-staged level, so its drive means the same on every channel.
     saturator.setSettings(currentSaturation());
@@ -489,6 +595,10 @@ void AgentProcessor::updateDynamicMeters()
     reductionHistory[reductionIndex] = reductionHold.exchange(0.0f);
     reductionIndex = (reductionIndex + 1) % reductionHistory.size();
     reductionShownDb = *std::max_element(reductionHistory.begin(), reductionHistory.end());
+    compHistory[reductionIndex] = compHold.exchange(0.0f);
+    clipHistory[reductionIndex] = clipHold.exchange(0.0f);
+    compShownDb = *std::max_element(compHistory.begin(), compHistory.end());
+    clipShownDb = *std::max_element(clipHistory.begin(), clipHistory.end());
 }
 
 void AgentProcessor::publishToBrain()
@@ -548,6 +658,20 @@ void AgentProcessor::publishToBrain()
     data.intentionalDrive = intentionalDrive() ? 1 : 0;
     data.detectedRole = static_cast<std::int32_t>(result.guess.role);
     data.detectedConfidence = static_cast<float>(result.guess.confidence);
+    data.cleanup = dynamics.cleanup;
+    data.compressor = dynamics.compressor;
+    data.clipper = dynamics.clipper;
+    data.evener = dynamics.evener;
+    data.statsValid = result.statsValid ? 1 : 0;
+    data.levelP10 = toShared(result.levelP10);
+    data.levelP50 = toShared(result.levelP50);
+    data.levelP95 = toShared(result.levelP95);
+    data.lowNoteHz = static_cast<float>(result.lowNoteHz);
+    data.compressorReductionDb = static_cast<float>(compShownDb);
+    data.clipperDb = static_cast<float>(clipShownDb);
+    data.evenerGainDb = static_cast<float>(evenerGain.load());
+    for (int r = 0; r < ma::kMaxResonances; ++r)
+        data.resonances[r] = result.resonances[static_cast<size_t>(r)];
     data.sidechainConnected = sidechainSeen ? 1 : 0;
     data.sidechainDb = toShared(sidechainShownDb);
     data.duckReductionDb = static_cast<float>(reductionShownDb);
@@ -593,7 +717,8 @@ void AgentProcessor::handleBrainCommand(ma::bus::Region& region)
         setParam(trimId, command.trimDb);
         setEqParams(next);
         setParam(eqBypassId, 0.0f);
-        setDynamics({ command.duck, command.duckSync, command.polarityInverted != 0, command.harmonics, command.transients });
+        setDynamics({ command.duck, command.duckSync, command.polarityInverted != 0, command.harmonics, command.transients,
+                      command.cleanup, command.compressor, command.clipper, command.evener });
     }
     else if (command.kind == ma::bus::CommandKind::adapt && !eqBypassed())
     {
@@ -652,6 +777,33 @@ void AgentProcessor::setDynamics(const DynamicState& state)
     setParam(attackOnId, state.transients.on);
     setParam(attackFreqId, state.transients.hz);
     setParam(attackAmountId, state.transients.amountDb);
+    const auto& c = state.cleanup;
+    setParam(hpfId, c.hpfHz);
+    setParam(monoBelowId, c.monoBelowHz);
+    setParam(mudFreqId, c.mudHz);
+    setParam(mudGainId, c.mudDb);
+    setParam(mudQId, c.mudQ);
+    for (int n = 0; n < ma::CleanupSettings::kNotches; ++n)
+    {
+        const auto& notch = c.notches[static_cast<size_t>(n)];
+        setParam(notchIds[n][0], notch.hz);
+        setParam(notchIds[n][1], notch.db);
+        setParam(notchIds[n][2], notch.q);
+    }
+    const auto& k = state.compressor;
+    setParam(compOnId, k.on);
+    setParam(compThresholdId, k.thresholdDb);
+    setParam(compRatioId, k.ratio);
+    setParam(compAttackId, k.attackMs);
+    setParam(compReleaseId, k.releaseMs);
+    setParam(compKneeId, k.kneeDb);
+    setParam(compMakeupId, k.makeupDb);
+    setParam(clipOnId, state.clipper.on);
+    setParam(clipCeilingId, state.clipper.ceilingDb);
+    setParam(clipSoftnessId, state.clipper.softness * 100.0f);
+    setParam(evenOnId, state.evener.on);
+    setParam(evenAmountId, state.evener.amount * 100.0f);
+    setParam(evenRefId, state.evener.referenceHz);
 }
 
 AgentProcessor::DynamicState AgentProcessor::currentDynamics() const
@@ -674,6 +826,31 @@ AgentProcessor::DynamicState AgentProcessor::currentDynamics() const
     state.transients.on = value(attackOnId) > 0.5f ? 1.0f : 0.0f;
     state.transients.hz = value(attackFreqId);
     state.transients.amountDb = value(attackAmountId);
+    state.cleanup.hpfHz = value(hpfId) >= 20.0f ? value(hpfId) : 0.0f;
+    state.cleanup.monoBelowHz = value(monoBelowId) >= 20.0f ? value(monoBelowId) : 0.0f;
+    state.cleanup.mudHz = value(mudFreqId);
+    state.cleanup.mudDb = value(mudGainId);
+    state.cleanup.mudQ = value(mudQId);
+    for (int n = 0; n < ma::CleanupSettings::kNotches; ++n)
+    {
+        auto& notch = state.cleanup.notches[static_cast<size_t>(n)];
+        notch.hz = value(notchIds[n][0]);
+        notch.db = value(notchIds[n][1]);
+        notch.q = value(notchIds[n][2]);
+    }
+    state.compressor.on = value(compOnId) > 0.5f ? 1.0f : 0.0f;
+    state.compressor.thresholdDb = value(compThresholdId);
+    state.compressor.ratio = value(compRatioId);
+    state.compressor.attackMs = value(compAttackId);
+    state.compressor.releaseMs = value(compReleaseId);
+    state.compressor.kneeDb = value(compKneeId);
+    state.compressor.makeupDb = value(compMakeupId);
+    state.clipper.on = value(clipOnId) > 0.5f ? 1.0f : 0.0f;
+    state.clipper.ceilingDb = value(clipCeilingId);
+    state.clipper.softness = value(clipSoftnessId) / 100.0f;
+    state.evener.on = value(evenOnId) > 0.5f ? 1.0f : 0.0f;
+    state.evener.amount = value(evenAmountId) / 100.0f;
+    state.evener.referenceHz = value(evenRefId);
     return state;
 }
 
@@ -784,7 +961,17 @@ void AgentProcessor::recogniseRole()
     const auto& weights = ma::erbEqualLoudnessWeights();
     for (size_t b = 0; b < kBands; ++b)
         raw[b] = learnProfile[b].load() + weights[b];
-    result.guess = ma::recogniseRole(learnFeatures.summary(), raw);
+    const auto summary = learnFeatures.summary();
+    result.guess = ma::recogniseRole(summary, raw);
+    result.statsValid = summary.valid && summary.levelP95 > -100.0;
+    if (result.statsValid)
+    {
+        result.levelP10 = summary.levelP10;
+        result.levelP50 = summary.levelP50;
+        result.levelP95 = summary.levelP95;
+        result.lowNoteHz = summary.lowNoteHz;
+    }
+    result.resonances = ma::findResonances(learnAnalyzer.spectrumAnalyzer());
     result.roleSet = result.prioritySet = false;
     if (result.guess.role == ma::Role::other || result.guess.confidence < 0.5)
         return;
@@ -845,6 +1032,19 @@ void AgentProcessor::getStateInformation(juce::MemoryBlock& destData)
         state.removeProperty(profileProperty, nullptr);
     }
 
+    // The learned dynamics too, so the Brain can plan the chain after reopening the project.
+    if (result.statsValid)
+        state.setProperty(statsProperty, juce::String(result.levelP10, 2) + " " + juce::String(result.levelP50, 2) + " "
+                                             + juce::String(result.levelP95, 2) + " " + juce::String(result.lowNoteHz, 1), nullptr);
+    else
+        state.removeProperty(statsProperty, nullptr);
+    juce::StringArray resonances;
+    for (const auto& r : result.resonances)
+        if (r.hz > 0.0f)
+            resonances.add(juce::String(r.hz, 1) + " " + juce::String(r.prominenceDb, 1) + " " + juce::String(r.q, 1) + " "
+                           + juce::String(r.persistence, 2));
+    state.setProperty(resonancesProperty, resonances.joinIntoString(" "), nullptr);
+
     if (auto xml = state.createXml())
         copyXmlToBinary(*xml, destData);
 }
@@ -864,6 +1064,20 @@ void AgentProcessor::setStateInformation(const void* data, int sizeInBytes)
             profile[static_cast<size_t>(b)].store(values[b] == "-inf" ? -INFINITY : values[b].getDoubleValue());
         profileValid.store(true);
     }
+    const auto stats = juce::StringArray::fromTokens(state.getProperty(statsProperty).toString(), " ", {});
+    if (stats.size() == 4)
+    {
+        result.statsValid = true;
+        result.levelP10 = stats[0].getDoubleValue();
+        result.levelP50 = stats[1].getDoubleValue();
+        result.levelP95 = stats[2].getDoubleValue();
+        result.lowNoteHz = stats[3].getDoubleValue();
+    }
+    const auto found = juce::StringArray::fromTokens(state.getProperty(resonancesProperty).toString(), " ", {});
+    result.resonances = {};
+    for (int r = 0; r < ma::kMaxResonances && r * 4 + 3 < found.size(); ++r)
+        result.resonances[static_cast<size_t>(r)] = { found[r * 4].getFloatValue(), found[r * 4 + 1].getFloatValue(),
+                                                      found[r * 4 + 2].getFloatValue(), found[r * 4 + 3].getFloatValue() };
     parameters.replaceState(state);
 }
 

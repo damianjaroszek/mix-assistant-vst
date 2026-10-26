@@ -30,14 +30,16 @@ private:
     juce::Slider ceilingSlider;
     juce::TextButton resetButton;
     juce::ToggleButton profilesButton;
-    juce::TextButton channelsViewButton, tonalViewButton, translationViewButton;
+    juce::TextButton channelsViewButton, tonalViewButton, translationViewButton, verdictViewButton;
+    brain::VerdictView verdictView;
+    juce::Viewport verdictViewport;
     brain::TranslationView translationView;
     juce::Label previewLabel;
     juce::ComboBox previewBox;
     juce::ComboBox targetBox;
     juce::TextButton newTargetButton, captureButton, removeReferenceButton;
     brain::TonalView tonalView;
-    enum class View { channels, tonal, translation };
+    enum class View { channels, tonal, translation, verdict };
     void showView(View view);
     View currentView = View::channels;
     void refreshTargets();
@@ -46,7 +48,7 @@ private:
     juce::String shownTarget;
 
     juce::Label proposalLabel, proposalStatus;
-    juce::TextButton proposeButton, applyButton, undoButton, compareButton;
+    juce::TextButton proposeButton, wholeMixButton, applyButton, undoButton, compareButton;
     juce::ToggleButton adaptiveButton;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> adaptiveAttachment;
     brain::ProposalView proposalView;

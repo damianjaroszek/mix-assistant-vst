@@ -680,4 +680,98 @@ private:
     bool made = false;
 };
 
+// The engineer's verdict per channel ("Ustaw cały miks"): a status dot, the one-line summary
+// and why, wrapped to the width. Lives in a viewport, like the proposal.
+class VerdictView : public juce::Component
+{
+public:
+    std::function<void(std::uint64_t)> onSelect;
+
+    void setVerdicts(const std::vector<Proposal::Verdict>& newVerdicts, bool made, std::uint64_t newSelected)
+    {
+        verdicts = newVerdicts;
+        wholeMix = made;
+        selected = newSelected;
+        layoutRows();
+        repaint();
+    }
+
+    void resized() override { layoutRows(); }
+    int contentHeight() const { return rows.empty() ? 60 : juce::roundToInt(rows.back().getBottom() + 8.0f); }
+
+    void paint(juce::Graphics& g) override
+    {
+        namespace colours = ma::ui::colours;
+        using ma::ui::pl;
+        auto area = getLocalBounds().toFloat();
+        g.setColour(colours::panel);
+        g.fillRoundedRectangle(area, 4.0f);
+        area.reduce(10.0f, 6.0f);
+        if (verdicts.empty())
+        {
+            g.setColour(colours::quiet);
+            g.setFont(juce::FontOptions(13.0f));
+            g.drawFittedText(wholeMix ? pl("Żaden kanał nie gra. Puść najgęstszy fragment i kliknij „Ustaw cały miks” jeszcze raz.")
+                                      : pl("Kliknij „Ustaw cały miks”: Mózg ustawi porządki, kompresję, clipper i bas na każdym kanale, "
+                                           "patrząc na cały miks, i powie tu, co i dlaczego. Najpierw naucz poziom w Agentach."),
+                             area.toNearestInt(), juce::Justification::topLeft, 4);
+            return;
+        }
+        for (size_t i = 0; i < verdicts.size(); ++i)
+        {
+            const auto& verdict = verdicts[i];
+            auto row = rows[i];
+            if (verdict.owner == selected)
+            {
+                g.setColour(colours::accent.withAlpha(0.12f));
+                g.fillRoundedRectangle(row.expanded(4.0f, 2.0f), 3.0f);
+            }
+            g.setColour(statusColour(verdict.status));
+            g.fillEllipse(row.getX(), row.getY() + 5.0f, 9.0f, 9.0f);
+            row.removeFromLeft(16.0f);
+            layoutFor(verdict, row.getWidth()).draw(g, row);
+        }
+    }
+
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        for (size_t i = 0; i < rows.size(); ++i)
+            if (rows[i].contains(e.position) && onSelect != nullptr)
+                onSelect(verdicts[i].owner);
+    }
+
+private:
+    static juce::TextLayout layoutFor(const Proposal::Verdict& verdict, float width)
+    {
+        namespace colours = ma::ui::colours;
+        juce::AttributedString text;
+        text.append(verdict.name, juce::FontOptions(14.0f, juce::Font::bold), colours::text);
+        text.append("  " + verdict.role + "\n", juce::FontOptions(12.5f), colours::quiet);
+        text.append(verdict.summary + "\n", juce::FontOptions(13.0f), statusColour(verdict.status));
+        text.append(verdict.reasons.joinIntoString("\n"), juce::FontOptions(12.5f), colours::quiet);
+        text.setWordWrap(juce::AttributedString::byWord);
+        juce::TextLayout layout;
+        layout.createLayout(text, juce::jmax(50.0f, width));
+        return layout;
+    }
+
+    void layoutRows()
+    {
+        rows.clear();
+        float y = 8.0f;
+        const float width = static_cast<float>(getWidth()) - 20.0f;
+        for (const auto& verdict : verdicts)
+        {
+            const float height = layoutFor(verdict, width - 16.0f).getHeight();
+            rows.push_back({ 10.0f, y, width, height });
+            y += height + 12.0f;
+        }
+    }
+
+    std::vector<Proposal::Verdict> verdicts;
+    std::vector<juce::Rectangle<float>> rows;
+    bool wholeMix = false;
+    std::uint64_t selected = 0;
+};
+
 } // namespace brain
