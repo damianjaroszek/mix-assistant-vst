@@ -835,7 +835,7 @@ public:
             // Level: the references' corridor, our dot.
             auto level = row.removeFromLeft(levelWidth);
             auto bar = level.withSizeKeepingCentre(level.getWidth() - 40.0f, 8.0f).withX(level.getX());
-            const auto xOf = [&bar](double db) {
+            const auto xOf = [&bar, lowest, highest](double db) {
                 return bar.getX() + static_cast<float>(bar.getWidth() * (juce::jlimit(lowest, highest, db) - lowest) / (highest - lowest));
             };
             g.setColour(colours::background);
