@@ -2,6 +2,7 @@
 
 #include "ChannelChain.h"
 #include "Resonance.h"
+#include "Stereo.h"
 #include "ChannelEq.h"
 #include "Ducker.h"
 #include "Harmonics.h"
@@ -26,7 +27,7 @@ namespace ma::bus
 {
 
 constexpr std::uint32_t kMagic = 0x4D414255; // "MABU"
-constexpr std::uint32_t kVersion = 8;
+constexpr std::uint32_t kVersion = 9;
 constexpr int kMaxSlots = 128;
 constexpr int kNameLength = 48;
 constexpr int kBands = 40;            // ERB bands, as SpectrumAnalyzer with BandScale::erb
@@ -86,6 +87,11 @@ struct AgentData
     float clipperDb;
     float evenerGainDb;
     Resonance resonances[kMaxResonances]; // found on the last Learn pass, strongest first
+    // Phase 8: mid-side EQ on the channel, and its live mid and side per ERB band (pre-trim, before the stereo EQ).
+    StereoSettings stereo;
+    std::int32_t stereoValid;
+    float midDb[kBands];
+    float sideDb[kBands];
 };
 
 // Note lengths for a tempo-synced duck release, indexed by AgentData::duckSync.
@@ -120,6 +126,7 @@ struct Command
     CompressorSettings compressor;
     ClipperSettings clipper;
     BassEvenerSettings evener;
+    StereoSettings stereo;
 };
 
 struct Slot

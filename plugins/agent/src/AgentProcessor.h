@@ -2,6 +2,7 @@
 
 #include "SharedSession.h"
 #include "ma/ChannelAnalyzer.h"
+#include "ma/Stereo.h"
 #include "ma/ChannelChain.h"
 #include "ma/ChannelEq.h"
 #include "ma/CorrelationMeter.h"
@@ -155,6 +156,14 @@ public:
     static constexpr const char* mudGainId = "mudGain";
     static constexpr const char* mudQId = "mudQ";
     // Resonance cuts: frequency, gain, Q per notch. Plain strings, so the audio thread reads them without allocating.
+    // Mid-side EQ (phase 8): bells on the side signal, set by "Ustaw cały miks".
+    static constexpr const char* sideBellIds[4][3] { { "side1Freq", "side1Gain", "side1Q" },
+                                                     { "side2Freq", "side2Gain", "side2Q" },
+                                                     { "side3Freq", "side3Gain", "side3Q" },
+                                                     { "side4Freq", "side4Gain", "side4Q" } };
+    // Live coherence per ERB band for the editor (+1 mono, -1 anti-phase); false while not measured.
+    // After the mid-side EQ; `audible` marks bands within 40 dB of the channel's loudest.
+    bool copyStereo(double* coherence, bool* audible) const;
     static constexpr const char* notchIds[3][3] { { "res1Freq", "res1Gain", "res1Q" },
                                                   { "res2Freq", "res2Gain", "res2Q" },
                                                   { "res3Freq", "res3Gain", "res3Q" } };
@@ -192,6 +201,7 @@ public:
         ma::CompressorSettings compressor {};
         ma::ClipperSettings clipper {};
         ma::BassEvenerSettings evener {};
+        ma::StereoSettings stereo {};
     };
     DynamicState currentDynamics() const;
     bool sidechainConnected() const { return sidechainSeen; }
@@ -232,6 +242,10 @@ private:
     ma::Compressor compressor;
     ma::Clipper clipper;
     ma::BassEvener evener;
+    ma::StereoShaper stereoShaper;
+    ma::StereoAnalyzer liveStereo; // on the input, while the Brain or the editor looks
+    std::array<std::atomic<float>, kBands> liveMid, liveSide;
+    std::atomic<bool> stereoSeen { false };
     std::atomic<float> compHold { 0.0f }, clipHold { 0.0f }; // dB, max since the timer last read them
     std::atomic<double> evenerGain { 0.0 }, evenerNote { 0.0 };
     std::array<float, 10> compHistory {}, clipHistory {};    // message thread: last second of maxima
@@ -297,7 +311,7 @@ private:
     std::atomic<float> backupTrimAudio { 0.0f };
     std::array<std::array<std::atomic<float>, 3>, ma::kEqBands> backupEqAudio {};
     // DuckSettings (8), sync, polarity, harmonics (3), transients (3), cleanup (5), compressor (7), clipper (3), evener (3)
-    static constexpr int kDynamicValues = 43;
+    static constexpr int kDynamicValues = 55;
     std::array<std::atomic<float>, kDynamicValues> backupDynamicsAudio {};
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(AgentProcessor)

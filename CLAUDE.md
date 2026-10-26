@@ -40,6 +40,12 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   Resonances (`ma/Resonance.h`): the Learn analyser tracks fine FFT bins (`SpectrumAnalyzer::setTrackBins`), a peak counts
   when it stands out in >= 70% of playing frames; the planner cuts up to three (cleanup notches) only where audible in the mix,
   never below 300 Hz on drums and bass, and on tonal roles only broad (Q <= 8) bumps.
+  Phase 8 stereo (`ma/Stereo.h`, `ma/StereoPlanner.h`): per-ERB-band mid/side power (two mono `SpectrumAnalyzer`s),
+  coherence = (M-S)/(M+S). Agents publish live input mid/side (pre-trim, pre stereo EQ); the Brain measures the master the same
+  way for the "Stereo" view and report only. `planStereo` works from the channels' power sums (not the master, which already
+  carries applied cuts) so a second pass is idempotent. Side cuts on anti-phase bands (channel's own < 0, or the sum < 0 and the
+  channel brings >= 30% of the side), +1 dB side lifts only on wide roles where the sum is >= 0.85. `StereoShaper` (side-only bells)
+  sits right after cleanup and is part of `Command`.
   `MixSnapshot::Channel::rawDb` is pre-cleanup, `bandsDb` post-cleanup pre-EQ, `heardDb` post-EQ.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.

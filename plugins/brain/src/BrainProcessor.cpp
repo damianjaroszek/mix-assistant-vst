@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <functional>
 #include <cmath>
+#include <cstring>
 
 using ma::ui::pl;
 
@@ -84,6 +85,9 @@ BrainProcessor::BrainProcessor()
         b.store(-INFINITY);
     for (auto& b : averageBands)
         b.store(-INFINITY);
+    for (auto* set : { &masterMid, &masterSide })
+        for (auto& b : *set)
+            b.store(-200.0f);
     startTimerHz(kUpdateHz);
 }
 
@@ -129,6 +133,7 @@ void BrainProcessor::prepareToPlay(double sampleRate, int)
     spectrum.prepare(sampleRate, ma::kTonalScale);
     hopSeconds = 2048.0 / sampleRate; // half of the analyser's 4096-point FFT
     correlation.prepare(sampleRate);
+    masterStereo.prepare(sampleRate);
     simulator.prepare(sampleRate);
     stereo.store(channels >= 2);
     outputGain.reset(sampleRate, 0.1);
@@ -150,6 +155,7 @@ void BrainProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         truePeakMeter.reset();
         spectrum.reset();
         correlation.reset();
+        masterStereo.reset();
     }
 
     if (auto* head = getPlayHead())
@@ -167,6 +173,13 @@ void BrainProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         correlation.process(input[0], input[1], numSamples);
         correlationLow.store(correlation.lowBand());
         correlationFull.store(correlation.fullBand());
+        masterStereo.process(input[0], input[1], numSamples);
+        const auto mid = masterStereo.recentMidDb(), side = masterStereo.recentSideDb();
+        for (size_t b = 0; b < masterMid.size(); ++b)
+        {
+            masterMid[b].store(static_cast<float>(std::max(-200.0, mid[b])));
+            masterSide[b].store(static_cast<float>(std::max(-200.0, side[b])));
+        }
     }
 
     integrated.store(loudness.integratedLufs());
@@ -225,6 +238,23 @@ void BrainProcessor::timerCallback()
         region->header.spectraWantedUntil.store(now + kSpectraRequestMs);
 
     collectChannels(*region, now);
+
+    // The sum in mid and side, smoothed like the channels; only while music plays.
+    {
+        const double alpha = 1.0 - std::exp(-1.0 / (kSmoothingSeconds * kUpdateHz));
+        const bool playing = stereo.load() && std::isfinite(momentaryLufs()) && momentaryLufs() > kAdaptMinimumLufs;
+        if (playing)
+        {
+            for (size_t b = 0; b < mix.master.midDb.size(); ++b)
+            {
+                const double m = masterMid[b].load(), s = masterSide[b].load();
+                mix.master.midDb[b] = mix.master.valid ? mix.master.midDb[b] + alpha * (m - mix.master.midDb[b]) : m;
+                mix.master.sideDb[b] = mix.master.valid ? mix.master.sideDb[b] + alpha * (s - mix.master.sideDb[b]) : s;
+            }
+            mix.master.valid = true;
+        }
+        mix.antiPhase = ma::antiPhaseRanges(mix.master);
+    }
 
     std::vector<ma::MaskingChannel> masking(mix.channels.size());
     for (size_t c = 0; c < mix.channels.size(); ++c)
@@ -439,6 +469,17 @@ void BrainProcessor::collectChannels(ma::bus::Region& region, std::uint64_t now)
                            : level;
         }
 
+        // Mid and side, smoothed the same way.
+        channel.stereoValid = !useProfiles && channel.data.stereoValid != 0 && channel.data.liveValid != 0;
+        const bool stereoContinuing = previous != mix.channels.end() && previous->stereoValid;
+        for (int b = 0; b < ma::bus::kBands; ++b)
+        {
+            const auto at = static_cast<size_t>(b);
+            const double m = channel.data.midDb[b] + channel.data.trimDb, s = channel.data.sideDb[b] + channel.data.trimDb;
+            channel.midDb[at] = stereoContinuing && channel.stereoValid ? previous->midDb[at] + alpha * (m - previous->midDb[at]) : m;
+            channel.sideDb[at] = stereoContinuing && channel.stereoValid ? previous->sideDb[at] + alpha * (s - previous->sideDb[at]) : s;
+        }
+
         // Keep a channel that just went quiet in the picture while its average fades.
         channel.spectrumValid = audible || (continuing && !useProfiles && *std::max_element(channel.rawDb.begin(), channel.rawDb.end()) > -120.0);
         next.push_back(channel);
@@ -465,6 +506,34 @@ void BrainProcessor::applyCleanup(MixSnapshot::Channel& channel, const ma::Clean
         channel.bandsDb[band] = std::max(-200.0, channel.rawDb[band] + ma::cleanupResponseDb(cleanup, hz));
         channel.heardDb[band] = std::max(-200.0, channel.bandsDb[band] + ma::eqResponseDb(eq, hz));
     }
+}
+
+juce::String BrainProcessor::stereoCulprit(double lowHz, double highHz) const
+{
+    // The channel bringing the most side into the range while being out of phase there itself.
+    juce::String name;
+    double most = 0.0;
+    for (const auto& channel : mix.channels)
+    {
+        if (!channel.stereoValid)
+            continue;
+        double side = 0.0, worst = 1.0;
+        for (int b = 0; b < ma::bus::kBands; ++b)
+        {
+            const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+            if (hz < lowHz || hz > highHz)
+                continue;
+            const auto at = static_cast<size_t>(b);
+            side += std::pow(10.0, channel.sideDb[at] / 10.0);
+            worst = std::min(worst, ma::coherence(channel.midDb[at], channel.sideDb[at]));
+        }
+        if (worst < 0.5 && side > most)
+        {
+            most = side;
+            name = channel.name;
+        }
+    }
+    return name;
 }
 
 void BrainProcessor::buildReport()
@@ -520,6 +589,35 @@ void BrainProcessor::buildReport()
                           : full >= 0.0 ? pl(". Bardzo szeroko: część elementów zniknie w mono.")
                                         : pl(". Przeciwfaza: miks w mono się rozpadnie."));
         report.push_back(phase);
+
+        // Per band, like a per-band correlation meter: which ranges fall into anti-phase, and who does it.
+        MixSnapshot::ReportItem perBand;
+        perBand.title = pl("Faza w pasmach");
+        if (!mix.master.valid)
+        {
+            perBand.detail = pl("Czekam na muzykę.");
+        }
+        else if (mix.antiPhase.empty())
+        {
+            perBand.status = Status::good;
+            perBand.detail = pl("Żadne pasmo powyżej 120 Hz nie wpada w przeciwfazę.");
+        }
+        else
+        {
+            perBand.status = Status::problem;
+            juce::StringArray parts;
+            for (const auto& range : mix.antiPhase)
+            {
+                auto part = hzText(range.lowHz) + pl("–") + hzText(range.highHz) + " (" + juce::String(range.worst, 2) + ")";
+                const auto culprit = stereoCulprit(range.lowHz, range.highHz);
+                if (culprit.isNotEmpty())
+                    part += pl(", robi ją ") + quoted(culprit);
+                parts.add(part);
+            }
+            perBand.detail = pl("Przeciwfaza w ") + parts.joinIntoString("; ")
+                           + pl(". W mono te pasma osłabną. „Ustaw cały miks” zdejmie tam side na winnym kanale.");
+        }
+        report.push_back(perBand);
     }
 
     // Agents connected.
@@ -878,6 +976,24 @@ bool sameCompressor(const ma::CompressorSettings& a, const ma::CompressorSetting
            && std::abs(a.releaseMs - b.releaseMs) < 5.0f && std::abs(a.makeupDb - b.makeupDb) < 0.3f;
 }
 
+juce::String stereoFixText(const ma::StereoPlan::Fix& fix)
+{
+    const auto range = hzText(fix.lowHz) + pl("–") + hzText(fix.highHz);
+    if (fix.lift)
+        return pl("side +") + juce::String(fix.gainDb, 1) + pl(" dB w ") + range + pl(": miks jest tam prawie mono, a kanał zostaje w fazie (")
+               + juce::String(fix.coherenceBefore, 2) + pl(" → ") + juce::String(fix.coherenceAfter, 2) + ")";
+    // A layer with almost no mid stays out of phase however much side goes: say where to look.
+    const auto source = fix.coherenceAfter < 0.0 ? pl(". Sam kanał zostaje tam w przeciwfazie, tylko ciszej: sprawdź źródło "
+                                                      "(stereo widener, chorus albo odwrócona warstwa)")
+                                                 : juce::String();
+    if (fix.sumOutOfPhase)
+        return pl("side ") + juce::String(fix.gainDb, 1) + pl(" dB w ") + range
+               + pl(", bo ciągnie cały miks w przeciwfazę (faza miksu tam ") + juce::String(fix.sumBefore, 2) + pl(" → ")
+               + juce::String(fix.sumAfter, 2) + ")" + source;
+    return pl("side ") + juce::String(fix.gainDb, 1) + pl(" dB w ") + range + pl(", bo kanał wpada tam w przeciwfazę (")
+           + juce::String(fix.coherenceBefore, 2) + pl(" → ") + juce::String(fix.coherenceAfter, 2) + ")" + source;
+}
+
 juce::String noteName(double hz)
 {
     static const char* names[] { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
@@ -949,6 +1065,23 @@ void BrainProcessor::proposeWholeMix()
     context.headroomShortDb = std::isfinite(peak) ? std::max(0.0, peak - peakCeilingDb()) : 0.0;
     const auto plans = ma::planChains(chain, context);
 
+    // Phase 8: keep every band in phase, channel by channel.
+    std::vector<ma::StereoChannel> stereoIn(mix.channels.size());
+    for (size_t c = 0; c < mix.channels.size(); ++c)
+    {
+        const auto& channel = mix.channels[c];
+        auto& in = stereoIn[c];
+        in.role = chain[c].role;
+        in.priority = channel.data.priority;
+        in.valid = channel.spectrumValid && channel.stereoValid;
+        for (int b = 0; b < ma::bus::kBands; ++b)
+        {
+            in.midDb[static_cast<size_t>(b)] = channel.midDb[static_cast<size_t>(b)];
+            in.sideDb[static_cast<size_t>(b)] = channel.sideDb[static_cast<size_t>(b)];
+        }
+    }
+    const auto stereoPlans = ma::planStereo(stereoIn, mix.master);
+
     // Collisions, kick and bass, translation: the usual proposal, made on the mix as it will
     // sound with the planned cleanup, so the solver does not cut what the high-pass removes.
     const auto saved = mix;
@@ -973,7 +1106,7 @@ void BrainProcessor::proposeWholeMix()
         const auto& plan = plans[c];
         if (!channel.spectrumValid)
             continue;
-        currentProposal.verdicts.push_back(judge(c, plan));
+        currentProposal.verdicts.push_back(judge(c, plan, stereoPlans[c]));
 
         Proposal::Item item;
         item.action = Proposal::Item::Action::chain;
@@ -1028,13 +1161,40 @@ void BrainProcessor::proposeWholeMix()
             chainItems.push_back(item);
         }
     }
+    for (size_t c = 0; c < mix.channels.size(); ++c)
+    {
+        const auto& channel = mix.channels[c];
+        const auto& stereoPlan = stereoPlans[c];
+        if (!channel.spectrumValid || !channel.stereoValid)
+            continue;
+        // Parameters round what the plan sets (step and skew), so "the same" allows for that.
+        const bool same = std::equal(stereoPlan.settings.side.begin(), stereoPlan.settings.side.end(), channel.data.stereo.side.begin(),
+                                     [](const auto& a, const auto& b) {
+                                         const bool offA = std::abs(a.db) < 0.05f, offB = std::abs(b.db) < 0.05f;
+                                         return (offA && offB)
+                                                || (!offA && !offB && std::abs(a.db - b.db) < 0.1f && std::abs(a.q - b.q) < 0.1f
+                                                    && std::abs(std::log2(a.hz / b.hz)) < 0.02);
+                                     });
+        if (same || (stereoPlan.fixes.empty() && !ma::isOn(channel.data.stereo)))
+            continue;
+        Proposal::Item item;
+        item.action = Proposal::Item::Action::chain;
+        item.tool = Proposal::Item::ChainTool::stereo;
+        item.owner = channel.owner;
+        item.stereo = stereoPlan.settings;
+        juce::StringArray parts;
+        for (const auto& fix : stereoPlan.fixes)
+            parts.add(stereoFixText(fix));
+        item.text = quoted(channel.name) + ": " + (parts.isEmpty() ? pl("mid-side EQ wyłączony, faza jest w porządku") : parts.joinIntoString("; "));
+        chainItems.push_back(item);
+    }
     mix = saved;
 
     currentProposal.items.insert(currentProposal.items.begin(), chainItems.begin(), chainItems.end());
     currentProposal.wholeMix = true;
 }
 
-Proposal::Verdict BrainProcessor::judge(size_t index, const ma::ChainPlan& plan) const
+Proposal::Verdict BrainProcessor::judge(size_t index, const ma::ChainPlan& plan, const ma::StereoPlan& stereoPlan) const
 {
     using Status = MixSnapshot::Status;
     const auto& channel = mix.channels[index];
@@ -1096,6 +1256,14 @@ Proposal::Verdict BrainProcessor::judge(size_t index, const ma::ChainPlan& plan)
                             + juce::String(plan.clipDb, 1) + " dB.");
     else if (plan.dynamicsKnown && plan.crestDb > 0.0 && channel.data.intentionalDrive == 0)
         verdict.reasons.add(pl("Szczyty w normie (") + juce::String(plan.crestDb, 1) + pl(" dB nad głośną częścią)."));
+
+    if (!channel.stereoValid)
+        verdict.reasons.add(pl("Stereo: brak pomiaru (kanał mono albo Agent jeszcze nie wysłał danych)."));
+    else if (stereoPlan.fixes.empty())
+        verdict.reasons.add(pl("Stereo: każde pasmo w fazie, nic do zmiany."));
+    else
+        for (const auto& fix : stereoPlan.fixes)
+            verdict.reasons.add(pl("Stereo: ") + stereoFixText(fix) + ".");
 
     if (plan.evener.on > 0.5f)
         verdict.reasons.add(pl("Linia basu wokół ") + noteName(plan.evener.referenceHz) + pl(": niskie nuty wyrównane dla ucha."));
@@ -1835,6 +2003,7 @@ int BrainProcessor::applySelected()
         auto compressor = channel.data.compressor;
         auto clipper = channel.data.clipper;
         auto evener = channel.data.evener;
+        auto stereoEq = channel.data.stereo;
         bool dynamicChanges = false;
         for (const auto& item : currentProposal.items)
         {
@@ -1866,6 +2035,7 @@ int BrainProcessor::applySelected()
                     case Proposal::Item::ChainTool::compressor: compressor = item.compressor; break;
                     case Proposal::Item::ChainTool::clipper: clipper = item.clipper; break;
                     case Proposal::Item::ChainTool::evener: evener = item.evener; break;
+                    case Proposal::Item::ChainTool::stereo: stereoEq = item.stereo; break;
                     case Proposal::Item::ChainTool::none: break;
                 }
                 dynamicChanges = true;
@@ -1902,6 +2072,7 @@ int BrainProcessor::applySelected()
         command.compressor = compressor;
         command.clipper = clipper;
         command.evener = evener;
+        command.stereo = stereoEq;
         sendCommand(channel.owner, command);
         ++sent;
     }

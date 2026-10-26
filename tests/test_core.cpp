@@ -14,6 +14,8 @@
 #include "ma/ChannelChain.h"
 #include "ma/ChainPlanner.h"
 #include "ma/Resonance.h"
+#include "ma/Stereo.h"
+#include "ma/StereoPlanner.h"
 #include "ma/EqualLoudness.h"
 #include "ma/GainStaging.h"
 #include "ma/LevelStats.h"
@@ -1369,6 +1371,100 @@ void testResonances()
     check(plans[1].cleanup.notches[0].db > -0.01f && plans[1].resonancesBuried == 1, "a ring the mix covers is left alone");
 }
 
+void testStereo()
+{
+    constexpr double sr = 48000.0, pi = 3.14159265358979323846;
+    auto measure = [&](const std::function<void(double, float&, float&)>& part) {
+        ma::StereoAnalyzer analyser;
+        analyser.prepare(sr);
+        std::vector<float> l(512), r(512);
+        long n = 0;
+        for (int block = 0; block < int(3.0 * sr / 512); ++block)
+        {
+            for (int i = 0; i < 512; ++i)
+                part(static_cast<double>(n++) / sr, l[static_cast<size_t>(i)], r[static_cast<size_t>(i)]);
+            analyser.process(l.data(), r.data(), 512);
+        }
+        return std::pair { analyser.averageMidDb(), analyser.averageSideDb() };
+    };
+    int band2k = 0;
+    for (int b = 0; b < 40; ++b)
+        if (std::abs(std::log2(ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b) / 2000.0))
+            < std::abs(std::log2(ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, band2k) / 2000.0)))
+            band2k = b;
+    const auto at = static_cast<size_t>(band2k);
+    const auto mono = measure([&](double t, float& l, float& r) { l = r = static_cast<float>(0.3 * std::sin(2 * pi * 2000.0 * t)); });
+    const auto flipped = measure([&](double t, float& l, float& r) { l = static_cast<float>(0.3 * std::sin(2 * pi * 2000.0 * t)); r = -l; });
+    checkNear(ma::coherence(mono.first[at], mono.second[at]), 1.0, 0.01, "a mono band reads +1");
+    checkNear(ma::coherence(flipped.first[at], flipped.second[at]), -1.0, 0.01, "an inverted band reads -1");
+
+    // The mid-side EQ takes side off and leaves the mid alone.
+    ma::StereoSettings settings;
+    settings.side[0] = { 2000.0f, -6.0f, 2.0f };
+    ma::StereoShaper shaper;
+    shaper.prepare(sr);
+    shaper.setSettings(settings);
+    std::vector<float> l(48000), r(48000);
+    for (size_t i = 0; i < l.size(); ++i)
+    {
+        const double t = static_cast<double>(i) / sr;
+        const double m = 0.2 * std::sin(2 * pi * 2000.0 * t), side = 0.2 * std::sin(2 * pi * 2000.0 * t + 1.0);
+        l[i] = static_cast<float>(m + side);
+        r[i] = static_cast<float>(m - side);
+    }
+    float* channels[] { l.data(), r.data() };
+    shaper.process(channels, 2, 48000);
+    double mid = 0.0, side = 0.0;
+    for (size_t i = 24000; i < l.size(); ++i)
+    {
+        mid += 0.25 * (l[i] + r[i]) * (l[i] + r[i]);
+        side += 0.25 * (l[i] - r[i]) * (l[i] - r[i]);
+    }
+    checkNear(10.0 * std::log10(side / mid), -6.0, 0.3, "side bell cuts the side by its gain, mid kept");
+
+    // The planner: the channel in anti-phase gets side taken off there, only there.
+    auto flat = [](double db) { ma::SpectrumAnalyzer::Bands b {}; b.fill(db); return b; };
+    std::vector<ma::StereoChannel> mix(3);
+    mix[0] = { ma::Role::vocal, 2, true, flat(-30.0), flat(-60.0) };
+    mix[1] = { ma::Role::pad, 6, true, flat(-34.0), flat(-45.0) };
+    mix[2] = { ma::Role::lead, 4, true, flat(-34.0), flat(-42.0) };
+    for (int b = 0; b < 40; ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        if (hz > 2000.0 && hz < 4000.0)
+            mix[1].sideDb[static_cast<size_t>(b)] = -30.0; // 4 dB more side than mid: anti-phase
+    }
+    ma::StereoMaster master { true, flat(-27.0), flat(-38.0) };
+    const auto plans = ma::planStereo(mix, master);
+    check(plans[0].fixes.empty(), "the mono vocal is left alone");
+    check(!plans[1].fixes.empty() && !plans[1].fixes[0].lift && plans[1].fixes[0].gainDb <= -1.5
+              && plans[1].fixes[0].lowHz > 1500.0 && plans[1].fixes[0].highHz < 5000.0,
+          "the pad's anti-phase band gets a side cut there");
+    check(!plans[1].fixes.empty() && plans[1].fixes[0].coherenceBefore < 0.0 && plans[1].fixes[0].coherenceAfter >= 0.0,
+          "and is back in phase after it");
+    const bool leadLift = !plans[2].fixes.empty() && plans[2].fixes.back().lift && plans[2].fixes.back().gainDb <= 1.0;
+    check(leadLift, "where the whole mix is narrow, a wide part gets only a little side");
+    auto wideMix = mix;
+    wideMix[1].sideDb = flat(-31.0); // a very wide pad: the mix is wide everywhere
+    check(ma::planStereo(wideMix, master)[2].fixes.empty(), "no lift where the mix is already wide");
+    // Planned from the channels, not the measured sum, so a second pass with the cuts and lifts
+    // already heard on the master gives the same answer.
+    ma::StereoMaster afterApply { true, flat(-27.0), flat(-33.0) };
+    const auto again = ma::planStereo(mix, afterApply);
+    check(std::memcmp(&again[1].settings, &plans[1].settings, sizeof(ma::StereoSettings)) == 0
+              && std::memcmp(&again[2].settings, &plans[2].settings, sizeof(ma::StereoSettings)) == 0,
+          "a second pass changes nothing");
+
+    // The sum out of phase: the report finds the range.
+    ma::StereoMaster outOfPhase = master;
+    for (int b = 0; b < 40; ++b)
+        if (ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b) > 2000.0 && ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b) < 4000.0)
+            outOfPhase.sideDb[static_cast<size_t>(b)] = -24.0;
+    const auto ranges = ma::antiPhaseRanges(outOfPhase);
+    check(ranges.size() == 1 && ranges[0].lowHz > 1500.0 && ranges[0].highHz < 5000.0 && ranges[0].worst < 0.0,
+          "the sum's anti-phase range is reported");
+}
+
 void testWavRoundTrip()
 {
     const auto a = sine(44100.0, 0.5, 2, 440.0, 0.25);
@@ -1406,6 +1502,7 @@ int main()
     testChannelChain();
     testChainPlanner();
     testResonances();
+    testStereo();
     testWavRoundTrip();
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "OK" : "FAILED", failures, failures == 1 ? "" : "s");
