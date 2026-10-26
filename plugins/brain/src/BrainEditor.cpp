@@ -489,6 +489,9 @@ void BrainEditor::timerCallback()
         brain::IssuesView::Line line;
         line.text = processor.describeIssue(issue);
         line.score = static_cast<float>(issue.score);
+        const auto handling = processor.issueHandling(issue);
+        line.ducked = handling == BrainProcessor::IssueHandling::ducked;
+        line.cutAtLimit = handling == BrainProcessor::IssueHandling::cutAtLimit;
         line.masker = mix.channels[static_cast<size_t>(issue.masker)].owner;
         line.involvesSelected = selected != 0
                                 && (line.masker == selected || mix.channels[static_cast<size_t>(issue.masked)].owner == selected);
