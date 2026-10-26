@@ -24,7 +24,8 @@ add_library(ma_core STATIC
     src/ChainPlanner.cpp
     src/Resonance.cpp
     src/Stereo.cpp
-    src/StereoPlanner.cpp)
+    src/StereoPlanner.cpp
+    src/StemReference.cpp)
 target_include_directories(ma_core PUBLIC include)
 
 # WAV reading/writing, used by the lab and tests only.

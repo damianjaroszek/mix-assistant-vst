@@ -4,10 +4,13 @@
 #include "MaUi.h"
 #include "ma/Instrument.h"
 
+#include <juce_audio_formats/juce_audio_formats.h>
+
 #include <algorithm>
 #include <functional>
 #include <cmath>
 #include <cstring>
+#include <thread>
 
 using ma::ui::pl;
 
@@ -71,7 +74,180 @@ juce::String joinNames(const juce::StringArray& names)
         text += pl(" i ") + juce::String(names.size() - shown) + pl(" innych");
     return text;
 }
+const char* const kRegionNames[ma::kStemRegions] { "sub", "bas", "dolny środek", "środek", "prezencja", "powietrze" };
+
+juce::String regionText(int region)
+{
+    return pl(kRegionNames[region]) + " (" + hzText(ma::stemRegionEdgeHz(region)) + pl("–") + hzText(ma::stemRegionEdgeHz(region + 1)) + ")";
+}
+
+int groupOfChannel(const MixSnapshot::Channel& channel)
+{
+    return ma::stemGroupForRole(static_cast<ma::Role>(juce::jlimit(0, static_cast<int>(ma::Role::send), static_cast<int>(channel.data.role))));
+}
+
+// The part of the file names every stem shares: the reference track's title.
+juce::String commonTitle(const juce::Array<juce::File>& files)
+{
+    juce::String title = files.getFirst().getFileNameWithoutExtension();
+    for (const auto& file : files)
+    {
+        const auto name = file.getFileNameWithoutExtension();
+        int same = 0;
+        while (same < title.length() && same < name.length() && title[same] == name[same])
+            ++same;
+        title = title.substring(0, same);
+    }
+    title = title.trimCharactersAtEnd(" -_.([").trim();
+    return title.length() >= 3 ? title : files.getFirst().getParentDirectory().getFileName();
+}
 } // namespace
+
+// Analysis of one reference track's stems on a worker thread: the readers, the profiler and
+// the result belong to it until `done`.
+struct BrainProcessor::StemJob
+{
+    std::thread worker;
+    std::atomic<double> progress { 0.0 };
+    std::atomic<bool> done { false }, cancel { false };
+    ma::StemProfile profile;
+    juce::String error, warning;
+    std::array<bool, ma::kStemGroups> groups {};
+    bool fullMix = false;
+
+    ~StemJob()
+    {
+        cancel.store(true);
+        if (worker.joinable())
+            worker.join();
+    }
+
+    void run(const juce::Array<juce::File>& files, const juce::String& title)
+    {
+        auto fail = [this](const juce::String& message) {
+            error = message;
+            done.store(true);
+        };
+        juce::AudioFormatManager formats;
+        formats.registerBasicFormats();
+        std::vector<std::string> names;
+        for (const auto& file : files)
+            names.push_back(file.getFileName().toStdString());
+        const auto kinds = ma::stemGroupsFromNames(names);
+
+        struct Source
+        {
+            std::unique_ptr<juce::AudioFormatReader> reader;
+            int group = 0;
+        };
+        std::vector<Source> sources;
+        juce::StringArray unknown;
+        double rate = 0.0;
+        juce::int64 length = -1, longest = 0;
+        for (int i = 0; i < files.size(); ++i)
+        {
+            const int kind = kinds[static_cast<size_t>(i)];
+            if (kind == ma::kStemUnknown)
+            {
+                unknown.add(quoted(files[i].getFileName()));
+                continue;
+            }
+            std::unique_ptr<juce::AudioFormatReader> reader(formats.createReaderFor(files[i]));
+            if (reader == nullptr)
+                return fail(pl("Nie mogę otworzyć ") + quoted(files[i].getFileName()) + pl(" (czytam WAV, AIFF, FLAC, MP3 i OGG)."));
+            if (rate <= 0.0)
+                rate = reader->sampleRate;
+            else if (std::abs(reader->sampleRate - rate) > 0.5)
+                return fail(pl("Pliki mają różne częstotliwości próbkowania, więc nie są z jednej separacji."));
+            if (kind == ma::kStemFullMix)
+            {
+                if (fullMix)
+                    return fail(pl("Dwa pliki wyglądają na cały utwór. Zostaw jeden („mix”) albo żaden."));
+                fullMix = true;
+            }
+            else
+            {
+                groups[static_cast<size_t>(kind)] = true;
+            }
+            length = length < 0 ? reader->lengthInSamples : std::min(length, reader->lengthInSamples);
+            longest = std::max(longest, reader->lengthInSamples);
+            sources.push_back({ std::move(reader), kind });
+        }
+        if (!unknown.isEmpty())
+            return fail(pl("Nie wiem, czym jest ") + joinNames(unknown)
+                        + pl(". W nazwie pliku powinno być drums, bass, vocals albo other (albo perkusja, bas, wokal, reszta), "
+                             "a dla całego utworu „mix”."));
+        if (std::count(groups.begin(), groups.end(), true) < 2)
+            return fail(pl("Potrzebuję co najmniej dwóch stemów jednego utworu (np. perkusja i bas)."));
+        if (length < static_cast<juce::int64>(rate * 15.0))
+            return fail(pl("Stemy są za krótkie: potrzebuję co najmniej 15 s."));
+        if (static_cast<double>(longest - length) > rate)
+            warning = pl("Pliki różnią się długością o ") + juce::String(static_cast<double>(longest - length) / rate, 1)
+                      + pl(" s, porównuję wspólną część. Sprawdź, czy wszystkie są z tego samego utworu.");
+
+        ma::StemProfiler profiler;
+        profiler.prepare(rate, fullMix);
+        const int n = profiler.blockLength();
+        juce::AudioBuffer<float> read(2, n), sum(2, n), mix(2, n);
+        std::array<juce::AudioBuffer<float>, ma::kStemGroups> perGroup;
+        for (auto& buffer : perGroup)
+            buffer.setSize(2, n);
+        auto readBlock = [&](juce::int64 start, int len) {
+            sum.clear();
+            mix.clear();
+            for (auto& buffer : perGroup)
+                buffer.clear();
+            for (auto& source : sources)
+            {
+                read.clear();
+                source.reader->read(&read, 0, len, start, true, true);
+                if (source.reader->numChannels == 1)
+                    read.copyFrom(1, 0, read, 0, 0, len);
+                auto& into = source.group == ma::kStemFullMix ? mix : perGroup[static_cast<size_t>(source.group)];
+                for (int ch = 0; ch < 2; ++ch)
+                {
+                    into.addFrom(ch, 0, read, ch, 0, len);
+                    if (source.group != ma::kStemFullMix)
+                        sum.addFrom(ch, 0, read, ch, 0, len);
+                }
+            }
+        };
+
+        const auto blocks = static_cast<int>((length + n - 1) / n);
+        for (int b = 0; b < blocks; ++b)
+        {
+            if (cancel.load())
+                return fail({});
+            const juce::int64 start = static_cast<juce::int64>(b) * n;
+            const int len = static_cast<int>(std::min<juce::int64>(n, length - start));
+            readBlock(start, len);
+            profiler.measureBlock(sum.getReadPointer(0), sum.getReadPointer(1), len);
+            progress.store(0.5 * (b + 1) / blocks);
+        }
+        profiler.chooseDrop();
+        for (int b = 0; b < blocks; ++b)
+        {
+            if (cancel.load())
+                return fail({});
+            progress.store(0.5 + 0.5 * (b + 1) / blocks);
+            if (!profiler.inDrop(b))
+                continue;
+            const juce::int64 start = static_cast<juce::int64>(b) * n;
+            const int len = static_cast<int>(std::min<juce::int64>(n, length - start));
+            readBlock(start, len);
+            std::array<const float*, ma::kStemGroups> left {}, right {};
+            for (int g = 0; g < ma::kStemGroups; ++g)
+                if (groups[static_cast<size_t>(g)])
+                {
+                    left[static_cast<size_t>(g)] = perGroup[static_cast<size_t>(g)].getReadPointer(0);
+                    right[static_cast<size_t>(g)] = perGroup[static_cast<size_t>(g)].getReadPointer(1);
+                }
+            profiler.analyseBlock(b, left, right, fullMix ? mix.getReadPointer(0) : nullptr, fullMix ? mix.getReadPointer(1) : nullptr, len);
+        }
+        profile = profiler.finish(title.toStdString());
+        done.store(true);
+    }
+};
 
 BrainProcessor::BrainProcessor()
     : AudioProcessor(BusesProperties()
@@ -238,6 +414,9 @@ void BrainProcessor::timerCallback()
         region->header.spectraWantedUntil.store(now + kSpectraRequestMs);
 
     collectChannels(*region, now);
+    accumulateDrop();
+    if (stemJob != nullptr && stemJob->done.load())
+        finishStemJob();
 
     // The sum in mid and side, smoothed like the channels; only while music plays.
     {
@@ -280,12 +459,31 @@ void BrainProcessor::timerCallback()
                                                                                : channel.heardDb[static_cast<size_t>(b)];
     }
     mix.translation = ma::analyseTranslation(translation);
+
+    mix.stemMeasure = {};
+    mix.stems = {};
+    if (stemsReady())
+    {
+        std::array<bool, ma::kStemGroups> present {};
+        std::array<ma::SpectrumAnalyzer::Bands, ma::kStemGroups> side {};
+        const auto groups = stemGroupDb(true, present, &side, nullptr);
+        mix.stemMeasure = ma::measureStemGroups(groups, side, present);
+        mix.stems = ma::compareStems(mix.stemMeasure, currentStems);
+        // What the cleanup or the Brain's cuts took out on purpose is not asked back.
+        for (int g = 0; g < ma::kStemGroups; ++g)
+            for (int r = 0; r < ma::kStemRegions; ++r)
+            {
+                auto& d = mix.stems.groups[static_cast<size_t>(g)].shapeDeviationDb[static_cast<size_t>(r)];
+                if (d < 0.0 && cutOnPurpose(g, r))
+                    d = 0.0;
+            }
+    }
     updateLoudnessMatch(now);
     adaptStep(now);
     buildReport();
 }
 
-ma::SolverResult BrainProcessor::solveNow(double headroomGainDb) const
+ma::SolverResult BrainProcessor::solveNow(double headroomGainDb, const ma::StemShapeInput* stems) const
 {
     std::vector<ma::SolverChannel> channels(mix.channels.size());
     for (size_t c = 0; c < mix.channels.size(); ++c)
@@ -299,6 +497,7 @@ ma::SolverResult BrainProcessor::solveNow(double headroomGainDb) const
     options.headroomGainDb = headroomGainDb;
     if (mix.tonal.valid)
         options.tonal = &mix.tonal;
+    options.stems = stems;
     return ma::solve(channels, options);
 }
 
@@ -534,6 +733,180 @@ juce::String BrainProcessor::stereoCulprit(double lowHz, double highHz) const
         }
     }
     return name;
+}
+
+void BrainProcessor::accumulateDrop()
+{
+    if (dropResetPending)
+    {
+        drop.clear();
+        dropUpdates = 0;
+        dropLevel = -INFINITY;
+        mix.dropSeconds = 0.0;
+        dropResetPending = false;
+        // The short-term loudness needs its 3 s window refilled (and the meter its reset) first.
+        dropHoldUpdates = 4 * kUpdateHz;
+    }
+    if (dropHoldUpdates > 0)
+    {
+        --dropHoldUpdates;
+        return;
+    }
+    const double level = shortTermLufs();
+    if (useProfiles || capturing || comparing || !std::isfinite(level) || level < kAdaptMinimumLufs)
+        return;
+    // A clearly louder part than any so far is the drop now: start over from it.
+    if (level > dropLevel + 1.0)
+    {
+        if (std::isfinite(dropLevel))
+        {
+            drop.clear();
+            dropUpdates = 0;
+        }
+        dropLevel = level;
+    }
+    dropLevel = std::max(dropLevel, level);
+    if (level < dropLevel - 3.0)
+        return;
+    for (const auto& channel : mix.channels)
+    {
+        if (channel.data.liveValid == 0)
+            continue;
+        auto& sum = drop[channel.owner];
+        for (int b = 0; b < ma::bus::kBands; ++b)
+        {
+            const auto at = static_cast<size_t>(b);
+            sum.power[at] += std::pow(10.0, (channel.data.liveDb[b] + channel.data.trimDb) / 10.0);
+            if (channel.data.stereoValid != 0)
+                sum.side[at] += std::pow(10.0, (channel.data.sideDb[b] + channel.data.trimDb) / 10.0);
+        }
+    }
+    ++dropUpdates;
+    mix.dropSeconds = static_cast<double>(dropUpdates) / kUpdateHz;
+}
+
+bool BrainProcessor::stemsReady() const
+{
+    return currentStems.valid() && mix.dropSeconds >= kMinimumDropSeconds && dropUpdates > 0;
+}
+
+std::array<ma::SpectrumAnalyzer::Bands, ma::kStemGroups>
+BrainProcessor::stemGroupDb(bool withEq, std::array<bool, ma::kStemGroups>& present,
+                            std::array<ma::SpectrumAnalyzer::Bands, ma::kStemGroups>* side,
+                            const std::vector<ma::EqSettings>* eqs) const
+{
+    std::array<ma::SpectrumAnalyzer::Bands, ma::kStemGroups> power {}, sidePower {};
+    present = {};
+    for (size_t c = 0; c < mix.channels.size(); ++c)
+    {
+        const auto& channel = mix.channels[c];
+        const int group = groupOfChannel(channel);
+        const auto found = drop.find(channel.owner);
+        if (group < 0 || found == drop.end())
+            continue;
+        const auto& cleanup = channel.data.cleanup;
+        ma::EqSettings eq {};
+        if (eqs != nullptr && c < eqs->size())
+            eq = (*eqs)[c];
+        else if (withEq && channel.data.eqBypass == 0)
+            for (int b = 0; b < ma::kEqBands; ++b)
+                eq[static_cast<size_t>(b)] = channel.data.eq[b];
+        bool any = false;
+        for (int b = 0; b < ma::bus::kBands; ++b)
+        {
+            const auto at = static_cast<size_t>(b);
+            const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+            const double gain = std::pow(10.0, (ma::cleanupResponseDb(cleanup, hz) + ma::eqResponseDb(eq, hz)) / 10.0);
+            const double p = found->second.power[at] / static_cast<double>(dropUpdates) * gain;
+            power[static_cast<size_t>(group)][at] += p;
+            sidePower[static_cast<size_t>(group)][at] += found->second.side[at] / static_cast<double>(dropUpdates) * gain
+                                                         * std::pow(10.0, ma::sideResponseDb(channel.data.stereo, hz) / 10.0);
+            any = any || p > 1e-12;
+        }
+        present[static_cast<size_t>(group)] = present[static_cast<size_t>(group)] || any;
+    }
+    auto toDb = [](const ma::SpectrumAnalyzer::Bands& in) {
+        ma::SpectrumAnalyzer::Bands out {};
+        for (size_t b = 0; b < out.size(); ++b)
+            out[b] = in[b] > 1e-20 ? 10.0 * std::log10(in[b]) : -200.0;
+        return out;
+    };
+    std::array<ma::SpectrumAnalyzer::Bands, ma::kStemGroups> out {};
+    for (int g = 0; g < ma::kStemGroups; ++g)
+    {
+        out[static_cast<size_t>(g)] = toDb(power[static_cast<size_t>(g)]);
+        if (side != nullptr)
+            (*side)[static_cast<size_t>(g)] = toDb(sidePower[static_cast<size_t>(g)]);
+    }
+    return out;
+}
+
+ma::StemShapeInput BrainProcessor::stemShapeInput() const
+{
+    ma::StemShapeInput in;
+    if (!stemsReady())
+        return in;
+    in.target = &currentStems;
+    for (const auto& channel : mix.channels)
+    {
+        const auto found = drop.find(channel.owner);
+        const int group = found != drop.end() ? groupOfChannel(channel) : -1;
+        in.groupOf.push_back(group);
+        ma::SpectrumAnalyzer::Bands db {}, side {};
+        for (int b = 0; b < ma::bus::kBands; ++b)
+        {
+            const auto at = static_cast<size_t>(b);
+            const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+            const double cleanup = ma::cleanupResponseDb(channel.data.cleanup, hz);
+            const double p = group >= 0 ? found->second.power[at] / static_cast<double>(dropUpdates) : 0.0;
+            const double sp = group >= 0 ? found->second.side[at] / static_cast<double>(dropUpdates) : 0.0;
+            db[at] = p > 1e-20 ? 10.0 * std::log10(p) + cleanup : -200.0;
+            side[at] = sp > 1e-20 ? 10.0 * std::log10(sp) + cleanup + ma::sideResponseDb(channel.data.stereo, hz) : -200.0;
+        }
+        in.dropDb.push_back(db);
+        in.dropSideDb.push_back(side);
+        in.lowestBoostHz.push_back(channel.data.cleanup.hpfHz > 0.0f ? 2.0 * channel.data.cleanup.hpfHz : 0.0);
+    }
+    return in;
+}
+
+bool BrainProcessor::cutOnPurpose(int group, int region) const
+{
+    // The group's drop in that region before and after its channels' cleanup (high-pass, mud)
+    // and the cuts the Brain set to make room for more important channels.
+    double before = 0.0, after = 0.0;
+    for (const auto& channel : mix.channels)
+    {
+        const auto found = drop.find(channel.owner);
+        if (groupOfChannel(channel) != group || found == drop.end())
+            continue;
+        ma::EqSettings eq {};
+        if (channel.data.eqBypass == 0)
+            for (int b = 0; b < ma::kEqBands; ++b)
+                eq[static_cast<size_t>(b)] = channel.data.eq[b];
+        for (int b = 0; b < ma::bus::kBands; ++b)
+        {
+            const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+            if (hz < ma::stemRegionEdgeHz(region) || hz >= ma::stemRegionEdgeHz(region + 1))
+                continue;
+            const double p = found->second.power[static_cast<size_t>(b)];
+            before += p;
+            after += p * std::pow(10.0, (ma::cleanupResponseDb(channel.data.cleanup, hz) + std::min(0.0, ma::eqResponseDb(eq, hz))) / 10.0);
+        }
+    }
+    return before > 0.0 && after < before * 0.5;
+}
+
+juce::String BrainProcessor::stemGroupName(int group)
+{
+    switch (group)
+    {
+        case 0: return pl("Perkusja");
+        case 1: return pl("Bas");
+        case 2: return pl("Wokal");
+        case 3: return pl("Reszta");
+        default: return {};
+    }
 }
 
 void BrainProcessor::buildReport()
@@ -857,6 +1230,62 @@ void BrainProcessor::buildReport()
         report.push_back(item);
     }
 
+    // Phase 9: proportions against stem references, drop to drop.
+    if (currentStems.valid())
+    {
+        MixSnapshot::ReportItem item;
+        item.title = pl("Proporcje jak w referencjach");
+        const auto setName = quoted(juce::String::fromUTF8(currentStems.name.c_str()));
+        if (!mix.stems.valid)
+        {
+            item.detail = pl("Puść najgłośniejszą część utworu (drop): porównuję drop z dropem referencji ") + setName + ". "
+                          + juce::String(juce::roundToInt(mix.dropSeconds)) + " / " + juce::String(juce::roundToInt(kMinimumDropSeconds)) + " s.";
+        }
+        else
+        {
+            juce::StringArray parts;
+            double worst = 0.0;
+            for (int g = 0; g < ma::kStemGroups; ++g)
+            {
+                const auto& c = mix.stems.groups[static_cast<size_t>(g)];
+                if (!c.compared)
+                    continue;
+                if (std::abs(c.levelDeviationDb) >= 0.5)
+                {
+                    parts.add(stemGroupName(g) + pl(" o ") + juce::String(std::abs(c.levelDeviationDb), 1)
+                              + (c.levelDeviationDb > 0.0 ? pl(" dB za głośno") : pl(" dB za cicho")));
+                    worst = std::max(worst, std::abs(c.levelDeviationDb));
+                }
+                int region = -1;
+                for (int r = 0; r < ma::kStemRegions; ++r)
+                    if (c.shapeCompared[static_cast<size_t>(r)] && std::abs(c.shapeDeviationDb[static_cast<size_t>(r)]) >= 1.5
+                        && (region < 0 || std::abs(c.shapeDeviationDb[static_cast<size_t>(r)]) > std::abs(c.shapeDeviationDb[static_cast<size_t>(region)])))
+                        region = r;
+                if (region >= 0)
+                {
+                    const double d = c.shapeDeviationDb[static_cast<size_t>(region)];
+                    parts.add(stemGroupName(g) + (d < 0.0 ? pl(": za mało ") : pl(": za dużo ")) + regionText(region) + " ("
+                              + juce::String(std::abs(d), 1) + " dB)");
+                    worst = std::max(worst, std::abs(d) * 0.5);
+                }
+                if (c.widthCompared && std::abs(c.widthDeviation) >= 0.04)
+                    parts.add(stemGroupName(g) + (c.widthDeviation < 0.0 ? pl(" węższa") : pl(" szersza")) + pl(" niż w referencjach (side ")
+                              + juce::String(juce::roundToInt(c.width * 100.0)) + "%)");
+            }
+            if (parts.isEmpty())
+            {
+                item.status = Status::good;
+                item.detail = pl("Perkusja, bas, wokal i reszta stoją jak w referencjach ") + setName + pl(" (poziom i barwa w dropie).");
+            }
+            else
+            {
+                item.status = worst >= 3.0 ? Status::problem : Status::warning;
+                item.detail = parts.joinIntoString(", ") + pl(". „Ustaw cały miks” dopasuje poziomy grup i barwę szerokimi korekcjami.");
+            }
+        }
+        report.push_back(item);
+    }
+
     // Collisions.
     {
         int valid = 0;
@@ -901,7 +1330,8 @@ void BrainProcessor::propose()
 
     const double peak = truePeakDb();
     const double over = std::isfinite(peak) ? peak - peakCeilingDb() : 0.0;
-    const auto solved = solveNow(over > 0.0 ? -std::ceil((over + 0.5) * 2.0) / 2.0 : 0.0);
+    const auto stems = stemShapeInput();
+    const auto solved = solveNow(over > 0.0 ? -std::ceil((over + 0.5) * 2.0) / 2.0 : 0.0, stems.target != nullptr ? &stems : nullptr);
     currentProposal.crowdingBefore = solved.crowdingBefore;
     currentProposal.crowdingAfter = solved.crowdingAfter;
     for (size_t c = 0; c < mix.channels.size(); ++c)
@@ -928,6 +1358,21 @@ void BrainProcessor::propose()
                 item.text += pl("Saturacja albo exciter na ") + quoted(mix.channels[static_cast<size_t>(change.sourceChannel)].name)
                              + pl(" doda harmoniczne w tym paśmie, albo ");
             item.text += pl("dodaj element: ") + arrangementHint(std::sqrt(change.lowHz * change.highHz));
+        }
+        else if (change.kind == ma::SolverChange::Kind::stemBoost || change.kind == ma::SolverChange::Kind::stemCut)
+        {
+            const auto& channel = mix.channels[static_cast<size_t>(change.channel)];
+            item.owner = channel.owner;
+            item.band = solved.eq[static_cast<size_t>(change.channel)][static_cast<size_t>(change.eqSlot)];
+            const bool boost = change.kind == ma::SolverChange::Kind::stemBoost;
+            int region = 0;
+            while (region < ma::kStemRegions - 1 && ma::stemRegionEdgeHz(region + 1) <= change.lowHz)
+                ++region;
+            item.text = quoted(channel.name) + ": " + (boost ? "+" : "") + juce::String(change.gainDb, 1) + pl(" dB przy ")
+                        + hzText(item.band.hz) + " (Q " + juce::String(item.band.q, 1) + pl("), bo grupa ") + stemGroupName(change.group)
+                        + (boost ? pl(" ma za mało: ") : pl(" ma za dużo: ")) + regionText(region) + ", "
+                        + juce::String(std::abs(change.deviationDb), 1) + pl(" dB poza referencjami ")
+                        + quoted(juce::String::fromUTF8(currentStems.name.c_str()));
         }
         else if (change.kind == ma::SolverChange::Kind::tonalBoost || change.kind == ma::SolverChange::Kind::tonalCut)
         {
@@ -1086,7 +1531,10 @@ void BrainProcessor::proposeWholeMix()
     // sound with the planned cleanup, so the solver does not cut what the high-pass removes.
     const auto saved = mix;
     for (size_t c = 0; c < mix.channels.size(); ++c)
+    {
         applyCleanup(mix.channels[c], plans[c].cleanup);
+        mix.channels[c].data.cleanup = plans[c].cleanup; // the stem references see it too
+    }
     std::vector<ma::MaskingChannel> masking(mix.channels.size());
     for (size_t c = 0; c < mix.channels.size(); ++c)
     {
@@ -1187,6 +1635,58 @@ void BrainProcessor::proposeWholeMix()
             parts.add(stereoFixText(fix));
         item.text = quoted(channel.name) + ": " + (parts.isEmpty() ? pl("mid-side EQ wyłączony, faza jest w porządku") : parts.joinIntoString("; "));
         chainItems.push_back(item);
+    }
+
+    // Phase 9: each stem group's level against the references, with the planned cleanup.
+    if (stemsReady())
+    {
+        // With the EQ just proposed: its cuts and boosts move the groups' levels too.
+        std::vector<ma::EqSettings> proposedEq;
+        for (const auto& channel : mix.channels)
+        {
+            const auto found = std::find_if(currentProposal.eq.begin(), currentProposal.eq.end(),
+                                            [&](const auto& e) { return e.first == channel.owner; });
+            const bool changes = std::any_of(currentProposal.items.begin(), currentProposal.items.end(), [&](const auto& item) {
+                return item.owner == channel.owner && item.action == Proposal::Item::Action::solver;
+            });
+            ma::EqSettings eq {};
+            if (changes && found != currentProposal.eq.end())
+                eq = found->second;
+            else if (channel.data.eqBypass == 0)
+                for (int b = 0; b < ma::kEqBands; ++b)
+                    eq[static_cast<size_t>(b)] = channel.data.eq[b]; // apply keeps what is there
+            proposedEq.push_back(eq);
+        }
+        std::array<bool, ma::kStemGroups> present {};
+        const auto groups = stemGroupDb(true, present, nullptr, &proposedEq);
+        const auto levels = ma::planStemLevels(groups, present, currentStems);
+        const auto setName = quoted(juce::String::fromUTF8(currentStems.name.c_str()));
+        for (int g = 0; g < ma::kStemGroups && levels.any; ++g)
+        {
+            const double gain = levels.gainDb[static_cast<size_t>(g)];
+            if (std::abs(gain) < 0.05)
+                continue;
+            juce::StringArray names;
+            for (const auto& channel : mix.channels)
+                if (groupOfChannel(channel) == g && drop.count(channel.owner) > 0)
+                    names.add(quoted(channel.name));
+            if (names.isEmpty())
+                continue;
+            const auto& corridor = currentStems.level[static_cast<size_t>(g)];
+            Proposal::Item item;
+            item.action = Proposal::Item::Action::level;
+            item.group = g;
+            item.gainDb = gain;
+            item.text = pl("Grupa ") + stemGroupName(g) + " (" + joinNames(names) + "): " + (gain > 0.0 ? "+" : "")
+                        + juce::String(gain, 1) + pl(" dB. W dropie siedzi ") + juce::String(levels.before[static_cast<size_t>(g)], 1)
+                        + pl(" dB względem całości, w referencjach ") + setName + " "
+                        + (corridor.valid ? juce::String(corridor.low, 1) + pl(" do ") + juce::String(corridor.high, 1) + " dB"
+                                          : juce::String());
+            if (!corridor.valid || std::abs(levels.before[static_cast<size_t>(g)] - std::clamp(levels.before[static_cast<size_t>(g)], corridor.low, corridor.high)) < 0.05)
+                item.text = pl("Grupa ") + stemGroupName(g) + " (" + joinNames(names) + "): " + (gain > 0.0 ? "+" : "")
+                            + juce::String(gain, 1) + pl(" dB, żeby cały miks został tak samo głośny po zmianie innych grup");
+            chainItems.insert(chainItems.begin(), item);
+        }
     }
     mix = saved;
 
@@ -1951,6 +2451,144 @@ void BrainProcessor::cancelCapture()
     requestReset();
 }
 
+juce::StringArray BrainProcessor::stemTargetNames() const
+{
+    juce::StringArray names;
+    for (const auto& file : targetFolder().findChildFiles(juce::File::findFiles, false, "*.mastems"))
+    {
+        ma::StemTarget t;
+        if (ma::parseStemTarget(file.loadFileAsString().toStdString(), t))
+            names.add(juce::String::fromUTF8(t.name.c_str()));
+    }
+    names.sortNatural();
+    return names;
+}
+
+bool BrainProcessor::selectStemTarget(const juce::String& name)
+{
+    for (const auto& file : targetFolder().findChildFiles(juce::File::findFiles, false, "*.mastems"))
+    {
+        ma::StemTarget t;
+        if (ma::parseStemTarget(file.loadFileAsString().toStdString(), t) && juce::String::fromUTF8(t.name.c_str()) == name)
+        {
+            currentStems = t;
+            parameters.state.setProperty("stems", name, nullptr);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool BrainProcessor::createStemTarget(const juce::String& name)
+{
+    const auto trimmed = name.trim();
+    if (trimmed.isEmpty() || stemTargetNames().contains(trimmed))
+        return false;
+    currentStems = {};
+    currentStems.name = trimmed.toStdString();
+    parameters.state.setProperty("stems", trimmed, nullptr);
+    saveStemTarget();
+    return true;
+}
+
+void BrainProcessor::saveStemTarget()
+{
+    if (currentStems.name.empty())
+        return;
+    const auto folder = targetFolder();
+    folder.createDirectory();
+    const auto fileName = juce::File::createLegalFileName(juce::String::fromUTF8(currentStems.name.c_str())) + ".mastems";
+    folder.getChildFile(fileName).replaceWithText(ma::serialiseStemTarget(currentStems), false, false, "\n");
+}
+
+void BrainProcessor::removeLastStemProfile()
+{
+    if (currentStems.profiles.empty())
+        return;
+    currentStems.profiles.pop_back();
+    currentStems.rebuild();
+    saveStemTarget();
+    stemNote = {};
+}
+
+bool BrainProcessor::loadStems(const juce::Array<juce::File>& files)
+{
+    if (stemJob != nullptr || currentStems.name.empty() || files.isEmpty())
+        return false;
+    stemJob = std::make_unique<StemJob>();
+    stemNote = pl("Analizuję stemy...");
+    stemWarning = false;
+    auto* job = stemJob.get();
+    const auto title = commonTitle(files);
+    job->worker = std::thread([job, files, title] { job->run(files, title); });
+    return true;
+}
+
+double BrainProcessor::stemProgress() const
+{
+    return stemJob != nullptr ? stemJob->progress.load() : 0.0;
+}
+
+void BrainProcessor::finishStemJob()
+{
+    std::unique_ptr<StemJob> job = std::move(stemJob);
+    if (job->worker.joinable())
+        job->worker.join();
+    if (job->error.isNotEmpty())
+    {
+        stemNote = job->error;
+        stemWarning = true;
+        return;
+    }
+    const auto& profile = job->profile;
+    const auto title = quoted(juce::String::fromUTF8(profile.name.c_str()));
+    if (!profile.measure.valid || profile.dropSeconds < kMinimumDropSeconds)
+    {
+        stemNote = pl("W ") + title + pl(" nie znalazłem głośnej części (drop) dłuższej niż ")
+                   + juce::String(juce::roundToInt(kMinimumDropSeconds)) + pl(" s. Nie dodaję.");
+        stemWarning = true;
+        return;
+    }
+    // Stems that do not add up to the track would teach the wrong proportions.
+    if (profile.separationErrorDb > 3.0)
+    {
+        stemNote = pl("Stemy ") + title + pl(" nie składają się na cały utwór (średnio ") + juce::String(profile.separationErrorDb, 1)
+                   + pl(" dB różnicy): brakuje któregoś albo są z innej wersji. Nie dodaję.");
+        stemWarning = true;
+        return;
+    }
+
+    currentStems.profiles.push_back(profile);
+    currentStems.rebuild();
+    saveStemTarget();
+
+    juce::StringArray groups, missing;
+    for (int g = 0; g < ma::kStemGroups; ++g)
+        (profile.measure.groups[static_cast<size_t>(g)].present ? groups : missing).add(stemGroupName(g).toLowerCase());
+    stemNote = pl("Dodano ") + title + pl(": drop ") + juce::String(juce::roundToInt(profile.dropSeconds)) + " s, "
+               + groups.joinIntoString(", ") + (missing.isEmpty() ? juce::String() : pl(" (bez: ") + missing.joinIntoString(", ") + ")") + ". ";
+    stemWarning = false;
+    if (profile.separationErrorDb < 0.0)
+    {
+        stemNote += pl("Bez pliku całego utworu („mix”) nie sprawdzę separacji.");
+    }
+    else if (profile.separationErrorDb > 1.0)
+    {
+        stemNote += pl("Uwaga: stemy różnią się od utworu średnio o ") + juce::String(profile.separationErrorDb, 1)
+                    + pl(" dB, separacja jest słaba. Lepiej użyć innego separatora albo innej referencji.");
+        stemWarning = true;
+    }
+    else
+    {
+        stemNote += pl("Separacja sprawdzona (") + juce::String(profile.separationErrorDb, 1) + pl(" dB różnicy od utworu).");
+    }
+    if (job->warning.isNotEmpty())
+    {
+        stemNote += " " + job->warning;
+        stemWarning = true;
+    }
+}
+
 void BrainProcessor::sendCommand(std::uint64_t owner, const ma::bus::Command& command)
 {
     auto* region = session->region();
@@ -1973,9 +2611,19 @@ int BrainProcessor::applySelected()
         if (item.selected && item.action == Proposal::Item::Action::solver && item.change.kind == ma::SolverChange::Kind::globalGain)
             globalGain += item.change.gainDb;
 
+    // Phase 9: a stem group's level moves every channel of the group, its thresholds with it.
+    std::array<double, ma::kStemGroups> groupGain {};
+    for (const auto& item : currentProposal.items)
+        if (item.selected && item.action == Proposal::Item::Action::level && item.group >= 0 && item.group < ma::kStemGroups)
+            groupGain[static_cast<size_t>(item.group)] += item.gainDb;
+
     int sent = 0;
     for (const auto& channel : mix.channels)
     {
+        const int group = groupOfChannel(channel);
+        const double gain = globalGain + (group >= 0 ? groupGain[static_cast<size_t>(group)] : 0.0);
+        // A duck listens to the kick: its threshold follows the drums.
+        const double kickGain = globalGain + groupGain[static_cast<size_t>(ma::StemGroup::drums)];
         const auto proposed = std::find_if(currentProposal.eq.begin(), currentProposal.eq.end(),
                                            [&](const auto& e) { return e.first == channel.owner; });
 
@@ -1987,7 +2635,9 @@ int BrainProcessor::applySelected()
             const bool eqKind = item.action == Proposal::Item::Action::solver
                                 && (item.change.kind == ma::SolverChange::Kind::eqCut
                                 || item.change.kind == ma::SolverChange::Kind::tonalBoost
-                                || item.change.kind == ma::SolverChange::Kind::tonalCut);
+                                || item.change.kind == ma::SolverChange::Kind::tonalCut
+                                || item.change.kind == ma::SolverChange::Kind::stemBoost
+                                || item.change.kind == ma::SolverChange::Kind::stemCut);
             if (!item.selected || !eqKind || item.owner != channel.owner)
                 continue;
             if (proposed != currentProposal.eq.end())
@@ -1995,6 +2645,8 @@ int BrainProcessor::applySelected()
             eqChanges = true;
         }
         auto duck = channel.data.duck;
+        if (duck.on > 0.5f)
+            duck.thresholdDb = static_cast<float>(juce::jlimit(-60.0, 0.0, duck.thresholdDb + kickGain - globalGain));
         auto duckSync = channel.data.duckSync;
         auto polarity = channel.data.polarityInverted;
         auto harmonics = channel.data.harmonics;
@@ -2013,7 +2665,7 @@ int BrainProcessor::applySelected()
             {
                 duck = item.duck;
                 // The threshold follows the kick's level, which the global gain moves too.
-                duck.thresholdDb = static_cast<float>(juce::jlimit(-60.0, 0.0, duck.thresholdDb + globalGain));
+                duck.thresholdDb = static_cast<float>(juce::jlimit(-60.0, 0.0, duck.thresholdDb + kickGain));
                 duckSync = item.duckSync;
                 dynamicChanges = true;
             }
@@ -2047,7 +2699,7 @@ int BrainProcessor::applySelected()
             }
         }
 
-        if (!eqChanges && !dynamicChanges && std::abs(globalGain) < 0.05)
+        if (!eqChanges && !dynamicChanges && std::abs(gain) < 0.05 && std::abs(kickGain - globalGain) < 0.05)
             continue;
         if (!eqChanges)
             for (int b = 0; b < ma::kEqBands; ++b)
@@ -2057,7 +2709,7 @@ int BrainProcessor::applySelected()
         command.target = channel.owner;
         command.serial = ++commandSerial;
         command.kind = ma::bus::CommandKind::apply;
-        command.trimDb = static_cast<float>(juce::jlimit(-24.0, 24.0, channel.data.trimDb + globalGain));
+        command.trimDb = static_cast<float>(juce::jlimit(-24.0, 24.0, channel.data.trimDb + gain));
         for (int b = 0; b < ma::kEqBands; ++b)
             command.eq[b] = eq[static_cast<size_t>(b)];
         command.duck = duck;
@@ -2065,9 +2717,9 @@ int BrainProcessor::applySelected()
         command.polarityInverted = polarity;
         command.harmonics = harmonics;
         command.transients = transients;
-        // The trim moves with the global gain, and the compressor and clipper levels with it.
-        compressor.thresholdDb = static_cast<float>(juce::jlimit(-60.0, 0.0, compressor.thresholdDb + globalGain));
-        clipper.ceilingDb = static_cast<float>(juce::jlimit(-30.0, 0.0, clipper.ceilingDb + globalGain));
+        // The trim moves with the gain, and the compressor and clipper levels with it.
+        compressor.thresholdDb = static_cast<float>(juce::jlimit(-60.0, 0.0, compressor.thresholdDb + gain));
+        clipper.ceilingDb = static_cast<float>(juce::jlimit(-30.0, 0.0, clipper.ceilingDb + gain));
         command.cleanup = cleanup;
         command.compressor = compressor;
         command.clipper = clipper;
@@ -2159,6 +2811,9 @@ void BrainProcessor::setStateInformation(const void* data, int sizeInBytes)
             const auto name = parameters.state.getProperty("target").toString();
             if (name.isNotEmpty())
                 selectTarget(name);
+            const auto stems = parameters.state.getProperty("stems").toString();
+            if (stems.isNotEmpty())
+                selectStemTarget(stems);
         }
 }
 

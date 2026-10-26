@@ -83,6 +83,199 @@ double perceivedDb(const MaskingChannel& channel, int band)
     const double hz = SpectrumAnalyzer::bandCentreHz(BandScale::erb, band);
     return channel.rawDb[static_cast<size_t>(band)] - equalLoudnessWeightDb(hz);
 }
+
+// Does a boost on channel c make it cover a more important channel it did not cover before?
+bool createsCollision(const std::vector<SolverChannel>& channels, const std::vector<EqSettings>& eq, const MaskingResult& before,
+                      int c, double minimum)
+{
+    const auto after = analyseMasking(withEq(channels, eq), minimum);
+    for (size_t k = 0; k < channels.size(); ++k)
+    {
+        if (static_cast<int>(k) == c || channels[k].priority > channels[static_cast<size_t>(c)].priority)
+            continue;
+        const double was = before.amount[static_cast<size_t>(c)][k];
+        const double now = after.amount[static_cast<size_t>(c)][k];
+        if (now >= minimum && now - was > 0.05)
+            return true;
+    }
+    return false;
+}
+
+void solveStemShape(const std::vector<SolverChannel>& channels, const SolverOptions& options, SolverResult& result)
+{
+    constexpr int kMaxFixes = 6;
+    constexpr double kMinimumDeviationDb = 1.5;
+    const auto& in = *options.stems;
+    const int numBands = SpectrumAnalyzer::numBandsFor(BandScale::erb);
+    auto groupOf = [&](size_t c) { return c < in.groupOf.size() && c < in.dropDb.size() && channels[c].valid ? in.groupOf[c] : -1; };
+    auto heard = [&](size_t c, int b) {
+        return in.dropDb[c][static_cast<size_t>(b)] + eqResponseDb(result.eq[c], SpectrumAnalyzer::bandCentreHz(BandScale::erb, b));
+    };
+
+    // The groups as the drop sounds with the EQ so far.
+    auto measureNow = [&]() {
+        std::array<SpectrumAnalyzer::Bands, kStemGroups> power {}, side {};
+        std::array<bool, kStemGroups> present {};
+        for (size_t c = 0; c < channels.size(); ++c)
+        {
+            const int g = groupOf(c);
+            if (g < 0 || g >= kStemGroups)
+                continue;
+            present[static_cast<size_t>(g)] = true;
+            for (int b = 0; b < numBands; ++b)
+            {
+                const double eqDb = eqResponseDb(result.eq[c], SpectrumAnalyzer::bandCentreHz(BandScale::erb, b));
+                power[static_cast<size_t>(g)][static_cast<size_t>(b)] += std::pow(10.0, (in.dropDb[c][static_cast<size_t>(b)] + eqDb) / 10.0);
+                if (c < in.dropSideDb.size())
+                    side[static_cast<size_t>(g)][static_cast<size_t>(b)] += std::pow(10.0, (in.dropSideDb[c][static_cast<size_t>(b)] + eqDb) / 10.0);
+            }
+        }
+        for (int g = 0; g < kStemGroups; ++g)
+            for (int b = 0; b < numBands; ++b)
+            {
+                auto& p = power[static_cast<size_t>(g)][static_cast<size_t>(b)];
+                auto& s = side[static_cast<size_t>(g)][static_cast<size_t>(b)];
+                p = p > 1e-20 ? 10.0 * std::log10(p) : -200.0;
+                s = s > 1e-20 ? 10.0 * std::log10(s) : -200.0;
+            }
+        return std::make_pair(measureStemGroups(power, side, present), power);
+    };
+
+    struct Candidate
+    {
+        int group = -1, region = -1;
+        double deviationDb = 0.0;
+    };
+    // Largest first, measured again after each fix (a bell reaches into the next region).
+    std::vector<std::pair<int, int>> tried;
+    int fixes = 0;
+    for (int attempts = 0; fixes < kMaxFixes && attempts < 3 * kMaxFixes; ++attempts)
+    {
+        Candidate candidate;
+        const auto measured = measureNow().first;
+        const auto comparison = compareStems(measured, *in.target);
+        for (int g = 0; g < kStemGroups; ++g)
+            for (int r = 0; r < kStemRegions; ++r)
+            {
+                const auto& c = comparison.groups[static_cast<size_t>(g)];
+                const double deviation = c.shapeDeviationDb[static_cast<size_t>(r)];
+                const bool done = std::find(tried.begin(), tried.end(), std::make_pair(g, r)) != tried.end();
+                if (c.compared && c.shapeCompared[static_cast<size_t>(r)] && !done && std::abs(deviation) >= kMinimumDeviationDb
+                    && std::abs(deviation) > std::abs(candidate.deviationDb))
+                    candidate = { g, r, deviation };
+            }
+        if (candidate.group < 0)
+            break;
+        tried.emplace_back(candidate.group, candidate.region);
+        const double lowHz = stemRegionEdgeHz(candidate.region), highHz = stemRegionEdgeHz(candidate.region + 1);
+        const auto groups = measureNow().second;
+
+        // The region's power: of the whole (every group), of this group, of each of its channels.
+        double total = 0.0, group = 0.0;
+        std::vector<double> own(channels.size(), 0.0);
+        for (int b = 0; b < numBands; ++b)
+        {
+            const double hz = SpectrumAnalyzer::bandCentreHz(BandScale::erb, b);
+            if (hz < lowHz || hz >= highHz)
+                continue;
+            for (int g = 0; g < kStemGroups; ++g)
+            {
+                const double p = std::pow(10.0, groups[static_cast<size_t>(g)][static_cast<size_t>(b)] / 10.0);
+                total += p;
+                if (g == candidate.group)
+                    group += p;
+            }
+            for (size_t c = 0; c < channels.size(); ++c)
+                if (groupOf(c) == candidate.group)
+                    own[c] += std::pow(10.0, heard(c, b) / 10.0);
+        }
+        // The group's channel that carries the region, with real content there.
+        int best = -1;
+        for (size_t c = 0; c < channels.size(); ++c)
+        {
+            if (groupOf(c) != candidate.group || own[c] <= 0.0)
+                continue;
+            if (candidate.deviationDb < 0.0 && c < in.lowestBoostHz.size() && std::sqrt(lowHz * highHz) <= in.lowestBoostHz[c])
+                continue;
+            double peak = -200.0;
+            for (int b = 0; b < numBands; ++b)
+                peak = std::max(peak, heard(c, b));
+            double inRegion = -200.0;
+            for (int b = 0; b < numBands; ++b)
+            {
+                const double hz = SpectrumAnalyzer::bandCentreHz(BandScale::erb, b);
+                if (hz >= lowHz && hz < highHz)
+                    inRegion = std::max(inRegion, heard(c, b));
+            }
+            if (inRegion < peak - kContentRangeDb)
+                continue;
+            if (best < 0 || own[c] > own[static_cast<size_t>(best)])
+                best = static_cast<int>(c);
+        }
+        if (best < 0 || group <= 0.0)
+            continue;
+
+        // Gain x on the channel (power C in the region) so the group's own level there moves by
+        // -deviation; the group's average over its regions moves along by 1/n of that.
+        const bool boost = candidate.deviationDb < 0.0;
+        int regions = 0;
+        for (bool v : measured.groups[static_cast<size_t>(candidate.group)].shapeValid)
+            regions += v ? 1 : 0;
+        const double wanted = -candidate.deviationDb / std::max(0.5, 1.0 - 1.0 / std::max(1, regions));
+        const double carrier = own[static_cast<size_t>(best)];
+        const double x = 1.0 + group * (std::pow(10.0, wanted / 10.0) - 1.0) / carrier;
+        double gain = x > 1e-6 ? 10.0 * std::log10(x) : -options.maxStemCutDb;
+        gain = boost ? std::clamp(gain, 1.0, options.maxStemBoostDb) : std::clamp(gain, -options.maxStemCutDb, -1.0);
+        gain = roundHalf(gain);
+
+        auto& eq = result.eq[static_cast<size_t>(best)];
+        const double centre = std::sqrt(lowHz * highHz);
+        const double q = qForRange(lowHz, highHz);
+        int slot = -1;
+        if (boost)
+        {
+            for (int b = 0; b < kEqBands && slot < 0; ++b)
+                if (!isOn(eq[static_cast<size_t>(b)]))
+                    slot = b;
+        }
+        else
+        {
+            slot = findSlot(eq, centre, false);
+        }
+        if (slot < 0)
+            continue;
+
+        const auto before = boost ? analyseMasking(withEq(channels, result.eq), options.minimumScore) : MaskingResult {};
+        const auto saved = eq[static_cast<size_t>(slot)];
+        auto& band = eq[static_cast<size_t>(slot)];
+        if (!boost && isOn(band))
+        {
+            band.gainDb = static_cast<float>(std::min(static_cast<double>(band.gainDb), gain));
+            band.q = std::min(band.q, static_cast<float>(q));
+        }
+        else
+        {
+            band = { static_cast<float>(centre), static_cast<float>(gain), static_cast<float>(q) };
+        }
+        if (boost && createsCollision(channels, result.eq, before, best, options.minimumScore))
+        {
+            eq[static_cast<size_t>(slot)] = saved;
+            continue;
+        }
+
+        SolverChange change;
+        change.kind = boost ? SolverChange::Kind::stemBoost : SolverChange::Kind::stemCut;
+        change.channel = best;
+        change.eqSlot = slot;
+        change.gainDb = band.gainDb;
+        change.group = candidate.group;
+        change.lowHz = lowHz;
+        change.highHz = highHz;
+        change.deviationDb = candidate.deviationDb;
+        result.changes.push_back(change);
+        ++fixes;
+    }
+}
 } // namespace
 
 SolverResult solve(const std::vector<SolverChannel>& channels, const SolverOptions& options)
@@ -207,6 +400,9 @@ SolverResult solve(const std::vector<SolverChannel>& channels, const SolverOptio
         }
     }
     result.changes = std::move(kept);
+
+    if (options.stems != nullptr && options.stems->target != nullptr && options.stems->target->valid())
+        solveStemShape(channels, options, result);
 
     if (options.tonal != nullptr && options.tonal->valid)
     {

@@ -46,6 +46,13 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   carries applied cuts) so a second pass is idempotent. Side cuts on anti-phase bands (channel's own < 0, or the sum < 0 and the
   channel brings >= 30% of the side), +1 dB side lifts only on wide roles where the sum is >= 0.85. `StereoShaper` (side-only bells)
   sits right after cleanup and is part of `Command`.
+  Phase 9 stem references (`ma/StemReference.h`): groups drums / bass / vocals / music (roles map to them, bus and send
+  left out); per group the ear-weighted level vs the sum of the groups, its own shape (level per broad region minus its
+  mean over the regions it plays in, so a dull vocal shows on the vocal) and side share. `StemProfiler` measures a
+  reference's stems over the drop only (short-term loudness within 3 dB of the loudest); the Brain accumulates each
+  channel's raw spectrum over its own drop the same way (`accumulateDrop`, reset with `requestReset`). `planStemLevels`
+  moves group levels (trims, thresholds with them) keeping the overall loudness; the solver's `stems` stage adds broad
+  bells per group from pre-EQ drop spectra. Reference stems load on a worker thread (JUCE readers, MP3 enabled in the Brain).
   `MixSnapshot::Channel::rawDb` is pre-cleanup, `bandsDb` post-cleanup pre-EQ, `heardDb` post-EQ.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.

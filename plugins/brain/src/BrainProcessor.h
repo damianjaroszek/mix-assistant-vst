@@ -3,6 +3,7 @@
 #include "SharedSession.h"
 #include "ma/ChainPlanner.h"
 #include "ma/StereoPlanner.h"
+#include "ma/StemReference.h"
 #include "ma/CorrelationMeter.h"
 #include "ma/LoudnessMeter.h"
 #include "ma/Masking.h"
@@ -16,6 +17,7 @@
 
 #include <array>
 #include <map>
+#include <memory>
 #include <atomic>
 #include <vector>
 
@@ -67,6 +69,11 @@ struct MixSnapshot
     // The sum's mid and side per ERB band, smoothed over a few seconds, and where it is in anti-phase.
     ma::StereoMaster master;
     std::vector<ma::PhaseRange> antiPhase;
+    // Phase 9: the mix's groups (drums, bass, vocals, the rest) against stem references, both
+    // measured over the loudest part only, so they compare drop to drop.
+    ma::StemMeasure stemMeasure;
+    ma::StemComparison stems;
+    double dropSeconds = 0.0; // how much of the loudest part has been heard since the last reset
 };
 
 // The solver's proposal, waiting for the user to pick what to apply.
@@ -90,7 +97,8 @@ struct Proposal
             polarity,
             harmonics,
             transients,
-            chain
+            chain,
+            level // phase 9: a stem group's level, on every channel of the group
         };
         // Phase 7: the engineer pass ("Ustaw cały miks") sets the channel's chain.
         enum class ChainTool
@@ -114,6 +122,8 @@ struct Proposal
         int duckSync = 0;
         ma::HarmonicSettings harmonics {};
         ma::TransientSettings transients {};
+        int group = -1;      // level: which ma::StemGroup
+        double gainDb = 0.0; // level
     };
 
     std::vector<Item> items;
@@ -171,6 +181,7 @@ public:
     {
         resetRequested.store(true);
         mix.master.valid = false; // the stereo picture starts over too
+        dropResetPending = true;  // and so does the drop
     }
     double integratedLufs() const { return integrated.load(); }
     double shortTermLufs() const { return shortTerm.load(); }
@@ -228,6 +239,24 @@ public:
     bool isCapturing() const { return capturing; }
     static constexpr double kMinimumSeconds = 10.0;
 
+    // Phase 9: references from stems. A set (one per style) holds any number of reference
+    // tracks, each loaded as its stems (and, if there is one, the full track for a check of
+    // the separation). Kept as .mastems files next to the tonal targets.
+    juce::StringArray stemTargetNames() const;
+    const ma::StemTarget& stemTarget() const { return currentStems; }
+    bool selectStemTarget(const juce::String& name);
+    bool createStemTarget(const juce::String& name);
+    void removeLastStemProfile();
+    // Analyses one reference track's stems in the background; false when it cannot start
+    // (no set chosen, already busy). The outcome lands in stemMessage().
+    bool loadStems(const juce::Array<juce::File>& files);
+    bool isAnalysingStems() const { return stemJob != nullptr; }
+    double stemProgress() const;
+    const juce::String& stemMessage() const { return stemNote; }
+    bool stemMessageIsWarning() const { return stemWarning; }
+    static juce::String stemGroupName(int group);
+    static constexpr double kMinimumDropSeconds = 8.0;
+
     juce::AudioProcessorValueTreeState parameters;
 
     static constexpr const char* peakCeilingId = "peakCeiling";
@@ -257,11 +286,24 @@ private:
     static void applyCleanup(MixSnapshot::Channel& channel, const ma::CleanupSettings& cleanup);
     Proposal::Verdict judge(size_t channel, const ma::ChainPlan& plan, const ma::StereoPlan& stereoPlan) const;
     void adaptStep(std::uint64_t now);
-    ma::SolverResult solveNow(double headroomGainDb) const;
+    ma::SolverResult solveNow(double headroomGainDb, const ma::StemShapeInput* stems = nullptr) const;
     juce::String kickName() const;
     juce::String stereoCulprit(double lowHz, double highHz) const; // phase 8 report // the channel most likely feeding the sidechains
     static juce::File targetFolder();
     void saveTarget();
+    void saveStemTarget();
+    void accumulateDrop();
+    void finishStemJob();
+    // Per stem group, what the drop sounds like through each channel's cleanup (and EQ when
+    // `withEq`); `eqs` (per channel) replaces the Agents' EQ, e.g. with a proposal's.
+    std::array<ma::SpectrumAnalyzer::Bands, ma::kStemGroups> stemGroupDb(bool withEq, std::array<bool, ma::kStemGroups>& present,
+                                                                         std::array<ma::SpectrumAnalyzer::Bands, ma::kStemGroups>* side,
+                                                                         const std::vector<ma::EqSettings>* eqs) const;
+    // A group short in a region its channels' cleanup or the Brain's cuts take out on purpose
+    // (more than 3 dB of it): the report does not ask for it back.
+    bool cutOnPurpose(int group, int region) const;
+    bool stemsReady() const;
+    ma::StemShapeInput stemShapeInput() const; // per channel of mix.channels
 
     std::atomic<float>* peakCeiling = nullptr;
     std::atomic<float>* adaptive = nullptr;
@@ -314,6 +356,23 @@ private:
         std::array<int, ma::kEqBands> release {}, enter {};
     };
     std::map<std::uint64_t, AdaptVotes> adaptVotes;
+
+    // Phase 9: each channel over the loudest part heard since the last reset (raw, after the
+    // trim, as power sums over the drop's updates; a channel silent in one counts as zero).
+    struct DropSum
+    {
+        ma::SpectrumAnalyzer::Bands power {}, side {};
+    };
+    std::map<std::uint64_t, DropSum> drop;
+    long dropUpdates = 0;
+    double dropLevel = -INFINITY; // short-term loudness of the loudest part so far
+    bool dropResetPending = false;
+    int dropHoldUpdates = 0;
+    ma::StemTarget currentStems;
+    struct StemJob;
+    std::unique_ptr<StemJob> stemJob;
+    juce::String stemNote;
+    bool stemWarning = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(BrainProcessor)
 };

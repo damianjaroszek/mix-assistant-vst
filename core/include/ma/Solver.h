@@ -2,6 +2,7 @@
 
 #include "ChannelEq.h"
 #include "Masking.h"
+#include "StemReference.h"
 #include "TonalBalance.h"
 
 #include <vector>
@@ -37,6 +38,11 @@ struct SolverOptions
     double headroomGainDb = 0.0;  // <= 0: gain for every channel to get back under the ceiling
     double maxBoostDb = 4.0;      // highest boost for filling a tonal hole
     const TonalComparison* tonal = nullptr; // the measured mix against a target, if there is one
+    // Phase 9: each group's shape (drums, bass, vocals, the rest) against stem references,
+    // measured over the drop. Broad bells on the group's channel that carries the region.
+    const StemShapeInput* stems = nullptr;
+    double maxStemBoostDb = 3.0;
+    double maxStemCutDb = 4.0;
 };
 
 struct SolverChange
@@ -47,7 +53,9 @@ struct SolverChange
         globalGain,  // restores headroom
         tonalBoost,  // fills a hole using content the channel already has
         tonalCut,    // takes out an excess
-        tonalAdvice  // a hole nothing in the mix can fill: needs saturation or a new sound
+        tonalAdvice, // a hole nothing in the mix can fill: needs saturation or a new sound
+        stemBoost,   // a group has less in a region than in the references
+        stemCut      // ... or more
     };
 
     Kind kind = Kind::eqCut;
@@ -58,7 +66,8 @@ struct SolverChange
     double deviationDb = 0.0; // tonal*: how far the region sits outside the corridor
     double lowHz = 0.0, highHz = 0.0;
     double scoreBefore = 0.0, scoreAfter = 0.0;
-    double gainDb = 0.0;    // globalGain, tonalBoost, tonalCut
+    double gainDb = 0.0;    // globalGain, tonalBoost, tonalCut, stem*
+    int group = -1;         // stem*: which StemGroup
 };
 
 struct SolverResult
