@@ -2,6 +2,8 @@
 
 #include "ChannelEq.h"
 #include "Ducker.h"
+#include "Harmonics.h"
+#include "Transient.h"
 
 #include <atomic>
 #include <cstdint>
@@ -21,7 +23,7 @@ namespace ma::bus
 {
 
 constexpr std::uint32_t kMagic = 0x4D414255; // "MABU"
-constexpr std::uint32_t kVersion = 3;
+constexpr std::uint32_t kVersion = 5;
 constexpr int kMaxSlots = 128;
 constexpr int kNameLength = 48;
 constexpr int kBands = 40;            // ERB bands, as SpectrumAnalyzer with BandScale::erb
@@ -62,6 +64,9 @@ struct AgentData
     float duckReductionDb;      // most the duck took off, about the last second
     float sidechainLowCorrelation; // low band (< 120 Hz) correlation of this channel with the sidechain
     std::int32_t correlationValid;
+    HarmonicSettings harmonics;  // overtones for small speakers
+    TransientSettings transients; // attack emphasis
+    float outputDb[kBands];      // ERB band levels after the whole chain (what the mix gets), live only
 };
 
 // Note lengths for a tempo-synced duck release, indexed by AgentData::duckSync.
@@ -89,6 +94,8 @@ struct Command
     DuckSettings duck;
     std::int32_t duckSync;
     std::int32_t polarityInverted;
+    HarmonicSettings harmonics;
+    TransientSettings transients;
 };
 
 struct Slot

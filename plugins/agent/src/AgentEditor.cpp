@@ -144,6 +144,38 @@ AgentEditor::AgentEditor(AgentProcessor& p)
         addAndMakeVisible(slider);
     }
 
+    styleLabel(harmonicsLabel, pl("Harmoniczne"), colours::quiet);
+    harmonicsLabel.setTooltip(pl("Dodaje alikwoty treści poniżej podziału, żeby była słyszalna na telefonie i laptopie."));
+    styleLabel(harmonicsFreqLabel, pl("Poniżej"), colours::quiet, 13.0f);
+    styleLabel(harmonicsAmountLabel, pl("Ilość"), colours::quiet, 13.0f);
+    for (auto* label : { &harmonicsLabel, &harmonicsFreqLabel, &harmonicsAmountLabel })
+        addAndMakeVisible(label);
+    harmonicsOnButton.setButtonText(pl("Włącz"));
+    harmonicsOnButton.setColour(juce::ToggleButton::textColourId, colours::quiet);
+    addAndMakeVisible(harmonicsOnButton);
+    for (auto* slider : { &harmonicsFreqSlider, &harmonicsAmountSlider })
+    {
+        styleSlider(*slider);
+        slider->setTextBoxStyle(juce::Slider::TextBoxRight, false, 70, 20);
+        addAndMakeVisible(slider);
+    }
+
+    styleLabel(attackLabel, pl("Atak"), colours::quiet);
+    attackLabel.setTooltip(pl("Podkreśla tylko początek dźwięku (klik stopy, trzask werbla) w paśmie, które słychać na małych głośnikach."));
+    styleLabel(attackFreqLabel, pl("Powyżej"), colours::quiet, 13.0f);
+    styleLabel(attackAmountLabel, pl("Ilość"), colours::quiet, 13.0f);
+    for (auto* label : { &attackLabel, &attackFreqLabel, &attackAmountLabel })
+        addAndMakeVisible(label);
+    attackOnButton.setButtonText(pl("Włącz"));
+    attackOnButton.setColour(juce::ToggleButton::textColourId, colours::quiet);
+    addAndMakeVisible(attackOnButton);
+    for (auto* slider : { &attackFreqSlider, &attackAmountSlider })
+    {
+        styleSlider(*slider);
+        slider->setTextBoxStyle(juce::Slider::TextBoxRight, false, 70, 20);
+        addAndMakeVisible(slider);
+    }
+
     auto& state = processor.parameters;
     roleAttachment = std::make_unique<ComboAttachment>(state, AgentProcessor::roleId, roleBox);
     measureAttachment = std::make_unique<ComboAttachment>(state, AgentProcessor::measureId, measureBox);
@@ -162,10 +194,17 @@ AgentEditor::AgentEditor(AgentProcessor& p)
     duckThresholdAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::duckThresholdId, duckThresholdSlider);
     duckAttackAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::duckAttackId, duckAttackSlider);
     duckReleaseAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::duckReleaseId, duckReleaseSlider);
+    harmonicsOnAttachment
+        = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(state, AgentProcessor::harmonicsOnId, harmonicsOnButton);
+    harmonicsFreqAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::harmonicsFreqId, harmonicsFreqSlider);
+    harmonicsAmountAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::harmonicsAmountId, harmonicsAmountSlider);
+    attackOnAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(state, AgentProcessor::attackOnId, attackOnButton);
+    attackFreqAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::attackFreqId, attackFreqSlider);
+    attackAmountAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::attackAmountId, attackAmountSlider);
 
     shownResultSerial = processor.lastResult().serial;
     processor.setSpectrumVisible(true);
-    setSize(520, 900);
+    setSize(520, 960);
     startTimerHz(30);
 }
 
@@ -375,7 +414,7 @@ void AgentEditor::resized()
     area.removeFromTop(8);
     learnButton.setBounds(area.removeFromTop(32).removeFromLeft(200));
     area.removeFromTop(6);
-    status.setBounds(area.removeFromTop(52));
+    status.setBounds(area.removeFromTop(44));
 
     area.removeFromTop(6);
     row = area.removeFromTop(22);
@@ -384,7 +423,7 @@ void AgentEditor::resized()
     eqBypassButton.setBounds(row.removeFromRight(80));
     eqLabel.setBounds(row);
     area.removeFromTop(4);
-    auto eqRow = area.removeFromTop(90);
+    auto eqRow = area.removeFromTop(80);
     eqStatus.setBounds(eqRow.removeFromRight(170).withTrimmedLeft(10));
     eqCurve.setBounds(eqRow);
 
@@ -415,7 +454,29 @@ void AgentEditor::resized()
     row.removeFromRight(8);
     halfRow(row, duckReleaseLabel, duckReleaseSlider);
     area.removeFromTop(4);
-    duckStatus.setBounds(area.removeFromTop(62));
+    duckStatus.setBounds(area.removeFromTop(40));
+
+    area.removeFromTop(4);
+    row = area.removeFromTop(24);
+    {
+        auto left = row.removeFromLeft(row.getWidth() / 2);
+        harmonicsLabel.setBounds(left.removeFromLeft(110));
+        harmonicsOnButton.setBounds(left.removeFromLeft(72));
+        attackLabel.setBounds(row.removeFromLeft(110));
+        attackOnButton.setBounds(row.removeFromLeft(72));
+    }
+    area.removeFromTop(2);
+    for (auto group : { std::array<juce::Component*, 4> { &harmonicsFreqLabel, &harmonicsFreqSlider, &harmonicsAmountLabel, &harmonicsAmountSlider },
+                        std::array<juce::Component*, 4> { &attackFreqLabel, &attackFreqSlider, &attackAmountLabel, &attackAmountSlider } })
+    {
+        row = area.removeFromTop(24);
+        auto left = row.removeFromLeft(row.getWidth() / 2).withTrimmedRight(8);
+        group[0]->setBounds(left.removeFromLeft(70));
+        group[1]->setBounds(left);
+        group[2]->setBounds(row.removeFromLeft(70));
+        group[3]->setBounds(row);
+        area.removeFromTop(2);
+    }
 
     area.removeFromTop(8);
     row = area.removeFromTop(22);

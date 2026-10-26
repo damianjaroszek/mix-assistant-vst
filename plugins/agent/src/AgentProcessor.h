@@ -5,6 +5,8 @@
 #include "ma/ChannelEq.h"
 #include "ma/CorrelationMeter.h"
 #include "ma/Ducker.h"
+#include "ma/Harmonics.h"
+#include "ma/Transient.h"
 #include "ma/LoudnessMeter.h"
 #include "ma/SpectrumAnalyzer.h"
 
@@ -121,6 +123,13 @@ public:
     static constexpr const char* duckReleaseId = "duckRelease";
     static constexpr const char* duckSyncId = "duckSync";
     static constexpr const char* polarityId = "polarity";
+    // Overtones for small speakers (phase 5).
+    static constexpr const char* harmonicsOnId = "harmonicsOn";
+    static constexpr const char* harmonicsFreqId = "harmonicsFreq";
+    static constexpr const char* harmonicsAmountId = "harmonicsAmount";
+    static constexpr const char* attackOnId = "attackOn";
+    static constexpr const char* attackFreqId = "attackFreq";
+    static constexpr const char* attackAmountId = "attackAmount";
     static juce::StringArray duckModeNames();
     static juce::StringArray duckSyncNames();
 
@@ -129,6 +138,8 @@ public:
         ma::DuckSettings duck {};
         int sync = 0;
         bool polarityInverted = false;
+        ma::HarmonicSettings harmonics {};
+        ma::TransientSettings transients {};
     };
     DynamicState currentDynamics() const;
     bool sidechainConnected() const { return sidechainSeen; }
@@ -161,6 +172,10 @@ private:
     std::array<std::array<std::atomic<float>*, 3>, ma::kEqBands> eqParams {}; // freq, gain, q
 
     ma::Ducker ducker;
+    ma::HarmonicEnhancer harmonics;
+    ma::TransientEnhancer transients;
+    ma::SpectrumAnalyzer outputSpectrum;
+    std::array<std::atomic<double>, kBands> outputBands; // raw dBFS after the whole chain
     ma::CorrelationMeter sidechainCorrelation; // this channel (L) against the sidechain (R)
     std::vector<float> mainMono, sideMono;     // sized in prepareToPlay
     std::atomic<double> hostBpm { 0.0 };
@@ -218,7 +233,7 @@ private:
     std::atomic<bool> useBackup { false };
     std::atomic<float> backupTrimAudio { 0.0f };
     std::array<std::array<std::atomic<float>, 3>, ma::kEqBands> backupEqAudio {};
-    static constexpr int kDynamicValues = 10; // DuckSettings (8), sync, polarity
+    static constexpr int kDynamicValues = 16; // DuckSettings (8), sync, polarity, HarmonicSettings (3), TransientSettings (3)
     std::array<std::atomic<float>, kDynamicValues> backupDynamicsAudio {};
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(AgentProcessor)

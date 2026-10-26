@@ -262,7 +262,11 @@ SolverResult solve(const std::vector<SolverChannel>& channels, const SolverOptio
                 for (int c : order)
                 {
                     auto& eq = result.eq[static_cast<size_t>(c)];
-                    const int slot = findSlot(eq, centre, true);
+                    // A free band only: reusing a nearby boost would move it off the region it was set for.
+                    int slot = -1;
+                    for (int b = 0; b < kEqBands && slot < 0; ++b)
+                        if (!isOn(eq[static_cast<size_t>(b)]))
+                            slot = b;
                     if (slot < 0)
                         continue;
                     const double share = power[static_cast<size_t>(c)] / total;

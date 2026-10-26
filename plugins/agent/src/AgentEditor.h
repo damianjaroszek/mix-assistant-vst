@@ -51,6 +51,15 @@ private:
     juce::Slider duckFreqSlider, duckDepthSlider, duckThresholdSlider, duckAttackSlider, duckReleaseSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> duckOnAttachment, polarityAttachment;
 
+    juce::Label harmonicsLabel, harmonicsFreqLabel, harmonicsAmountLabel;
+    juce::ToggleButton harmonicsOnButton;
+    juce::Slider harmonicsFreqSlider, harmonicsAmountSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> harmonicsOnAttachment;
+    juce::Label attackLabel, attackFreqLabel, attackAmountLabel;
+    juce::ToggleButton attackOnButton;
+    juce::Slider attackFreqSlider, attackAmountSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> attackOnAttachment;
+
     juce::Label spectrumLabel;
     juce::ToggleButton showProfileButton;
     ma::ui::SpectrumView spectrumView { -84.0 };
@@ -60,7 +69,8 @@ private:
     std::unique_ptr<SliderAttachment> priorityAttachment, targetAttachment, trimAttachment, ceilingAttachment, learnTimeAttachment;
     std::unique_ptr<ComboAttachment> roleAttachment, measureAttachment, duckModeAttachment, duckSyncAttachment;
     std::unique_ptr<SliderAttachment> duckFreqAttachment, duckDepthAttachment, duckThresholdAttachment, duckAttackAttachment,
-        duckReleaseAttachment;
+        duckReleaseAttachment, harmonicsFreqAttachment, harmonicsAmountAttachment,
+        attackFreqAttachment, attackAmountAttachment;
     void updateDuckStatus();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AgentEditor)

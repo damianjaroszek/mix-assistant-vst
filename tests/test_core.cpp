@@ -6,6 +6,9 @@
 #include "ma/TonalBalance.h"
 #include "ma/Decibels.h"
 #include "ma/Ducker.h"
+#include "ma/Harmonics.h"
+#include "ma/Translation.h"
+#include "ma/Transient.h"
 #include "ma/EqualLoudness.h"
 #include "ma/GainStaging.h"
 #include "ma/LevelStats.h"
@@ -627,6 +630,146 @@ void testDucker()
     checkNear(ma::syncedReleaseMs(125.0, 1.0 / 16.0), 120.0, 0.01, "a sixteenth at 125 BPM is 120 ms");
 }
 
+ma::SpectrumAnalyzer::Bands erbBands(const std::vector<float>& x, double sr)
+{
+    ma::SpectrumAnalyzer analyser;
+    analyser.prepare(sr, ma::BandScale::erb);
+    const float* p[] = { x.data() };
+    analyser.process(p, 1, static_cast<int>(x.size()));
+    return analyser.averageDb();
+}
+
+void testHarmonics()
+{
+    constexpr double sr = 48000.0;
+    auto enhance = [&](const std::vector<float>& input, const ma::HarmonicSettings& s) {
+        std::vector<float> out(input);
+        ma::HarmonicEnhancer h;
+        h.prepare(sr);
+        h.setSettings(s);
+        for (size_t start = 0; start < out.size(); start += 512)
+        {
+            float* ch[] = { out.data() + start };
+            h.process(ch, 1, static_cast<int>(std::min<size_t>(512, out.size() - start)));
+        }
+        return out;
+    };
+    auto addedDb = [&](const std::vector<float>& in, const std::vector<float>& out) {
+        std::vector<float> diff(in.size());
+        for (size_t i = 0; i < in.size(); ++i)
+            diff[i] = out[i] - in[i];
+        return rmsDb(diff, in.size() / 2, in.size());
+    };
+
+    ma::HarmonicSettings s;
+    s.on = 1.0f;
+    s.hz = 100.0f;
+    s.amountDb = -12.0f;
+    const auto loud = sine(sr, 2.0, 1, 50.0, 0.1).channels[0];
+    const auto quiet = sine(sr, 2.0, 1, 50.0, 0.01).channels[0];
+    const double loudSource = rmsDb(loud, loud.size() / 2, loud.size());
+    const auto loudOut = enhance(loud, s);
+    checkNear(addedDb(loud, loudOut) - loudSource, -12.0, 1.5, "harmonics sit at the set amount under their source");
+    checkNear(addedDb(quiet, enhance(quiet, s)) - (loudSource - 20.0), -12.0, 1.5, "harmonic amount does not depend on level");
+
+    const auto mid = sine(sr, 2.0, 1, 1000.0, 0.1).channels[0];
+    check(addedDb(mid, enhance(mid, s)) < loudSource - 40.0, "content above the split adds no harmonics");
+
+    auto off = s;
+    off.on = 0.0f;
+    check(enhance(loud, off) == loud, "harmonics switched off are bypassed");
+
+    // The phone hears almost nothing of a 50 Hz sine; the overtones bring it back.
+    const auto before = erbBands(loud, sr);
+    const auto after = erbBands(loudOut, sr);
+    const double gain = ma::perceivedLevelDb(after, ma::PlaybackSystem::phone) - ma::perceivedLevelDb(before, ma::PlaybackSystem::phone);
+    check(gain > 15.0, "harmonics make a sub bass audible on a phone (+" + std::to_string(static_cast<int>(gain)) + " dB)");
+
+    // The Brain's prediction lands near what the enhancer really adds, as heard on a phone.
+    const auto predicted = ma::predictHarmonics(before, s);
+    checkNear(ma::perceivedLevelDb(predicted, ma::PlaybackSystem::phone), ma::perceivedLevelDb(after, ma::PlaybackSystem::phone), 3.0,
+              "harmonic prediction matches the enhancer on a phone");
+}
+
+void testTranslation()
+{
+    constexpr double sr = 48000.0;
+    check(std::abs(ma::systemResponseDb(ma::PlaybackSystem::fullRange, 50.0)) < 1e-9, "full range is flat");
+    check(ma::systemResponseDb(ma::PlaybackSystem::phone, 50.0) < -40.0, "a phone plays no 50 Hz");
+    checkNear(ma::systemResponseDb(ma::PlaybackSystem::phone, 2000.0), 2.5, 1.5, "a phone plays the mids");
+    check(ma::systemResponseDb(ma::PlaybackSystem::car, 50.0) > 4.0, "a car adds cabin gain in the lows");
+
+    std::vector<ma::TranslationChannel> channels(2);
+    channels[0].rawDb = erbBands(sine(sr, 2.0, 1, 50.0, 0.3).channels[0], sr);
+    channels[1].rawDb = erbBands(sine(sr, 2.0, 1, 2000.0, 0.1).channels[0], sr);
+    channels[0].valid = channels[1].valid = true;
+    const auto result = ma::analyseTranslation(channels);
+    check(result.valid, "translation needs two channels");
+    check(result.shareChangeDb[0][static_cast<size_t>(ma::PlaybackSystem::phone)] < -30.0, "the sub disappears on a phone");
+    check(result.shareChangeDb[1][static_cast<size_t>(ma::PlaybackSystem::phone)] > -1.0, "the mids stay on a phone");
+    check(result.shareChangeDb[0][static_cast<size_t>(ma::PlaybackSystem::car)] > 0.0, "the sub grows in a car");
+
+    ma::SystemSimulator simulator;
+    simulator.prepare(sr);
+    simulator.setSystem(ma::PlaybackSystem::phone);
+    auto sub = sine(sr, 1.0, 2, 50.0, 0.5);
+    float* ch[] = { sub.channels[0].data(), sub.channels[1].data() };
+    simulator.process(ch, 2, sub.numSamples());
+    check(rmsDb(sub.channels[0], 24000, 48000) < -50.0, "listening through the phone removes the sub");
+}
+
+void testTransients()
+{
+    constexpr double sr = 48000.0;
+    // Kick-like hits every 500 ms: 60 Hz body plus a 3 kHz click on the onset.
+    const size_t n = static_cast<size_t>(sr * 2.0);
+    std::vector<float> kick(n), click(n);
+    for (size_t i = 0; i < n; ++i)
+    {
+        const double t = static_cast<double>(i % 24000) / sr;
+        click[i] = static_cast<float>(0.3 * std::exp(-t * 400.0) * std::sin(2.0 * kPi * 3000.0 * t));
+        kick[i] = static_cast<float>(0.7 * std::exp(-t * 12.0) * std::sin(2.0 * kPi * 60.0 * t)) + click[i];
+    }
+    const auto sustained = sine(sr, 2.0, 1, 3000.0, 0.1).channels[0];
+
+    auto run1 = [&](std::vector<float> x, const ma::TransientSettings& s) {
+        ma::TransientEnhancer e;
+        e.prepare(sr);
+        e.setSettings(s);
+        for (size_t start = 0; start < x.size(); start += 512)
+        {
+            float* ch[] = { x.data() + start };
+            e.process(ch, 1, static_cast<int>(std::min<size_t>(512, x.size() - start)));
+        }
+        return x;
+    };
+    ma::TransientSettings s;
+    s.on = 1.0f;
+    s.hz = 1500.0f;
+    s.amountDb = 6.0f;
+
+    const auto out = run1(kick, s);
+    // The click (first 4 ms of the second hit) comes out louder ...
+    std::vector<float> diff(n);
+    for (size_t i = 0; i < n; ++i)
+        diff[i] = out[i] - kick[i];
+    const double clickDb = rmsDb(click, 24000, 24192);
+    const double liftDb = 20.0 * std::log10(std::pow(10.0, rmsDb(diff, 24000, 24192) / 20.0) / std::pow(10.0, clickDb / 20.0) + 1.0);
+    check(liftDb > 3.0, "attack emphasis lifts the click (+" + std::to_string(liftDb).substr(0, 4) + " dB)");
+    // ... while the tail and a steady tone stay as they were.
+    checkNear(rmsDb(out, 30000, 47000) - rmsDb(kick, 30000, 47000), 0.0, 0.3, "attack emphasis leaves the tail alone");
+    const auto steady = run1(sustained, s);
+    checkNear(rmsDb(steady, 48000, 96000) - rmsDb(sustained, 48000, 96000), 0.0, 0.2, "a steady tone is not lifted");
+
+    auto off = s;
+    off.on = 0.0f;
+    check(run1(kick, off) == kick, "attack emphasis switched off is bypassed");
+
+    const auto bands = erbBands(kick, sr);
+    const auto predicted = ma::predictTransients(bands, s, 0.5);
+    check(predicted[2] - bands[2] < 0.1 && predicted[35] - bands[35] > 2.0, "attack prediction lifts only the highs");
+}
+
 void testWavRoundTrip()
 {
     const auto a = sine(44100.0, 0.5, 2, 440.0, 0.25);
@@ -656,6 +799,9 @@ int main()
     testTonalSolver();
     testCorrelation();
     testDucker();
+    testHarmonics();
+    testTranslation();
+    testTransients();
     testWavRoundTrip();
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "OK" : "FAILED", failures, failures == 1 ? "" : "s");

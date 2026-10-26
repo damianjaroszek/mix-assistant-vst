@@ -109,9 +109,11 @@ BrainEditor::BrainEditor(BrainProcessor& p)
         processor.toggleProposalItem(index);
         timerCallback();
     };
-    addAndMakeVisible(proposalView);
+    proposalViewport.setViewedComponent(&proposalView, false);
+    proposalViewport.setScrollBarsShown(true, false);
+    addAndMakeVisible(proposalViewport);
 
-    for (auto* button : { &channelsViewButton, &tonalViewButton })
+    for (auto* button : { &channelsViewButton, &tonalViewButton, &translationViewButton })
     {
         button->setClickingTogglesState(true);
         button->setRadioGroupId(1);
@@ -121,8 +123,21 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     }
     channelsViewButton.setButtonText(pl("Kanały"));
     tonalViewButton.setButtonText(pl("Balans tonalny"));
-    channelsViewButton.onClick = [this] { showTonal(false); };
-    tonalViewButton.onClick = [this] { showTonal(true); };
+    translationViewButton.setButtonText(pl("Translacja"));
+    channelsViewButton.onClick = [this] { showView(View::channels); };
+    tonalViewButton.onClick = [this] { showView(View::tonal); };
+    translationViewButton.onClick = [this] { showView(View::translation); };
+    addChildComponent(translationView);
+
+    styleLabel(previewLabel, pl("Odsłuch"), colours::quiet);
+    previewLabel.setJustificationType(juce::Justification::centredRight);
+    addAndMakeVisible(previewLabel);
+    previewBox.addItemList(BrainProcessor::systemNames(), 1);
+    previewBox.setColour(juce::ComboBox::backgroundColourId, colours::panel);
+    previewBox.setSelectedId(processor.previewSystemIndex() + 1, juce::dontSendNotification);
+    previewBox.setTooltip(pl("Posłuchaj miksu tak, jak zagra na innym systemie. Pomiary dalej widzą prawdziwy miks."));
+    previewBox.onChange = [this] { processor.setPreviewSystem(previewBox.getSelectedId() - 1); };
+    addAndMakeVisible(previewBox);
 
     targetBox.setTextWhenNothingSelected(pl("wybierz cel"));
     targetBox.setColour(juce::ComboBox::backgroundColourId, colours::panel);
@@ -146,7 +161,7 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     addChildComponent(tonalView);
     refreshTargets();
     channelsViewButton.setToggleState(true, juce::dontSendNotification);
-    showTonal(false);
+    showView(View::channels);
 
     table.onSelect = [this](std::uint64_t owner) { select(owner); };
     issues.onSelect = [this](std::uint64_t owner) { select(owner == selected ? 0 : owner); };
@@ -166,10 +181,13 @@ BrainEditor::~BrainEditor()
     processor.setEditorOpen(false);
 }
 
-void BrainEditor::showTonal(bool tonal)
+void BrainEditor::showView(View view)
 {
-    overlay.setVisible(!tonal);
-    profilesButton.setVisible(!tonal);
+    currentView = view;
+    const bool tonal = view == View::tonal;
+    overlay.setVisible(view == View::channels);
+    profilesButton.setVisible(view == View::channels);
+    translationView.setVisible(view == View::translation);
     overlayLabel.setVisible(false);
     for (auto* c : std::initializer_list<juce::Component*> { &tonalView, &targetBox, &newTargetButton, &captureButton, &removeReferenceButton })
         c->setVisible(tonal);
@@ -266,6 +284,11 @@ void BrainEditor::timerCallback()
         tonalStatus = pl("Cel „") + targetName + "\" (" + juce::String(static_cast<int>(target.references.size()))
                       + pl(" ref.), miks z ") + juce::String(juce::roundToInt(processor.secondsAnalysed())) + " s";
     tonalView.setData(target, mix.tonal, tonalStatus);
+    translationView.setData(mix);
+    if (previewBox.getSelectedId() != processor.previewSystemIndex() + 1)
+        previewBox.setSelectedId(processor.previewSystemIndex() + 1, juce::dontSendNotification);
+    previewBox.setColour(juce::ComboBox::backgroundColourId,
+                         processor.previewSystemIndex() != 0 ? colours::warning.darker(0.5f) : colours::panel);
     captureButton.setButtonText(processor.isCapturing() ? pl("Zakończ nagrywanie") : pl("Nagraj referencję"));
     captureButton.setToggleState(processor.isCapturing(), juce::dontSendNotification);
     captureButton.setEnabled(targetName.isNotEmpty());
@@ -286,6 +309,7 @@ void BrainEditor::timerCallback()
 
     const auto& proposal = processor.proposal();
     proposalView.setProposal(proposal);
+    layoutProposal();
     const bool anySelected = std::any_of(proposal.items.begin(), proposal.items.end(), [](const auto& i) { return i.selected; });
     applyButton.setEnabled(anySelected);
     const bool undoable = processor.canUndo();
@@ -325,7 +349,11 @@ void BrainEditor::resized()
     auto header = area.removeFromTop(28);
     resetButton.setBounds(header.removeFromRight(120));
     header.removeFromRight(12);
-    agentsLabel.setBounds(header.removeFromRight(120));
+    agentsLabel.setBounds(header.removeFromRight(90));
+    header.removeFromRight(12);
+    previewBox.setBounds(header.removeFromRight(160));
+    header.removeFromRight(6);
+    previewLabel.setBounds(header.removeFromRight(70));
     title.setBounds(header);
     area.removeFromTop(10);
 
@@ -360,11 +388,14 @@ void BrainEditor::resized()
     channelsViewButton.setBounds(overlayHeader.removeFromLeft(90));
     overlayHeader.removeFromLeft(4);
     tonalViewButton.setBounds(overlayHeader.removeFromLeft(120));
+    overlayHeader.removeFromLeft(4);
+    translationViewButton.setBounds(overlayHeader.removeFromLeft(100));
     profilesButton.setBounds(overlayHeader.removeFromRight(170));
     overlayLabel.setBounds({});
     area.removeFromTop(4);
     auto viewArea = area.removeFromTop(250);
     overlay.setBounds(viewArea);
+    translationView.setBounds(viewArea);
     if (tonalView.isVisible())
     {
         auto controls = viewArea.removeFromTop(26);
@@ -394,5 +425,13 @@ void BrainEditor::resized()
     area.removeFromTop(4);
     proposalStatus.setBounds(area.removeFromTop(20));
     area.removeFromTop(2);
-    proposalView.setBounds(area);
+    proposalViewport.setBounds(area);
+    layoutProposal();
+}
+
+void BrainEditor::layoutProposal()
+{
+    const int width = proposalViewport.getMaximumVisibleWidth();
+    proposalView.setSize(width, 10);
+    proposalView.setSize(width, std::max(proposalViewport.getHeight(), proposalView.contentHeight()));
 }
