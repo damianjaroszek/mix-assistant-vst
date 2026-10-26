@@ -3,6 +3,7 @@
 #include "ChannelEq.h"
 #include "Ducker.h"
 #include "Harmonics.h"
+#include "Saturator.h"
 #include "Transient.h"
 
 #include <atomic>
@@ -23,7 +24,7 @@ namespace ma::bus
 {
 
 constexpr std::uint32_t kMagic = 0x4D414255; // "MABU"
-constexpr std::uint32_t kVersion = 5;
+constexpr std::uint32_t kVersion = 6;
 constexpr int kMaxSlots = 128;
 constexpr int kNameLength = 48;
 constexpr int kBands = 40;            // ERB bands, as SpectrumAnalyzer with BandScale::erb
@@ -67,6 +68,10 @@ struct AgentData
     HarmonicSettings harmonics;  // overtones for small speakers
     TransientSettings transients; // attack emphasis
     float outputDb[kBands];      // ERB band levels after the whole chain (what the mix gets), live only
+    SaturationSettings saturation;
+    std::int32_t intentionalDrive;  // the channel is meant to distort: no clipping warnings
+    std::int32_t detectedRole;      // ma::Role recognised on the last Learn pass (0 = none)
+    float detectedConfidence;
 };
 
 // Note lengths for a tempo-synced duck release, indexed by AgentData::duckSync.
@@ -81,7 +86,8 @@ enum class CommandKind : std::int32_t
 {
     none = 0,
     apply = 1, // remember the current settings, then set trim, EQ, duck and polarity
-    undo = 2   // go back to the remembered settings
+    undo = 2,  // go back to the remembered settings
+    adapt = 3  // adaptive mode: set the EQ only, keep the remembered settings as they are
 };
 
 struct Command
