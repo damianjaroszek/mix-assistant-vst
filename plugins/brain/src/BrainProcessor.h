@@ -2,6 +2,7 @@
 
 #include "SharedSession.h"
 #include "ma/ChainPlanner.h"
+#include "ma/StereoPlanner.h"
 #include "ma/CorrelationMeter.h"
 #include "ma/LoudnessMeter.h"
 #include "ma/Masking.h"
@@ -46,6 +47,9 @@ struct MixSnapshot
         // Measured after the Agent's whole chain (harmonics and duck included), for translation.
         std::array<double, ma::bus::kBands> outputDb {};
         bool outputValid = false;
+        // Mid and side per ERB band after the trim, before the stereo EQ, smoothed (phase 8).
+        std::array<double, ma::bus::kBands> midDb {}, sideDb {};
+        bool stereoValid = false;
     };
 
     struct ReportItem
@@ -60,6 +64,9 @@ struct MixSnapshot
     std::vector<ReportItem> report;
     ma::TonalComparison tonal; // valid once a target is chosen and enough of the mix was heard
     ma::TranslationResult translation; // per channel, as `channels`
+    // The sum's mid and side per ERB band, smoothed over a few seconds, and where it is in anti-phase.
+    ma::StereoMaster master;
+    std::vector<ma::PhaseRange> antiPhase;
 };
 
 // The solver's proposal, waiting for the user to pick what to apply.
@@ -92,13 +99,15 @@ struct Proposal
             cleanup,
             compressor,
             clipper,
-            evener
+            evener,
+            stereo
         };
         ChainTool tool = ChainTool::none; // with Action::solver unused
         ma::CleanupSettings cleanup {};
         ma::CompressorSettings compressor {};
         ma::ClipperSettings clipper {};
         ma::BassEvenerSettings evener {};
+        ma::StereoSettings stereo {};
 
         Action action = Action::solver;
         ma::DuckSettings duck {};
@@ -158,7 +167,11 @@ public:
     void setStateInformation(const void* data, int sizeInBytes) override;
 
     // Message thread API.
-    void requestReset() { resetRequested.store(true); }
+    void requestReset()
+    {
+        resetRequested.store(true);
+        mix.master.valid = false; // the stereo picture starts over too
+    }
     double integratedLufs() const { return integrated.load(); }
     double shortTermLufs() const { return shortTerm.load(); }
     double momentaryLufs() const { return momentary.load(); }
@@ -242,10 +255,11 @@ private:
     void proposeDynamics();
     void proposeHarmonics(); // translation steps and harmonics for tonal holes
     static void applyCleanup(MixSnapshot::Channel& channel, const ma::CleanupSettings& cleanup);
-    Proposal::Verdict judge(size_t channel, const ma::ChainPlan& plan) const;
+    Proposal::Verdict judge(size_t channel, const ma::ChainPlan& plan, const ma::StereoPlan& stereoPlan) const;
     void adaptStep(std::uint64_t now);
     ma::SolverResult solveNow(double headroomGainDb) const;
-    juce::String kickName() const; // the channel most likely feeding the sidechains
+    juce::String kickName() const;
+    juce::String stereoCulprit(double lowHz, double highHz) const; // phase 8 report // the channel most likely feeding the sidechains
     static juce::File targetFolder();
     void saveTarget();
 
@@ -256,6 +270,8 @@ private:
     ma::TruePeakMeter truePeakMeter;
     ma::SpectrumAnalyzer spectrum;
     ma::CorrelationMeter correlation;
+    ma::StereoAnalyzer masterStereo;
+    std::array<std::atomic<float>, ma::SpectrumAnalyzer::kMaxBands> masterMid, masterSide;
 
     std::atomic<bool> resetRequested { false };
     std::atomic<double> integrated { -INFINITY };

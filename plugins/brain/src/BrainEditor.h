@@ -30,7 +30,8 @@ private:
     juce::Slider ceilingSlider;
     juce::TextButton resetButton;
     juce::ToggleButton profilesButton;
-    juce::TextButton channelsViewButton, tonalViewButton, translationViewButton, verdictViewButton;
+    juce::TextButton channelsViewButton, tonalViewButton, translationViewButton, stereoViewButton, verdictViewButton;
+    ma::ui::CoherenceView stereoView;
     brain::VerdictView verdictView;
     juce::Viewport verdictViewport;
     brain::TranslationView translationView;
@@ -39,7 +40,7 @@ private:
     juce::ComboBox targetBox;
     juce::TextButton newTargetButton, captureButton, removeReferenceButton;
     brain::TonalView tonalView;
-    enum class View { channels, tonal, translation, verdict };
+    enum class View { channels, tonal, translation, stereo, verdict };
     void showView(View view);
     View currentView = View::channels;
     void refreshTargets();

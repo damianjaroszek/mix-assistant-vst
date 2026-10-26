@@ -223,7 +223,11 @@ AgentEditor::AgentEditor(AgentProcessor& p)
     styleLabel(evenAmountLabel, pl("Ilość"), colours::quiet, 13.0f);
     styleLabel(evenRefLabel, pl("Nuta"), colours::quiet, 13.0f);
     evenRefLabel.setTooltip(pl("Typowa nuta linii basu: ta zostaje bez zmian."));
-    for (auto* label : { &cleanStatus, &compStatus, &clipStatus, &evenStatus })
+    styleLabel(stereoLabel, pl("Faza w pasmach (mid-side)"), colours::quiet);
+    stereoLabel.setTooltip(pl("Jak Correlometer: na dole przeciwfaza, która w mono znika. „Ustaw cały miks” zdejmuje tam side."));
+    addAndMakeVisible(stereoLabel);
+    addAndMakeVisible(stereoView);
+    for (auto* label : { &cleanStatus, &compStatus, &clipStatus, &evenStatus, &stereoStatus })
     {
         styleLabel(*label, {}, colours::quiet, 13.0f);
         label->setJustificationType(juce::Justification::topLeft);
@@ -231,7 +235,7 @@ AgentEditor::AgentEditor(AgentProcessor& p)
     for (auto* label : { &chainTitle, &cleanLabel, &compLabel, &clipLabel, &evenLabel, &hpfLabel, &monoLabel, &mudFreqLabel,
                          &mudGainLabel, &compThresholdLabel, &compRatioLabel, &compAttackLabel, &compReleaseLabel, &compKneeLabel,
                          &compMakeupLabel, &clipCeilingLabel, &clipSoftnessLabel, &evenAmountLabel, &evenRefLabel, &cleanStatus,
-                         &compStatus, &clipStatus, &evenStatus })
+                         &compStatus, &clipStatus, &evenStatus, &stereoStatus })
         addAndMakeVisible(label);
     for (auto* button : { &compOnButton, &clipOnButton, &evenOnButton })
     {
@@ -507,6 +511,17 @@ void AgentEditor::updateChainStatus()
     }
     evenStatus.setText(even, juce::dontSendNotification);
     evenStatus.setColour(juce::Label::textColourId, evenOn ? colours::good : colours::quiet);
+
+    std::array<double, ma::ui::CoherenceView::kBands> coherence {};
+    std::array<bool, ma::ui::CoherenceView::kBands> audible {};
+    const bool measured = processor.copyStereo(coherence.data(), audible.data());
+    stereoView.setBands(coherence.data(), measured, nullptr, audible.data());
+    juce::StringArray bells;
+    for (const auto& bell : dynamics.stereo.side)
+        if (std::abs(bell.db) > 0.01f)
+            bells.add("side " + signedDb(bell.db) + " @ " + juce::String(juce::roundToInt(bell.hz)) + " Hz");
+    stereoStatus.setText(bells.isEmpty() ? pl("Mid-side EQ wyłączony.") : bells.joinIntoString(", "), juce::dontSendNotification);
+    stereoStatus.setColour(juce::Label::textColourId, bells.isEmpty() ? colours::quiet : colours::good);
 }
 
 void AgentEditor::paint(juce::Graphics& g)
@@ -701,4 +716,9 @@ void AgentEditor::layoutChain(juce::Rectangle<int> area)
     header(evenLabel, &evenOnButton);
     pairRow(evenAmountLabel, evenAmountSlider, evenRefLabel, evenRefSlider);
     statusRow(evenStatus);
+
+    header(stereoLabel, nullptr);
+    stereoView.setBounds(area.removeFromTop(110));
+    area.removeFromTop(4);
+    statusRow(stereoStatus);
 }

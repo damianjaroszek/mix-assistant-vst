@@ -132,7 +132,7 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     proposalViewport.setScrollBarsShown(true, false);
     addAndMakeVisible(proposalViewport);
 
-    for (auto* button : { &channelsViewButton, &tonalViewButton, &translationViewButton, &verdictViewButton })
+    for (auto* button : { &channelsViewButton, &tonalViewButton, &translationViewButton, &stereoViewButton, &verdictViewButton })
     {
         button->setClickingTogglesState(true);
         button->setRadioGroupId(1);
@@ -146,6 +146,10 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     channelsViewButton.onClick = [this] { showView(View::channels); };
     tonalViewButton.onClick = [this] { showView(View::tonal); };
     translationViewButton.onClick = [this] { showView(View::translation); };
+    stereoViewButton.setButtonText("Stereo");
+    stereoViewButton.setTooltip(pl("Faza w pasmach sumy, jak Correlometer: na dole przeciwfaza. Kropki: zaznaczony kanał."));
+    stereoViewButton.onClick = [this] { showView(View::stereo); };
+    addChildComponent(stereoView);
     verdictViewButton.setButtonText(pl("Werdykt"));
     verdictViewButton.onClick = [this] { showView(View::verdict); };
     verdictView.onSelect = [this](std::uint64_t owner) { select(owner == selected ? 0 : owner); };
@@ -214,6 +218,7 @@ void BrainEditor::showView(View view)
     profilesButton.setVisible(view == View::channels);
     translationView.setVisible(view == View::translation);
     verdictViewport.setVisible(view == View::verdict);
+    stereoView.setVisible(view == View::stereo);
     overlayLabel.setVisible(false);
     for (auto* c : std::initializer_list<juce::Component*> { &tonalView, &targetBox, &newTargetButton, &captureButton, &removeReferenceButton })
         c->setVisible(tonal);
@@ -311,6 +316,19 @@ void BrainEditor::timerCallback()
                       + pl(" ref.), miks z ") + juce::String(juce::roundToInt(processor.secondsAnalysed())) + " s";
     tonalView.setData(target, mix.tonal, tonalStatus);
     translationView.setData(mix);
+    {
+        std::array<double, ma::ui::CoherenceView::kBands> sum {}, channel {};
+        for (size_t b = 0; b < sum.size(); ++b)
+            sum[b] = ma::coherence(mix.master.midDb[b], mix.master.sideDb[b]);
+        const auto chosen = std::find_if(mix.channels.begin(), mix.channels.end(),
+                                         [this](const auto& c) { return c.owner == selected && c.stereoValid; });
+        if (chosen != mix.channels.end())
+            for (size_t b = 0; b < channel.size(); ++b)
+                channel[b] = ma::coherence(chosen->midDb[b], chosen->sideDb[b]
+                                           + ma::sideResponseDb(chosen->data.stereo,
+                                                                ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, static_cast<int>(b))));
+        stereoView.setBands(sum.data(), mix.master.valid, chosen != mix.channels.end() ? channel.data() : nullptr);
+    }
     {
         const auto& made = processor.proposal();
         verdictView.setVerdicts(made.verdicts, made.wholeMix, selected);
@@ -424,6 +442,8 @@ void BrainEditor::resized()
     overlayHeader.removeFromLeft(4);
     translationViewButton.setBounds(overlayHeader.removeFromLeft(100));
     overlayHeader.removeFromLeft(4);
+    stereoViewButton.setBounds(overlayHeader.removeFromLeft(80));
+    overlayHeader.removeFromLeft(4);
     verdictViewButton.setBounds(overlayHeader.removeFromLeft(90));
     profilesButton.setBounds(overlayHeader.removeFromRight(170));
     overlayLabel.setBounds({});
@@ -432,6 +452,7 @@ void BrainEditor::resized()
     overlay.setBounds(viewArea);
     translationView.setBounds(viewArea);
     verdictViewport.setBounds(viewArea);
+    stereoView.setBounds(viewArea);
     if (tonalView.isVisible())
     {
         auto controls = viewArea.removeFromTop(26);

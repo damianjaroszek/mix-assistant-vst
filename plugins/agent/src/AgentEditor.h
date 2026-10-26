@@ -76,6 +76,8 @@ private:
     juce::Label clipCeilingLabel, clipSoftnessLabel, evenAmountLabel, evenRefLabel;
     juce::Slider clipCeilingSlider, clipSoftnessSlider, evenAmountSlider, evenRefSlider;
     juce::Label cleanStatus, compStatus, clipStatus, evenStatus;
+    juce::Label stereoLabel, stereoStatus;
+    ma::ui::CoherenceView stereoView;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> compOnAttachment, clipOnAttachment, evenOnAttachment;
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>> chainAttachments;
     void updateChainStatus();

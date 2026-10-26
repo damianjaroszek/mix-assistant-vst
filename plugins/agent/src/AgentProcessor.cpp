@@ -39,9 +39,9 @@ void take(const float*& in, Settings& settings)
     in += sizeof(Settings) / sizeof(float);
 }
 
-std::array<float, 43> packDynamics(const AgentProcessor::DynamicState& s)
+std::array<float, 55> packDynamics(const AgentProcessor::DynamicState& s)
 {
-    std::array<float, 43> v {};
+    std::array<float, 55> v {};
     float* out = v.data();
     put(out, s.duck);
     *out++ = static_cast<float>(s.sync);
@@ -52,11 +52,12 @@ std::array<float, 43> packDynamics(const AgentProcessor::DynamicState& s)
     put(out, s.compressor);
     put(out, s.clipper);
     put(out, s.evener);
+    put(out, s.stereo);
     jassert(out == v.data() + v.size());
     return v;
 }
 
-AgentProcessor::DynamicState unpackDynamics(const std::array<float, 43>& v)
+AgentProcessor::DynamicState unpackDynamics(const std::array<float, 55>& v)
 {
     AgentProcessor::DynamicState s;
     const float* in = v.data();
@@ -69,6 +70,7 @@ AgentProcessor::DynamicState unpackDynamics(const std::array<float, 43>& v)
     take(in, s.compressor);
     take(in, s.clipper);
     take(in, s.evener);
+    take(in, s.stereo);
     return s;
 }
 
@@ -102,6 +104,8 @@ AgentProcessor::AgentProcessor()
         learnProfile[b].store(-INFINITY);
         profile[b].store(-INFINITY);
         liveBands[b].store(-INFINITY);
+        liveMid[b].store(-200.0f);
+        liveSide[b].store(-200.0f);
         outputBands[b].store(-INFINITY);
     }
     startTimerHz(10);
@@ -289,6 +293,20 @@ juce::AudioProcessorValueTreeState::ParameterLayout AgentProcessor::createLayout
     floatParam(evenAmountId, "Bass note evener amount", Range { 0.0f, 100.0f, 1.0f }, 60.0f, "%");
     floatParam(evenRefId, "Bass note evener reference", Range { 25.0f, 160.0f, 0.5f }, 55.0f, "Hz");
 
+    Range sideFreq { 100.0f, 16000.0f, 1.0f };
+    sideFreq.setSkewForCentre(2000.0f);
+    for (int n = 0; n < ma::StereoSettings::kBells; ++n)
+    {
+        const auto name = "Side EQ " + juce::String(n + 1);
+        const auto add = [&](int what, const juce::String& suffix, Range range, float value, const char* label) {
+            layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { sideBellIds[n][what], 9 }, name + suffix, range,
+                                                                   value, juce::AudioParameterFloatAttributes().withLabel(label)));
+        };
+        add(0, " freq", sideFreq, 1000.0f * static_cast<float>(1 << n), "Hz");
+        add(1, " gain", Range { -12.0f, 6.0f, 0.1f }, 0.0f, "dB");
+        add(2, " Q", Range { 0.5f, 10.0f, 0.1f }, 2.0f, "");
+    }
+
     return layout;
 }
 
@@ -323,6 +341,8 @@ void AgentProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     compressor.prepare(sampleRate);
     clipper.prepare(sampleRate);
     evener.prepare(sampleRate);
+    stereoShaper.prepare(sampleRate);
+    liveStereo.prepare(sampleRate);
     learnFeatures.prepare(sampleRate);
     outputSpectrum.prepare(sampleRate, ma::BandScale::erb);
     sidechainCorrelation.prepare(sampleRate);
@@ -393,6 +413,17 @@ void AgentProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         const auto bands = liveSpectrum.recentDb();
         for (size_t b = 0; b < kBands; ++b)
             liveBands[b].store(bands[b]);
+        if (numChannels >= 2)
+        {
+            liveStereo.process(input[0], input[1], numSamples);
+            const auto mid = liveStereo.recentMidDb(), side = liveStereo.recentSideDb();
+            for (size_t b = 0; b < kBands; ++b)
+            {
+                liveMid[b].store(static_cast<float>(std::max(-200.0, mid[b])));
+                liveSide[b].store(static_cast<float>(std::max(-200.0, side[b])));
+            }
+            stereoSeen.store(true);
+        }
     }
 
     // Learning: the full analysis runs only while learning, so idle Agents stay cheap.
@@ -487,6 +518,8 @@ void AgentProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
 
     cleanup.setSettings(dynamics.cleanup);
     cleanup.process(mainBuffer.getArrayOfWritePointers(), numChannels, numSamples);
+    stereoShaper.setSettings(dynamics.stereo);
+    stereoShaper.process(mainBuffer.getArrayOfWritePointers(), numChannels, numSamples);
 
     ma::EqSettings bands {};
     const bool bypass = !before && eqBypassParam->load() > 0.5f;
@@ -662,6 +695,13 @@ void AgentProcessor::publishToBrain()
     data.compressor = dynamics.compressor;
     data.clipper = dynamics.clipper;
     data.evener = dynamics.evener;
+    data.stereo = dynamics.stereo;
+    data.stereoValid = stereoSeen.load() && data.liveValid != 0 ? 1 : 0;
+    for (int b = 0; b < ma::bus::kBands; ++b)
+    {
+        data.midDb[b] = liveMid[static_cast<size_t>(b)].load();
+        data.sideDb[b] = liveSide[static_cast<size_t>(b)].load();
+    }
     data.statsValid = result.statsValid ? 1 : 0;
     data.levelP10 = toShared(result.levelP10);
     data.levelP50 = toShared(result.levelP50);
@@ -718,7 +758,7 @@ void AgentProcessor::handleBrainCommand(ma::bus::Region& region)
         setEqParams(next);
         setParam(eqBypassId, 0.0f);
         setDynamics({ command.duck, command.duckSync, command.polarityInverted != 0, command.harmonics, command.transients,
-                      command.cleanup, command.compressor, command.clipper, command.evener });
+                      command.cleanup, command.compressor, command.clipper, command.evener, command.stereo });
     }
     else if (command.kind == ma::bus::CommandKind::adapt && !eqBypassed())
     {
@@ -804,6 +844,13 @@ void AgentProcessor::setDynamics(const DynamicState& state)
     setParam(evenOnId, state.evener.on);
     setParam(evenAmountId, state.evener.amount * 100.0f);
     setParam(evenRefId, state.evener.referenceHz);
+    for (int n = 0; n < ma::StereoSettings::kBells; ++n)
+    {
+        const auto& bell = state.stereo.side[static_cast<size_t>(n)];
+        setParam(sideBellIds[n][0], bell.hz);
+        setParam(sideBellIds[n][1], bell.db);
+        setParam(sideBellIds[n][2], bell.q);
+    }
 }
 
 AgentProcessor::DynamicState AgentProcessor::currentDynamics() const
@@ -851,6 +898,13 @@ AgentProcessor::DynamicState AgentProcessor::currentDynamics() const
     state.evener.on = value(evenOnId) > 0.5f ? 1.0f : 0.0f;
     state.evener.amount = value(evenAmountId) / 100.0f;
     state.evener.referenceHz = value(evenRefId);
+    for (int n = 0; n < ma::StereoSettings::kBells; ++n)
+    {
+        auto& bell = state.stereo.side[static_cast<size_t>(n)];
+        bell.hz = value(sideBellIds[n][0]);
+        bell.db = value(sideBellIds[n][1]);
+        bell.q = value(sideBellIds[n][2]);
+    }
     return state;
 }
 
@@ -1089,4 +1143,24 @@ juce::AudioProcessorEditor* AgentProcessor::createEditor()
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new AgentProcessor();
+}
+
+bool AgentProcessor::copyStereo(double* coherence, bool* audible) const
+{
+    if (!stereoSeen.load())
+        return false;
+    const auto settings = currentDynamics().stereo;
+    double loudest = -200.0;
+    std::array<double, kBands> level {};
+    for (size_t b = 0; b < kBands; ++b)
+    {
+        const double mid = liveMid[b].load();
+        const double side = liveSide[b].load() + ma::sideResponseDb(settings, ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, static_cast<int>(b)));
+        coherence[b] = ma::coherence(mid, side);
+        level[b] = 10.0 * std::log10(std::pow(10.0, mid / 10.0) + std::pow(10.0, side / 10.0) + 1e-30);
+        loudest = std::max(loudest, level[b]);
+    }
+    for (size_t b = 0; b < kBands; ++b)
+        audible[b] = level[b] > loudest - 40.0 && level[b] > -100.0;
+    return true;
 }

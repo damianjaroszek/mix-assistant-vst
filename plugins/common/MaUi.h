@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ma/ChannelEq.h"
+#include "ma/SpectrumAnalyzer.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
@@ -217,6 +218,87 @@ public:
 private:
     ma::EqSettings eq {};
     bool bypassed = false;
+};
+
+// Phase per frequency band, like a per-band correlation meter: one bar per ERB band from
+// 120 Hz up, +1 (mono) at the top, -1 (anti-phase) at the bottom. Red under 0, amber under
+// 0.3. An optional second set (a selected channel) is drawn as dots over the bars.
+class CoherenceView : public juce::Component
+{
+public:
+    static constexpr int kBands = 40;
+
+    // `audible` (optional) marks the bands the signal really plays in; the rest are drawn grey.
+    void setBands(const double* coherence, bool isValid, const double* overlay = nullptr, const bool* audible = nullptr)
+    {
+        valid = isValid;
+        hasOverlay = overlay != nullptr;
+        for (size_t b = 0; b < values.size(); ++b)
+        {
+            values[b] = coherence != nullptr ? coherence[b] : 1.0;
+            dots[b] = overlay != nullptr ? overlay[b] : 1.0;
+            heard[b] = audible == nullptr || audible[b];
+        }
+        repaint();
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        auto area = getLocalBounds().toFloat();
+        g.setColour(colours::panel);
+        g.fillRoundedRectangle(area, 4.0f);
+        area.reduce(8.0f, 6.0f);
+        auto labels = area.removeFromBottom(14.0f);
+        if (!valid)
+        {
+            g.setColour(colours::quiet);
+            g.setFont(juce::FontOptions(13.0f));
+            g.drawText(juce::String::fromUTF8("Czekam na sygnał stereo."), area, juce::Justification::centred);
+            return;
+        }
+        int first = 0;
+        while (first < kBands && SpectrumAnalyzer::bandCentreHz(BandScale::erb, first) < 120.0)
+            ++first;
+        const int count = kBands - first;
+        const float width = area.getWidth() / static_cast<float>(count);
+        const auto yOf = [&](double c) { return area.getY() + static_cast<float>((1.0 - juce::jlimit(-1.0, 1.0, c)) * 0.5) * area.getHeight(); };
+        const float zero = yOf(0.0);
+        g.setColour(colours::quiet.withAlpha(0.35f));
+        g.drawHorizontalLine(juce::roundToInt(zero), area.getX(), area.getRight());
+        g.drawHorizontalLine(juce::roundToInt(yOf(1.0)), area.getX(), area.getRight());
+        for (int b = first; b < kBands; ++b)
+        {
+            const double c = values[static_cast<size_t>(b)];
+            const float x = area.getX() + static_cast<float>(b - first) * width;
+            const float y = yOf(c);
+            g.setColour(!heard[static_cast<size_t>(b)] ? colours::quiet.withAlpha(0.25f)
+                        : c < 0.0                    ? colours::critical
+                        : c < 0.3                    ? colours::warning
+                                                     : colours::good);
+            g.fillRect(juce::Rectangle<float>(x + 1.0f, std::min(y, zero), width - 2.0f, std::max(1.5f, std::abs(zero - y))));
+            if (hasOverlay)
+            {
+                g.setColour(colours::text);
+                g.fillEllipse(x + width * 0.5f - 2.5f, yOf(dots[static_cast<size_t>(b)]) - 2.5f, 5.0f, 5.0f);
+            }
+        }
+        g.setColour(colours::quiet);
+        g.setFont(juce::FontOptions(11.0f));
+        for (double hz : { 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0 })
+        {
+            int band = first;
+            while (band < kBands - 1 && SpectrumAnalyzer::bandCentreHz(BandScale::erb, band) < hz)
+                ++band;
+            const float x = area.getX() + (static_cast<float>(band - first) + 0.5f) * width;
+            g.drawText(hz >= 1000.0 ? juce::String(juce::roundToInt(hz / 1000.0)) + "k" : juce::String(juce::roundToInt(hz)),
+                       juce::Rectangle<float>(x - 20.0f, labels.getY(), 40.0f, labels.getHeight()), juce::Justification::centred);
+        }
+    }
+
+private:
+    std::array<double, kBands> values {}, dots {};
+    std::array<bool, kBands> heard {};
+    bool valid = false, hasOverlay = false;
 };
 
 } // namespace ma::ui
