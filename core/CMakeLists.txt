@@ -26,6 +26,7 @@ add_library(ma_core STATIC
     src/Stereo.cpp
     src/StereoPlanner.cpp
     src/Key.cpp
+    src/MasterPreview.cpp
     src/StemReference.cpp)
 target_include_directories(ma_core PUBLIC include)
 

@@ -57,6 +57,22 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     ceilingAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         processor.parameters, BrainProcessor::peakCeilingId, ceilingSlider);
 
+    styleLabel(targetLabel, pl("Cel mastera"), colours::quiet);
+    targetLabel.setTooltip(pl("Głośność, do której Ozone podciągnie master. Podgląd mastera sprawdza, ile limiter musiałby przy tym ściąć."));
+    addAndMakeVisible(targetLabel);
+    targetSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    targetSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 22);
+    targetSlider.setColour(juce::Slider::thumbColourId, colours::accent);
+    addAndMakeVisible(targetSlider);
+    targetAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        processor.parameters, BrainProcessor::masterTargetId, targetSlider);
+    masteringReportButton.setButtonText(pl("Raport dla Ozone..."));
+    masteringReportButton.setColour(juce::TextButton::buttonColourId, colours::panel);
+    masteringReportButton.setTooltip(pl("Zapisuje raport przed masteringiem (HTML): głośność, zapas, podgląd mastera, balans, stereo, "
+                                        "referencje i co zostało do zrobienia w Ozone."));
+    masteringReportButton.onClick = [this] { saveMasteringReport(); };
+    addAndMakeVisible(masteringReportButton);
+
     resetButton.setButtonText(pl("Zeruj pomiar"));
     resetButton.setColour(juce::TextButton::buttonColourId, colours::panel);
     resetButton.onClick = [this] { processor.requestReset(); };
@@ -521,6 +537,8 @@ void BrainEditor::resized()
     auto area = getLocalBounds().reduced(16);
     auto header = area.removeFromTop(28);
     resetButton.setBounds(header.removeFromRight(120));
+    header.removeFromRight(8);
+    masteringReportButton.setBounds(header.removeFromRight(150));
     header.removeFromRight(12);
     agentsLabel.setBounds(header.removeFromRight(90));
     header.removeFromRight(12);
@@ -548,6 +566,9 @@ void BrainEditor::resized()
     auto ceilingRow = left.removeFromTop(26);
     ceilingLabel.setBounds(ceilingRow.removeFromLeft(100));
     ceilingSlider.setBounds(ceilingRow);
+    auto targetRow = left.removeFromTop(26);
+    targetLabel.setBounds(targetRow.removeFromLeft(100));
+    targetSlider.setBounds(targetRow);
     left.removeFromTop(10);
     reportLabel.setBounds(left.removeFromTop(22));
     left.removeFromTop(4);
@@ -681,4 +702,25 @@ void BrainEditor::updateKeyControls(juce::String& status, bool& warning)
         status += " " + juce::String(unknown) + pl(" bez przesunięcia (tonacja niepewna albo zestaw sprzed tej wersji).");
         warning = true;
     }
+}
+
+void BrainEditor::saveMasteringReport()
+{
+    const auto folder = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+    const auto name = pl("Raport przed masteringiem ") + juce::Time::getCurrentTime().formatted("%Y-%m-%d %H-%M") + ".html";
+    reportChooser = std::make_unique<juce::FileChooser>(pl("Zapisz raport dla Ozone"), folder.getChildFile(name), "*.html");
+    const auto mode = juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles
+                      | juce::FileBrowserComponent::warnAboutOverwriting;
+    reportChooser->launchAsync(mode, [this](const juce::FileChooser& chooser) {
+        auto file = chooser.getResult();
+        if (file == juce::File())
+            return;
+        if (!file.hasFileExtension("html;htm"))
+            file = file.withFileExtension("html");
+        if (processor.saveMasteringReport(file))
+            file.startAsProcess();
+        else
+            juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, pl("Raport dla Ozone"),
+                                                   pl("Nie mogę zapisać ") + file.getFullPathName());
+    });
 }

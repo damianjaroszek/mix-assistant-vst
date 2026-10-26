@@ -6,6 +6,7 @@
 #include "ma/StemReference.h"
 #include "ma/CorrelationMeter.h"
 #include "ma/LoudnessMeter.h"
+#include "ma/MasterPreview.h"
 #include "ma/Masking.h"
 #include "ma/Solver.h"
 #include "ma/TonalBalance.h"
@@ -182,6 +183,10 @@ public:
         resetRequested.store(true);
         mix.master.valid = false; // the stereo picture starts over too
         dropResetPending = true;  // and so does the drop
+        previewResetRequested.store(true);
+        appliedPreviewGain = NAN;
+        loudestShortTerm = -INFINITY;
+        peakHold.clear();
     }
     double integratedLufs() const { return integrated.load(); }
     double shortTermLufs() const { return shortTerm.load(); }
@@ -269,6 +274,16 @@ public:
     static juce::String keyText(ma::MusicalKey key); // "f-moll (4A)"
     static constexpr double kMinimumKeySeconds = 20.0;
 
+    // Phase 11: before Ozone. A master preview (analysis only) brings the mix to the target
+    // loudness through a limiter and measures what it has to take off; the report for
+    // mastering collects everything the Brain knows into an HTML file.
+    static constexpr const char* masterTargetId = "masterTarget";
+    float masterTargetLufs() const { return masterTarget->load(); }
+    ma::PreviewStats previewStats() const;
+    static constexpr double kMinimumPreviewSeconds = 10.0;
+    juce::String masteringReportHtml() const;
+    bool saveMasteringReport(const juce::File& file) const;
+
     juce::AudioProcessorValueTreeState parameters;
 
     static constexpr const char* peakCeilingId = "peakCeiling";
@@ -321,6 +336,7 @@ private:
 
     std::atomic<float>* peakCeiling = nullptr;
     std::atomic<float>* adaptive = nullptr;
+    std::atomic<float>* masterTarget = nullptr;
 
     ma::LoudnessMeter loudness;
     ma::TruePeakMeter truePeakMeter;
@@ -332,6 +348,11 @@ private:
     std::array<std::atomic<float>, 12> keyChroma, keyBass;
     std::atomic<double> keySeconds { 0.0 };
     std::atomic<bool> keyResetRequested { false };
+    ma::MasterPreview masterPreview;
+    std::atomic<double> previewGainDb { 0.0 };
+    std::atomic<bool> previewResetRequested { false };
+    std::atomic<double> previewSeconds { 0.0 }, previewAverage { 0.0 }, previewTypical { 0.0 }, previewMax { 0.0 },
+        previewHeavy { 0.0 }, previewLufs { -INFINITY }, previewPeak { -INFINITY };
 
     std::atomic<bool> resetRequested { false };
     std::atomic<double> integrated { -INFINITY };
@@ -395,6 +416,12 @@ private:
     ma::KeyEstimate heardKey;
     double heardKeySeconds = 0.0;
     int keyOverride = -1;
+    double appliedPreviewGain = NAN;
+    double loudestShortTerm = -INFINITY;
+    std::map<std::uint64_t, float> peakHold; // each channel's highest output peak since the last reset
+    void updatePreview();
+    juce::String loudestPeakChannel() const;
+    juce::String previewVerdict(MixSnapshot::Status& status) const;
     struct StemJob;
     std::unique_ptr<StemJob> stemJob;
     juce::String stemNote;

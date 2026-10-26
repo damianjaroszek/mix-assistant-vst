@@ -61,6 +61,11 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   spread evenly over each band) by `keyShiftSemitones` (via relative majors, -5..+6) and re-measures; the Brain keeps the saved
   set (`currentStems`) and the keyed one (`keyedStems`, used everywhere for comparing and planning). The master's key detector
   ignores `requestReset`; its chroma is saved in the Brain state (`keyChroma`, `keySeconds`) with the manual `keyOverride`.
+  Phase 11 pre-master: `ma/MasterPreview.h` (analysis only, on the Brain's audio thread): gain to the `masterTarget` parameter
+  (set from the timer as target minus integrated; a move over 1 dB restarts its statistics), a lookahead limiter (sliding minimum
+  of the needed gain plus a moving average of the same length, so no overshoot; release 80 ms) and per-100 ms reduction stats.
+  The Brain holds each channel's output peak (`peakHold`, Agents only publish their latest block). `masteringReportHtml` builds the
+  "Raport dla Ozone" file from the snapshot.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

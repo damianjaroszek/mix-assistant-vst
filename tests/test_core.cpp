@@ -18,6 +18,7 @@
 #include "ma/StereoPlanner.h"
 #include "ma/StemReference.h"
 #include "ma/Key.h"
+#include "ma/MasterPreview.h"
 #include "ma/EqualLoudness.h"
 #include "ma/GainStaging.h"
 #include "ma/LevelStats.h"
@@ -1819,6 +1820,48 @@ void testKey()
           "a set saved before phase 10 loads and stays where it is");
 }
 
+// Phase 11: the master preview's limiter.
+void testMasterPreview()
+{
+    constexpr double sr = 48000.0, pi = 3.14159265358979323846;
+    auto run = [&](double gainDb, bool kicks, double seconds) {
+        ma::MasterPreview preview;
+        preview.setGainDb(gainDb);
+        preview.prepare(sr, 2);
+        const int n = 480;
+        std::vector<float> l(static_cast<size_t>(n)), r(static_cast<size_t>(n));
+        long t = 0;
+        for (int block = 0; block < static_cast<int>(seconds * sr / n); ++block)
+        {
+            for (int i = 0; i < n; ++i, ++t)
+            {
+                const double time = t / sr;
+                double x = 0.1 * std::sin(2 * pi * 220.0 * time);
+                // A kick every half second: 15 ms of a big 60 Hz burst.
+                const double beat = std::fmod(time, 0.5);
+                if (kicks && beat < 0.015)
+                    x += 0.8 * std::sin(2 * pi * 60.0 * beat);
+                l[static_cast<size_t>(i)] = r[static_cast<size_t>(i)] = static_cast<float>(x);
+            }
+            const float* channels[] { l.data(), r.data() };
+            preview.process(channels, 2, n);
+        }
+        return preview.stats();
+    };
+    const auto quiet = run(6.0, false, 6.0);
+    check(quiet.maxReductionDb < 0.01, "a mix with room to spare is not limited");
+    checkNear(quiet.outputPeakDb, -20.0 + 6.0, 0.1, "the preview gain is applied (dBFS)");
+    checkNear(quiet.seconds, 6.0, 0.2, "the preview counts playing time (s)");
+
+    const auto loud = run(12.0, true, 6.0);
+    std::printf("  preview: average %.1f dB, typical %.1f dB, max %.1f dB, heavy %.0f%%, peak %.2f dBFS\n", loud.averageReductionDb,
+                loud.typicalReductionDb, loud.maxReductionDb, loud.heavyShare * 100.0, loud.outputPeakDb);
+    check(loud.outputPeakDb <= ma::MasterPreview::kCeilingDb + 0.01, "the limiter holds the ceiling, no overshoot");
+    // The kick peaks at 0.9 + 12 dB = 3.6 against a 0.89 ceiling: about 12 dB off them.
+    checkNear(loud.maxReductionDb, 12.1, 0.6, "the kick is limited by what it is over the ceiling (dB)");
+    check(loud.typicalReductionDb > 6.0 && loud.heavyShare >= 0.15, "a peaky kick pushed loud shows as heavy limiting");
+}
+
 int main()
 {
     testLoudness();
@@ -1848,6 +1891,7 @@ int main()
     testStereo();
     testStems();
     testKey();
+    testMasterPreview();
     testWavRoundTrip();
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "OK" : "FAILED", failures, failures == 1 ? "" : "s");
