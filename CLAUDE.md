@@ -37,6 +37,9 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   stores level percentiles and the usual low note (persisted in the Agent state). `ma/ChainPlanner.h` plans every channel at once
   from raw post-trim spectra plus those stats (role profiles, compression capped per role so arrangement dynamics stay); the Brain's
   `proposeWholeMix` runs it, re-runs the normal proposal on the mix with the planned cleanup, and builds a per-channel verdict.
+  Resonances (`ma/Resonance.h`): the Learn analyser tracks fine FFT bins (`SpectrumAnalyzer::setTrackBins`), a peak counts
+  when it stands out in >= 70% of playing frames; the planner cuts up to three (cleanup notches) only where audible in the mix,
+  never below 300 Hz on drums and bass, and on tonal roles only broad (Q <= 8) bumps.
   `MixSnapshot::Channel::rawDb` is pre-cleanup, `bandsDb` post-cleanup pre-EQ, `heardDb` post-EQ.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
