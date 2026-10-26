@@ -21,7 +21,8 @@ add_library(ma_core STATIC
     src/Saturator.cpp
     src/Instrument.cpp
     src/ChannelChain.cpp
-    src/ChainPlanner.cpp)
+    src/ChainPlanner.cpp
+    src/Resonance.cpp)
 target_include_directories(ma_core PUBLIC include)
 
 # WAV reading/writing, used by the lab and tests only.

@@ -16,6 +16,11 @@ constexpr double kMonoBelowHz = 120.0;
 constexpr double kLostMarginDb = -12.0; // quiet parts this far under the rest in their own bands are lost
 constexpr double kMudLowHz = 200.0, kMudHighHz = 500.0;
 constexpr double kMudShare = 0.15;    // a channel with this share of the mix there crowds it
+constexpr double kMinResonanceHz = 150.0;
+constexpr double kMaxNotchDb = 6.0;      // drums, effects: a ringing shell can take a deep cut ...
+constexpr double kMaxTonalNotchDb = 4.0; // ... a tonal part loses its character sooner
+constexpr double kMaxTonalResonanceQ = 8.0;
+constexpr double kBuriedResonanceDb = -15.0; // this far under the rest in its band, nobody hears it ring
 
 struct RoleProfile
 {
@@ -212,6 +217,64 @@ std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& channels, con
                 cleanup.mudQ = 1.0f;
                 plans[i].mudCrowd = static_cast<int>(crowd.size());
             }
+        }
+    }
+
+    // 2b. Resonances: a narrow cut only where the mix hears the ring (a resonance buried under
+    // the rest costs nothing), deeper when it covers a more important channel.
+    for (size_t i = 0; i < count; ++i)
+    {
+        const auto& c = channels[i];
+        auto& plan = plans[i];
+        if (!c.valid || c.role == Role::bus)
+            continue;
+        const bool tonal = c.role == Role::bass || c.role == Role::lead || c.role == Role::pad || c.role == Role::vocal;
+        const double maxDepth = tonal ? kMaxTonalNotchDb : kMaxNotchDb;
+        double lowest = std::max(kMinResonanceHz, 1.5 * plan.cleanup.hpfHz);
+        if (c.role == Role::bass || c.role == Role::kick || c.role == Role::percussion)
+            lowest = std::max(lowest, 300.0); // below that the peaks are its notes or a drum's tuned body: its tone
+        size_t slot = 0;
+        for (const auto& r : c.resonances)
+        {
+            if (r.hz <= 0.0f || r.hz < lowest || slot == plan.cleanup.notches.size())
+                continue;
+            // On a tonal part a single-bin line is a held note's harmonic, not a resonance; only a
+            // broader, formant-like bump (harshness, boxiness) counts.
+            if (tonal && r.q > kMaxTonalResonanceQ)
+                continue;
+            int band = 0;
+            for (int b = 1; b < kBands; ++b)
+                if (std::abs(std::log2(centre(b) / r.hz)) < std::abs(std::log2(centre(band) / r.hz)))
+                    band = b;
+            const auto at = static_cast<size_t>(band);
+            const double own = c.bandsDb[at] + cleanupResponseDb(plan.cleanup, r.hz);
+            double others = 0.0;
+            bool coversImportant = false;
+            for (size_t j = 0; j < count; ++j)
+            {
+                if (j == i || !channels[j].valid)
+                    continue;
+                const double level = channels[j].bandsDb[at] + cleanupResponseDb(plans[j].cleanup, r.hz);
+                others += power(level);
+                if (channels[j].priority < c.priority && level > -100.0 && own >= level - 6.0)
+                    coversImportant = true;
+            }
+            if (own - toDb(others) < kBuriedResonanceDb)
+            {
+                ++plan.resonancesBuried;
+                continue;
+            }
+            double depth = 0.6 * (r.prominenceDb - 3.0) + (coversImportant ? 1.5 : 0.0);
+            depth = std::round(std::min(depth, maxDepth) * 2.0) / 2.0;
+            if (depth < 1.5)
+                continue;
+            auto& notch = plan.cleanup.notches[slot];
+            notch.hz = static_cast<float>(r.hz >= 1000.0 ? std::round(r.hz / 10.0) * 10.0 : std::round(r.hz));
+            notch.db = static_cast<float>(-depth);
+            notch.q = static_cast<float>(std::clamp(static_cast<double>(r.q), 3.0, 10.0));
+            plan.notchProminenceDb[slot] = r.prominenceDb;
+            plan.notchCoversImportant[slot] = coversImportant;
+            ++slot;
         }
     }
 

@@ -21,6 +21,15 @@ struct CleanupSettings
     float mudHz = 300.0f;
     float mudDb = 0.0f;       // 0 = off, else a cut
     float mudQ = 1.0f;
+    // Narrow cuts on resonances (0 dB = off).
+    struct Notch
+    {
+        float hz = 1000.0f;
+        float db = 0.0f;
+        float q = 6.0f;
+    };
+    static constexpr int kNotches = 3;
+    std::array<Notch, kNotches> notches {};
 };
 
 // Response of the high-pass and the mud cut at `hz` (dB), for the Brain's predictions.
@@ -42,6 +51,7 @@ private:
     bool initialised = false;
     std::array<std::array<Biquad, 2>, 2> highPass {}; // per channel, two sections
     std::array<Biquad, 2> mud {};
+    std::array<std::array<Biquad, CleanupSettings::kNotches>, 2> notch {};
     // Linkwitz-Riley crossover at monoBelowHz: the side keeps only its high half, the mid
     // goes through the same crossover summed back (an allpass), so mid and side stay in phase.
     std::array<Biquad, 2> sideHigh {}, midLow {}, midHigh {};

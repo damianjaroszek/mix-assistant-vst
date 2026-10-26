@@ -480,6 +480,9 @@ void AgentEditor::updateChainStatus()
         clean.add(pl("mono poniżej ") + juce::String(juce::roundToInt(cleanup.monoBelowHz)) + " Hz");
     if (cleanup.mudDb < 0.0f)
         clean.add(pl("muł ") + juce::String(cleanup.mudDb, 1) + " dB @ " + juce::String(juce::roundToInt(cleanup.mudHz)) + " Hz");
+    for (const auto& notch : cleanup.notches)
+        if (notch.db < -0.01f)
+            clean.add(pl("rezonans ") + juce::String(notch.db, 1) + " dB @ " + juce::String(juce::roundToInt(notch.hz)) + " Hz");
     cleanStatus.setText(clean.isEmpty() ? pl("Wyłączone. 0 Hz = filtr wyłączony.") : clean.joinIntoString(", "),
                         juce::dontSendNotification);
     cleanStatus.setColour(juce::Label::textColourId, clean.isEmpty() ? colours::quiet : colours::good);

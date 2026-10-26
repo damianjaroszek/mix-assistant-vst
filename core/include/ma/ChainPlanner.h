@@ -2,6 +2,7 @@
 
 #include "ChannelChain.h"
 #include "Instrument.h"
+#include "Resonance.h"
 #include "SpectrumAnalyzer.h"
 
 #include <vector>
@@ -29,6 +30,7 @@ struct ChainChannel
     double truePeakDb = -200.0;
     double lowNoteHz = 0.0;
     bool intentionalDrive = false; // meant to distort: no clipper, no "over-compressed" verdict
+    Resonances resonances {};      // from the Learn pass
 };
 
 struct ChainContext
@@ -48,6 +50,9 @@ struct ChainPlan
     enum class HighPass { none, junk, lowEndOwned, subsonic };
     HighPass highPassReason = HighPass::none;
     int mudCrowd = 0;               // channels crowding 200-500 Hz when a mud cut was set
+    std::array<double, CleanupSettings::kNotches> notchProminenceDb {}; // per resonance cut
+    std::array<bool, CleanupSettings::kNotches> notchCoversImportant {};
+    int resonancesBuried = 0;       // found, but the mix covers them: left alone
     bool dynamicsKnown = false;
     double spreadDb = 0.0;          // loud minus quiet parts (P95 - P10)
     double targetSpreadDb = 0.0;

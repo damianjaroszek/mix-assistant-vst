@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 namespace ma
 {
@@ -71,6 +72,9 @@ double cleanupResponseDb(const CleanupSettings& s, double hz)
             db += makeHighPass(48000.0, s.hpfHz, q).magnitudeDb(hz, 48000.0);
     if (s.mudDb < -0.01f)
         db += Biquad::peaking(48000.0, s.mudHz, s.mudDb, s.mudQ).magnitudeDb(hz, 48000.0);
+    for (const auto& n : s.notches)
+        if (n.db < -0.01f)
+            db += Biquad::peaking(48000.0, n.hz, n.db, n.q).magnitudeDb(hz, 48000.0);
     return db;
 }
 
@@ -89,6 +93,9 @@ void CleanupFilter::reset()
             f.reset();
     for (auto& f : mud)
         f.reset();
+    for (auto& channel : notch)
+        for (auto& f : channel)
+            f.reset();
     for (auto* chain : { &sideHigh, &midLow, &midHigh })
         for (auto& f : *chain)
             f.reset();
@@ -97,7 +104,8 @@ void CleanupFilter::reset()
 void CleanupFilter::setSettings(const CleanupSettings& next)
 {
     const bool changed = !initialised || next.hpfHz != settings.hpfHz || next.monoBelowHz != settings.monoBelowHz
-                         || next.mudHz != settings.mudHz || next.mudDb != settings.mudDb || next.mudQ != settings.mudQ;
+                         || next.mudHz != settings.mudHz || next.mudDb != settings.mudDb || next.mudQ != settings.mudQ
+                         || std::memcmp(next.notches.data(), settings.notches.data(), sizeof(settings.notches)) != 0;
     settings = next;
     if (changed)
         update();
@@ -113,6 +121,13 @@ void CleanupFilter::update()
     if (settings.mudDb < -0.01f)
         for (auto& f : mud)
             retune(f, Biquad::peaking(sampleRate, std::min<double>(settings.mudHz, 0.45 * sampleRate), settings.mudDb, settings.mudQ));
+    for (size_t n = 0; n < settings.notches.size(); ++n)
+    {
+        const auto& cut = settings.notches[n];
+        if (cut.db < -0.01f)
+            for (auto& channel : notch)
+                retune(channel[n], Biquad::peaking(sampleRate, std::min<double>(cut.hz, 0.45 * sampleRate), cut.db, cut.q));
+    }
     if (settings.monoBelowHz > 0.0f)
     {
         const double q = 1.0 / std::sqrt(2.0);
@@ -142,7 +157,11 @@ void CleanupFilter::process(float* const* channels, int numChannels, int numSamp
         }
     }
     const bool hpf = settings.hpfHz > 0.0f, cut = settings.mudDb < -0.01f;
-    if (!hpf && !cut)
+    std::array<bool, CleanupSettings::kNotches> notched {};
+    bool anyNotch = false;
+    for (size_t n = 0; n < notched.size(); ++n)
+        anyNotch = (notched[n] = settings.notches[n].db < -0.01f) || anyNotch;
+    if (!hpf && !cut && !anyNotch)
         return;
     for (int c = 0; c < count; ++c)
     {
@@ -156,6 +175,9 @@ void CleanupFilter::process(float* const* channels, int numChannels, int numSamp
                 x = chain[1].process(chain[0].process(x));
             if (cut)
                 x = bell.process(x);
+            for (size_t n = 0; n < notched.size(); ++n)
+                if (notched[n])
+                    x = notch[static_cast<size_t>(c)][n].process(x);
             data[i] = static_cast<float>(x);
         }
     }

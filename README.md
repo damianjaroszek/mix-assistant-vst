@@ -17,7 +17,7 @@ Koncepcja, architektura i plan faz: [rewizja koncepcji](https://claude.ai/artifa
 | **Testy** | `tests` | Testy rdzenia, m.in. przypadki z EBU Tech 3341. |
 
 Agenci i Mózg rozmawiają przez mały plik w pamięci współdzielonej
-(`%TEMP%\MixAssistant\session-v7.bin`), więc działa to także, gdy FL uruchamia wtyczki
+(`%TEMP%\MixAssistant\session-v8.bin`), więc działa to także, gdy FL uruchamia wtyczki
 w osobnych procesach (tryb bridged). Idą nim tylko wolne dane, kilka razy na sekundę.
 Kolizja liczy się tylko wtedy, gdy mniej ważny kanał (wyższa liczba priorytetu) zasłania
 ważniejszy albo równie ważny. Agent powinien stać na końcu łańcucha kanału, a suwak

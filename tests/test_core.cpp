@@ -13,6 +13,7 @@
 #include "ma/Instrument.h"
 #include "ma/ChannelChain.h"
 #include "ma/ChainPlanner.h"
+#include "ma/Resonance.h"
 #include "ma/EqualLoudness.h"
 #include "ma/GainStaging.h"
 #include "ma/LevelStats.h"
@@ -1294,6 +1295,80 @@ void testChainPlanner()
           "low-mid mud: the most important keeps it, the others give way");
 }
 
+ma::Resonances resonancesOf(const std::function<double(double)>& part)
+{
+    constexpr double sr = 48000.0;
+    ma::SpectrumAnalyzer analyser;
+    analyser.setTrackBins(true);
+    analyser.prepare(sr, ma::BandScale::erb);
+    std::vector<float> block(512);
+    long n = 0;
+    for (int i = 0; i < int(8.0 * sr / 512); ++i)
+    {
+        for (auto& x : block)
+            x = static_cast<float>(part(static_cast<double>(n++) / sr));
+        const float* channels[] { block.data() };
+        analyser.process(channels, 1, 512);
+    }
+    return ma::findResonances(analyser);
+}
+
+void testResonances()
+{
+    constexpr double pi = 3.14159265358979323846;
+    // A snare-like part: noise hits whose shell rings at 2.4 kHz on every hit.
+    std::uint32_t seed = 1;
+    auto noise = [&] {
+        seed = seed * 1664525u + 1013904223u;
+        return static_cast<double>(seed >> 8) / 8388608.0 - 1.0;
+    };
+    const auto snare = resonancesOf([&](double t) {
+        const double hit = std::fmod(t, 0.25);
+        return 0.3 * std::exp(-hit * 25.0) * (noise() + 0.6 * std::sin(2.0 * pi * 2400.0 * t));
+    });
+    checkNear(snare[0].hz, 2400.0, 30.0, "the ringing shell is found");
+    check(snare[0].prominenceDb > 6.0f && snare[0].q > 3.0f, "as a narrow peak (" + std::to_string(snare[0].prominenceDb).substr(0, 4) + " dB, Q "
+                                                            + std::to_string(snare[0].q).substr(0, 4) + ")");
+
+    // A melody's harmonics move with the notes: not resonances.
+    const double notes[] { 440.0, 494.0, 523.0, 587.0, 659.0, 587.0, 523.0, 494.0 };
+    const auto melody = resonancesOf([&](double t) {
+        const double f = notes[static_cast<int>(t / 0.25) % 8];
+        double saw = 0.0;
+        for (int k = 1; k < 12; ++k)
+            saw += std::sin(2.0 * pi * f * k * t) / k;
+        return 0.1 * saw;
+    });
+    check(melody[0].hz <= 0.0f, "a moving melody shows no resonance");
+
+    // The planner: cut only where the mix hears it.
+    std::vector<ma::ChainChannel> mix(2);
+    for (size_t i = 0; i < mix.size(); ++i)
+    {
+        mix[i].valid = true;
+        mix[i].priority = static_cast<int>(i + 1) * 3;
+        mix[i].role = i == 0 ? ma::Role::vocal : ma::Role::percussion;
+        mix[i].bandsDb.fill(-30.0);
+    }
+    mix[1].resonances[0] = { 2400.0f, 10.0f, 6.0f, 0.9f };
+    mix[1].resonances[1] = { 120.0f, 12.0f, 8.0f, 0.9f }; // under the high-pass region of percussion
+    auto plans = ma::planChains(mix);
+    const auto& notch = plans[1].cleanup.notches[0];
+    checkNear(notch.hz, 2400.0, 1.0, "the audible ring gets a narrow cut");
+    check(notch.db <= -4.0f && notch.db >= -6.0f && plans[1].notchCoversImportant[0], "deeper, because it covers the vocal ("
+                                                                                        + std::to_string(notch.db).substr(0, 4) + " dB)");
+    check(plans[1].cleanup.notches[1].db > -0.01f, "nothing cut below the part's content");
+    mix[0].resonances[0] = { 1300.0f, 14.0f, 16.0f, 1.0f }; // a held note's harmonic line on the vocal
+    mix[0].resonances[1] = { 3200.0f, 9.0f, 4.0f, 0.9f };   // a broad harsh bump
+    plans = ma::planChains(mix);
+    check(std::abs(plans[0].cleanup.notches[0].hz - 3200.0f) < 1.0f && plans[0].cleanup.notches[0].db <= -1.5f
+              && plans[0].cleanup.notches[1].db > -0.01f,
+          "on a tonal part only the broad bump is cut, not a harmonic line");
+    mix[1].bandsDb.fill(-55.0);
+    plans = ma::planChains(mix);
+    check(plans[1].cleanup.notches[0].db > -0.01f && plans[1].resonancesBuried == 1, "a ring the mix covers is left alone");
+}
+
 void testWavRoundTrip()
 {
     const auto a = sine(44100.0, 0.5, 2, 440.0, 0.25);
@@ -1330,6 +1405,7 @@ int main()
     testInstrumentRecognition();
     testChannelChain();
     testChainPlanner();
+    testResonances();
     testWavRoundTrip();
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "OK" : "FAILED", failures, failures == 1 ? "" : "s");

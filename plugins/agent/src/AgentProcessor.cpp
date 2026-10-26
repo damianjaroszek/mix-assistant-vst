@@ -15,6 +15,7 @@ namespace
 const juce::Identifier profileProperty { "profile" };
 const juce::Identifier nameProperty { "name" };
 const juce::Identifier statsProperty { "stats" };
+const juce::Identifier resonancesProperty { "resonances" };
 
 float toShared(double db)
 {
@@ -38,9 +39,9 @@ void take(const float*& in, Settings& settings)
     in += sizeof(Settings) / sizeof(float);
 }
 
-std::array<float, 34> packDynamics(const AgentProcessor::DynamicState& s)
+std::array<float, 43> packDynamics(const AgentProcessor::DynamicState& s)
 {
-    std::array<float, 34> v {};
+    std::array<float, 43> v {};
     float* out = v.data();
     put(out, s.duck);
     *out++ = static_cast<float>(s.sync);
@@ -51,10 +52,11 @@ std::array<float, 34> packDynamics(const AgentProcessor::DynamicState& s)
     put(out, s.compressor);
     put(out, s.clipper);
     put(out, s.evener);
+    jassert(out == v.data() + v.size());
     return v;
 }
 
-AgentProcessor::DynamicState unpackDynamics(const std::array<float, 34>& v)
+AgentProcessor::DynamicState unpackDynamics(const std::array<float, 43>& v)
 {
     AgentProcessor::DynamicState s;
     const float* in = v.data();
@@ -253,6 +255,19 @@ juce::AudioProcessorValueTreeState::ParameterLayout AgentProcessor::createLayout
     floatParam(mudFreqId, "Mud cut freq", mudFreq, 300.0f, "Hz");
     floatParam(mudGainId, "Mud cut", Range { -12.0f, 0.0f, 0.1f }, 0.0f, "dB");
     floatParam(mudQId, "Mud cut Q", Range { 0.3f, 4.0f, 0.01f }, 1.0f, "");
+    Range notchFreq { 100.0f, 16000.0f, 1.0f };
+    notchFreq.setSkewForCentre(2000.0f);
+    for (int n = 0; n < ma::CleanupSettings::kNotches; ++n)
+    {
+        const auto name = "Resonance cut " + juce::String(n + 1);
+        const auto add = [&](int what, const juce::String& suffix, Range range, float value, const char* label) {
+            layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { notchIds[n][what], 8 }, name + suffix, range,
+                                                                   value, juce::AudioParameterFloatAttributes().withLabel(label)));
+        };
+        add(0, " freq", notchFreq, 1000.0f * static_cast<float>(1 << n), "Hz");
+        add(1, "", Range { -12.0f, 0.0f, 0.1f }, 0.0f, "dB");
+        add(2, " Q", Range { 1.0f, 16.0f, 0.1f }, 6.0f, "");
+    }
     const ma::CompressorSettings comp {};
     layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { compOnId, 7 }, "Compressor", false));
     floatParam(compThresholdId, "Compressor threshold", Range { -60.0f, 0.0f, 0.5f }, comp.thresholdDb, "dB");
@@ -295,6 +310,7 @@ bool AgentProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
 void AgentProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     const int channels = getMainBusNumInputChannels();
+    learnAnalyzer.setTrackBins(true);
     learnAnalyzer.prepare(sampleRate, channels);
     liveLoudness.prepare(sampleRate, channels);
     liveSpectrum.prepare(sampleRate, ma::BandScale::erb);
@@ -654,6 +670,8 @@ void AgentProcessor::publishToBrain()
     data.compressorReductionDb = static_cast<float>(compShownDb);
     data.clipperDb = static_cast<float>(clipShownDb);
     data.evenerGainDb = static_cast<float>(evenerGain.load());
+    for (int r = 0; r < ma::kMaxResonances; ++r)
+        data.resonances[r] = result.resonances[static_cast<size_t>(r)];
     data.sidechainConnected = sidechainSeen ? 1 : 0;
     data.sidechainDb = toShared(sidechainShownDb);
     data.duckReductionDb = static_cast<float>(reductionShownDb);
@@ -765,6 +783,13 @@ void AgentProcessor::setDynamics(const DynamicState& state)
     setParam(mudFreqId, c.mudHz);
     setParam(mudGainId, c.mudDb);
     setParam(mudQId, c.mudQ);
+    for (int n = 0; n < ma::CleanupSettings::kNotches; ++n)
+    {
+        const auto& notch = c.notches[static_cast<size_t>(n)];
+        setParam(notchIds[n][0], notch.hz);
+        setParam(notchIds[n][1], notch.db);
+        setParam(notchIds[n][2], notch.q);
+    }
     const auto& k = state.compressor;
     setParam(compOnId, k.on);
     setParam(compThresholdId, k.thresholdDb);
@@ -806,6 +831,13 @@ AgentProcessor::DynamicState AgentProcessor::currentDynamics() const
     state.cleanup.mudHz = value(mudFreqId);
     state.cleanup.mudDb = value(mudGainId);
     state.cleanup.mudQ = value(mudQId);
+    for (int n = 0; n < ma::CleanupSettings::kNotches; ++n)
+    {
+        auto& notch = state.cleanup.notches[static_cast<size_t>(n)];
+        notch.hz = value(notchIds[n][0]);
+        notch.db = value(notchIds[n][1]);
+        notch.q = value(notchIds[n][2]);
+    }
     state.compressor.on = value(compOnId) > 0.5f ? 1.0f : 0.0f;
     state.compressor.thresholdDb = value(compThresholdId);
     state.compressor.ratio = value(compRatioId);
@@ -939,6 +971,7 @@ void AgentProcessor::recogniseRole()
         result.levelP95 = summary.levelP95;
         result.lowNoteHz = summary.lowNoteHz;
     }
+    result.resonances = ma::findResonances(learnAnalyzer.spectrumAnalyzer());
     result.roleSet = result.prioritySet = false;
     if (result.guess.role == ma::Role::other || result.guess.confidence < 0.5)
         return;
@@ -1005,6 +1038,12 @@ void AgentProcessor::getStateInformation(juce::MemoryBlock& destData)
                                              + juce::String(result.levelP95, 2) + " " + juce::String(result.lowNoteHz, 1), nullptr);
     else
         state.removeProperty(statsProperty, nullptr);
+    juce::StringArray resonances;
+    for (const auto& r : result.resonances)
+        if (r.hz > 0.0f)
+            resonances.add(juce::String(r.hz, 1) + " " + juce::String(r.prominenceDb, 1) + " " + juce::String(r.q, 1) + " "
+                           + juce::String(r.persistence, 2));
+    state.setProperty(resonancesProperty, resonances.joinIntoString(" "), nullptr);
 
     if (auto xml = state.createXml())
         copyXmlToBinary(*xml, destData);
@@ -1034,6 +1073,11 @@ void AgentProcessor::setStateInformation(const void* data, int sizeInBytes)
         result.levelP95 = stats[2].getDoubleValue();
         result.lowNoteHz = stats[3].getDoubleValue();
     }
+    const auto found = juce::StringArray::fromTokens(state.getProperty(resonancesProperty).toString(), " ", {});
+    result.resonances = {};
+    for (int r = 0; r < ma::kMaxResonances && r * 4 + 3 < found.size(); ++r)
+        result.resonances[static_cast<size_t>(r)] = { found[r * 4].getFloatValue(), found[r * 4 + 1].getFloatValue(),
+                                                      found[r * 4 + 2].getFloatValue(), found[r * 4 + 3].getFloatValue() };
     parameters.replaceState(state);
 }
 

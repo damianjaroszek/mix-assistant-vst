@@ -866,7 +866,10 @@ namespace
 bool sameCleanup(const ma::CleanupSettings& a, const ma::CleanupSettings& b)
 {
     return std::abs(a.hpfHz - b.hpfHz) < 1.0f && std::abs(a.monoBelowHz - b.monoBelowHz) < 1.0f
-           && std::abs(a.mudDb - b.mudDb) < 0.1f && (a.mudDb > -0.05f || std::abs(a.mudHz - b.mudHz) < 5.0f);
+           && std::abs(a.mudDb - b.mudDb) < 0.1f && (a.mudDb > -0.05f || std::abs(a.mudHz - b.mudHz) < 5.0f)
+           && std::equal(a.notches.begin(), a.notches.end(), b.notches.begin(), [](const auto& x, const auto& y) {
+                  return std::abs(x.db - y.db) < 0.1f && (x.db > -0.05f || std::abs(std::log2(x.hz / y.hz)) < 0.02);
+              });
 }
 
 bool sameCompressor(const ma::CompressorSettings& a, const ma::CompressorSettings& b)
@@ -882,7 +885,7 @@ juce::String noteName(double hz)
     return juce::String(names[((midi % 12) + 12) % 12]) + juce::String(midi / 12 - 1);
 }
 
-juce::String cleanupText(const ma::CleanupSettings& cleanup, ma::ChainPlan::HighPass reason, int crowd)
+juce::String cleanupText(const ma::CleanupSettings& cleanup, ma::ChainPlan::HighPass reason, int crowd, const ma::ChainPlan* plan = nullptr)
 {
     juce::StringArray parts;
     if (cleanup.hpfHz > 0.0f)
@@ -902,6 +905,17 @@ juce::String cleanupText(const ma::CleanupSettings& cleanup, ma::ChainPlan::High
     if (cleanup.mudDb < 0.0f)
         parts.add(pl("muł ") + juce::String(cleanup.mudDb, 1) + pl(" dB przy ") + hzText(cleanup.mudHz) + " ("
                   + juce::String(crowd) + pl(" kanały tłoczą się w 200–500 Hz)"));
+    for (size_t n = 0; n < cleanup.notches.size(); ++n)
+    {
+        const auto& notch = cleanup.notches[n];
+        if (notch.db > -0.01f)
+            continue;
+        auto part = pl("rezonans ") + juce::String(notch.db, 1) + pl(" dB przy ") + hzText(notch.hz) + " (Q " + juce::String(notch.q, 1);
+        if (plan != nullptr && plan->notchProminenceDb[n] > 0.0)
+            part += pl(", wystaje ") + juce::String(juce::roundToInt(plan->notchProminenceDb[n])) + pl(" dB i dzwoni stale")
+                    + (plan->notchCoversImportant[n] ? pl(", zasłania ważniejszy kanał") : juce::String());
+        parts.add(part + ")");
+    }
     return parts.joinIntoString(", ");
 }
 } // namespace
@@ -926,6 +940,8 @@ void BrainProcessor::proposeWholeMix()
         in.truePeakDb = channel.data.learnedTruePeakDb + channel.data.trimDb;
         in.lowNoteHz = channel.data.lowNoteHz;
         in.intentionalDrive = channel.data.intentionalDrive != 0;
+        for (int r = 0; r < ma::kMaxResonances; ++r)
+            in.resonances[static_cast<size_t>(r)] = channel.data.resonances[r];
     }
     ma::ChainContext context;
     context.bpm = tempoBpm();
@@ -968,7 +984,7 @@ void BrainProcessor::proposeWholeMix()
         {
             item.tool = Proposal::Item::ChainTool::cleanup;
             item.cleanup = plan.cleanup;
-            const auto text = cleanupText(plan.cleanup, plan.highPassReason, plan.mudCrowd);
+            const auto text = cleanupText(plan.cleanup, plan.highPassReason, plan.mudCrowd, &plan);
             item.text = name + (text.isEmpty() ? pl("porządki wyłączone, nie są potrzebne") : text);
             chainItems.push_back(item);
         }
@@ -1031,8 +1047,11 @@ Proposal::Verdict BrainProcessor::judge(size_t index, const ma::ChainPlan& plan)
     juce::StringArray attention;
 
     // Low end and mud.
-    const auto cleanup = cleanupText(plan.cleanup, plan.highPassReason, plan.mudCrowd);
+    const auto cleanup = cleanupText(plan.cleanup, plan.highPassReason, plan.mudCrowd, &plan);
     verdict.reasons.add(cleanup.isEmpty() ? pl("Dół i środek: nic do sprzątania.") : pl("Porządki: ") + cleanup + ".");
+    if (plan.resonancesBuried > 0)
+        verdict.reasons.add(pl("Rezonanse, których miks nie słyszy (zakryte przez resztę): ") + juce::String(plan.resonancesBuried)
+                            + pl(", zostają bez cięcia."));
 
     // Dynamics.
     if (!plan.dynamicsKnown)

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ChannelChain.h"
+#include "Resonance.h"
 #include "ChannelEq.h"
 #include "Ducker.h"
 #include "Harmonics.h"
@@ -25,7 +26,7 @@ namespace ma::bus
 {
 
 constexpr std::uint32_t kMagic = 0x4D414255; // "MABU"
-constexpr std::uint32_t kVersion = 7;
+constexpr std::uint32_t kVersion = 8;
 constexpr int kMaxSlots = 128;
 constexpr int kNameLength = 48;
 constexpr int kBands = 40;            // ERB bands, as SpectrumAnalyzer with BandScale::erb
@@ -84,6 +85,7 @@ struct AgentData
     float compressorReductionDb;        // meters, about the last second
     float clipperDb;
     float evenerGainDb;
+    Resonance resonances[kMaxResonances]; // found on the last Learn pass, strongest first
 };
 
 // Note lengths for a tempo-synced duck release, indexed by AgentData::duckSync.

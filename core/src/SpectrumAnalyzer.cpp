@@ -95,6 +95,10 @@ void SpectrumAnalyzer::prepare(double newSampleRate, BandScale newScale, int fft
         j ^= bit;
         bitReversed[static_cast<size_t>(i)] = j;
     }
+    const auto bins = static_cast<size_t>(trackBins ? fftSize / 2 : 0);
+    binSum.assign(bins, 0.0);
+    binFrame.assign(bins, 0.0);
+    binPeaks.assign(bins, 0);
     twiddles.resize(static_cast<size_t>(fftSize / 2));
     for (int k = 0; k < fftSize / 2; ++k)
         twiddles[static_cast<size_t>(k)] = std::polar(1.0, -2.0 * kPi * k / fftSize);
@@ -111,6 +115,9 @@ void SpectrumAnalyzer::reset()
     sum.fill(0.0);
     recent.fill(0.0);
     frames = 0;
+    std::fill(binSum.begin(), binSum.end(), 0.0);
+    std::fill(binPeaks.begin(), binPeaks.end(), 0);
+    active = 0;
 }
 
 void SpectrumAnalyzer::process(const float* const* channels, int numChannels, int numSamples)
@@ -151,6 +158,9 @@ void SpectrumAnalyzer::analyseFrame()
             frame[static_cast<size_t>(band)] += std::norm(buffer[static_cast<size_t>(bin)]) * powerScale;
     }
 
+    if (trackBins)
+        trackFrameBins();
+
     for (int b = 0; b < bandCount; ++b)
     {
         sum[static_cast<size_t>(b)] += frame[static_cast<size_t>(b)];
@@ -159,6 +169,34 @@ void SpectrumAnalyzer::analyseFrame()
             : recentSmoothing * recent[static_cast<size_t>(b)] + (1.0 - recentSmoothing) * frame[static_cast<size_t>(b)];
     }
     ++frames;
+}
+
+void SpectrumAnalyzer::trackFrameBins()
+{
+    const int bins = fftSize / 2;
+    double total = 0.0;
+    for (int bin = 1; bin < bins; ++bin)
+    {
+        const double p = std::norm(buffer[static_cast<size_t>(bin)]) * powerScale;
+        binFrame[static_cast<size_t>(bin)] = p;
+        binSum[static_cast<size_t>(bin)] += p;
+        total += p;
+    }
+    if (total < 1e-8) // under -80 dBFS: a break, not the sound
+        return;
+    ++active;
+    for (int bin = 4; bin < bins - 4; ++bin)
+    {
+        const int d = std::max(3, static_cast<int>(bin * 0.12)); // about 1/6 octave
+        if (bin + d >= bins)
+            break;
+        const double p = binFrame[static_cast<size_t>(bin)];
+        if (p < binFrame[static_cast<size_t>(bin - 1)] || p < binFrame[static_cast<size_t>(bin + 1)])
+            continue;
+        const double around = 0.5 * (binFrame[static_cast<size_t>(bin - d)] + binFrame[static_cast<size_t>(bin + d)]);
+        if (p > 2.5 * around) // 4 dB over the neighbourhood
+            ++binPeaks[static_cast<size_t>(bin)];
+    }
 }
 
 void SpectrumAnalyzer::fft(std::vector<std::complex<double>>& data) const

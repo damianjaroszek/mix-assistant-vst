@@ -83,6 +83,7 @@ public:
         // Dynamics of the passage for the Brain's engineer pass (pre-trim).
         bool statsValid = false;
         double levelP10 = -200.0, levelP50 = -200.0, levelP95 = -200.0, lowNoteHz = 0.0;
+        ma::Resonances resonances {}; // narrow peaks that stood out through the passage
     };
     LearnResult lastResult() const;
 
@@ -153,6 +154,10 @@ public:
     static constexpr const char* mudFreqId = "mudFreq";
     static constexpr const char* mudGainId = "mudGain";
     static constexpr const char* mudQId = "mudQ";
+    // Resonance cuts: frequency, gain, Q per notch. Plain strings, so the audio thread reads them without allocating.
+    static constexpr const char* notchIds[3][3] { { "res1Freq", "res1Gain", "res1Q" },
+                                                  { "res2Freq", "res2Gain", "res2Q" },
+                                                  { "res3Freq", "res3Gain", "res3Q" } };
     static constexpr const char* compOnId = "compOn";
     static constexpr const char* compThresholdId = "compThreshold";
     static constexpr const char* compRatioId = "compRatio";
@@ -292,7 +297,7 @@ private:
     std::atomic<float> backupTrimAudio { 0.0f };
     std::array<std::array<std::atomic<float>, 3>, ma::kEqBands> backupEqAudio {};
     // DuckSettings (8), sync, polarity, harmonics (3), transients (3), cleanup (5), compressor (7), clipper (3), evener (3)
-    static constexpr int kDynamicValues = 34;
+    static constexpr int kDynamicValues = 43;
     std::array<std::atomic<float>, kDynamicValues> backupDynamicsAudio {};
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(AgentProcessor)

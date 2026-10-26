@@ -47,11 +47,23 @@ public:
     Bands recentDb() const;
 
     int framesAnalysed() const { return frames; }
+
+    // Fine per-bin statistics for finding resonances (the Learn pass only). Switch on before
+    // prepare(), which allocates them. A bin "stands out" in a frame when it is a narrow peak
+    // over its neighbours a sixth of an octave away; a resonance does so in most frames,
+    // a moving melody's harmonics do not.
+    void setTrackBins(bool shouldTrack) { trackBins = shouldTrack; }
+    int numBins() const { return fftSize / 2; }
+    double binHz() const { return sampleRate / fftSize; }
+    const std::vector<double>& binPowerSum() const { return binSum; }
+    const std::vector<int>& binStandsOut() const { return binPeaks; }
+    int activeFrames() const { return active; }
     // Mean-square power per band of the newest frame (linear, not dB).
     const Bands& lastFramePower() const { return frame; }
 
 private:
     void analyseFrame();
+    void trackFrameBins();
     void fft(std::vector<std::complex<double>>& data) const;
 
     BandScale bandScale = BandScale::thirdOctave;
@@ -69,6 +81,11 @@ private:
     std::vector<int> bitReversed;
     std::vector<std::complex<double>> twiddles; // e^(-2 pi i k / fftSize), k < fftSize / 2
     double powerScale = 1.0;
+
+    bool trackBins = false;
+    std::vector<double> binSum, binFrame;
+    std::vector<int> binPeaks;
+    int active = 0;
 
     Bands frame {};
     Bands sum {};
