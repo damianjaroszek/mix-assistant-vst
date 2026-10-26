@@ -30,7 +30,7 @@ private:
     juce::Slider ceilingSlider;
     juce::TextButton resetButton;
     juce::ToggleButton profilesButton;
-    juce::TextButton channelsViewButton, tonalViewButton, translationViewButton, stereoViewButton, verdictViewButton;
+    juce::TextButton channelsViewButton, tonalViewButton, translationViewButton, stereoViewButton, stemsViewButton, verdictViewButton;
     ma::ui::CoherenceView stereoView;
     brain::VerdictView verdictView;
     juce::Viewport verdictViewport;
@@ -40,7 +40,16 @@ private:
     juce::ComboBox targetBox;
     juce::TextButton newTargetButton, captureButton, removeReferenceButton;
     brain::TonalView tonalView;
-    enum class View { channels, tonal, translation, stereo, verdict };
+    // Phase 9: stem references.
+    brain::StemView stemView;
+    juce::ComboBox stemBox;
+    juce::TextButton newStemsButton, loadStemsButton, removeStemsButton;
+    std::unique_ptr<juce::FileChooser> stemChooser;
+    juce::String shownStems;
+    void refreshStemTargets();
+    void askForNewStemTarget();
+    void chooseStems();
+    enum class View { channels, tonal, translation, stereo, stems, verdict };
     void showView(View view);
     View currentView = View::channels;
     void refreshTargets();

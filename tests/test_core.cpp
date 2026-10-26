@@ -16,6 +16,7 @@
 #include "ma/Resonance.h"
 #include "ma/Stereo.h"
 #include "ma/StereoPlanner.h"
+#include "ma/StemReference.h"
 #include "ma/EqualLoudness.h"
 #include "ma/GainStaging.h"
 #include "ma/LevelStats.h"
@@ -1465,6 +1466,200 @@ void testStereo()
           "the sum's anti-phase range is reported");
 }
 
+void testStems()
+{
+    using ma::StemGroup;
+    // File names: the track's title is shared and ignored, Demucs and Polish names work.
+    const auto titled = ma::stemGroupsFromNames({ "Bassline Dream - drums.wav", "Bassline Dream - bass.wav",
+                                                  "Bassline Dream - vocals.wav", "Bassline Dream - other.wav",
+                                                  "Bassline Dream - full mix.wav" });
+    check(titled == std::vector<int> { 0, 1, 2, 3, ma::kStemFullMix }, "stem names: a shared title is ignored");
+    check(ma::stemGroupsFromNames({ "drums.wav", "bass.wav", "vocals.wav", "other.wav" }) == std::vector<int> { 0, 1, 2, 3 },
+          "stem names: Demucs");
+    check(ma::stemGroupsFromNames({ "utwor perkusja.wav", "utwor bas.wav", "utwor wokal.wav", "utwor reszta.wav" })
+              == std::vector<int> { 0, 1, 2, 3 },
+          "stem names: Polish");
+    check(ma::stemGroupForRole(ma::Role::kick) == 0 && ma::stemGroupForRole(ma::Role::pad) == 3
+              && ma::stemGroupForRole(ma::Role::send) == -1,
+          "roles map to stem groups, sends are left out");
+
+    // A synthetic reference: 10 s of a quiet intro (pads only), then a 20 s drop with everything.
+    constexpr double sr = 48000.0, pi = 3.14159265358979323846;
+    const int total = static_cast<int>(30.0 * sr);
+    std::array<std::vector<float>, 4> left, right;
+    for (auto& v : left)
+        v.assign(static_cast<size_t>(total), 0.0f);
+    for (auto& v : right)
+        v.assign(static_cast<size_t>(total), 0.0f);
+    unsigned noise = 1;
+    auto random = [&]() {
+        noise = noise * 1664525u + 1013904223u;
+        return static_cast<double>(noise) / 4294967296.0 * 2.0 - 1.0;
+    };
+    double hatState = 0.0;
+    for (int i = 0; i < total; ++i)
+    {
+        const double t = i / sr;
+        const bool dropOn = t >= 10.0;
+        const double beat = std::fmod(t, 0.5);
+        // Drums: a kick every beat plus a high-passed hat, mono.
+        const double kick = beat < 0.15 ? 0.6 * std::exp(-beat * 25.0) * std::sin(2 * pi * 55.0 * beat * (1.0 + 2.0 * std::exp(-beat * 40.0))) : 0.0;
+        const double white = random();
+        const double hat = 0.08 * (white - hatState) * (std::fmod(t + 0.25, 0.5) < 0.05 ? 1.0 : 0.0);
+        hatState = white;
+        const double drums = dropOn ? kick + hat : 0.0;
+        const double bass = dropOn ? 0.25 * std::sin(2 * pi * 55.0 * t) + 0.08 * std::sin(2 * pi * 110.0 * t) : 0.0;
+        const double vocal = dropOn ? 0.08 * std::sin(2 * pi * 440.0 * t) + 0.05 * std::sin(2 * pi * 1320.0 * t) + 0.03 * std::sin(2 * pi * 3000.0 * t) : 0.0;
+        // Pads: wide (detuned left and right), quieter in the intro.
+        const double padGain = dropOn ? 0.12 : 0.04;
+        const double padL = padGain * (std::sin(2 * pi * 330.0 * t) + std::sin(2 * pi * 2200.0 * t));
+        const double padR = padGain * (std::sin(2 * pi * 331.5 * t + 1.0) + std::sin(2 * pi * 2208.0 * t + 2.0));
+        const auto at = static_cast<size_t>(i);
+        left[0][at] = right[0][at] = static_cast<float>(drums);
+        left[1][at] = right[1][at] = static_cast<float>(bass);
+        left[2][at] = right[2][at] = static_cast<float>(vocal);
+        left[3][at] = static_cast<float>(padL);
+        right[3][at] = static_cast<float>(padR);
+    }
+    std::vector<float> mixL(static_cast<size_t>(total)), mixR(static_cast<size_t>(total));
+    auto profileOf = [&](bool withVocalsInMix) {
+        for (size_t i = 0; i < mixL.size(); ++i)
+        {
+            mixL[i] = left[0][i] + left[1][i] + left[3][i] + (withVocalsInMix ? left[2][i] : 0.0f);
+            mixR[i] = right[0][i] + right[1][i] + right[3][i] + (withVocalsInMix ? right[2][i] : 0.0f);
+        }
+        ma::StemProfiler profiler;
+        profiler.prepare(sr, true);
+        const int n = profiler.blockLength();
+        std::vector<float> sumL(static_cast<size_t>(n)), sumR(static_cast<size_t>(n));
+        for (int start = 0; start < total; start += n)
+        {
+            const int len = std::min(n, total - start);
+            for (int i = 0; i < len; ++i)
+            {
+                const auto at = static_cast<size_t>(start + i);
+                sumL[static_cast<size_t>(i)] = left[0][at] + left[1][at] + left[2][at] + left[3][at];
+                sumR[static_cast<size_t>(i)] = right[0][at] + right[1][at] + right[2][at] + right[3][at];
+            }
+            profiler.measureBlock(sumL.data(), sumR.data(), len);
+        }
+        profiler.chooseDrop();
+        int index = 0;
+        for (int start = 0; start < total; start += n, ++index)
+        {
+            const int len = std::min(n, total - start);
+            std::array<const float*, 4> l {}, r {};
+            for (size_t g = 0; g < 4; ++g)
+            {
+                l[g] = left[g].data() + start;
+                r[g] = right[g].data() + start;
+            }
+            profiler.analyseBlock(index, l, r, mixL.data() + start, mixR.data() + start, len);
+        }
+        return profiler.finish("synthetic");
+    };
+    const auto profile = profileOf(true);
+    const auto& groups = profile.measure.groups;
+    check(profile.measure.valid && groups[0].present && groups[1].present && groups[2].present && groups[3].present,
+          "every stem is measured");
+    checkNear(profile.dropSeconds, 20.0, 3.5, "the drop is found (s)");
+    check(groups[1].shapeValid[0] && groups[1].shapeDb[0] > 0.0 && !groups[1].shapeValid[5], "bass: weight in the sub, nothing in the air");
+    check(groups[3].widthValid && groups[3].width > 0.3 && groups[1].width < 0.05, "pads are wide, bass is mono");
+    check(profile.separationErrorDb >= 0.0 && profile.separationErrorDb < 0.5, "stems that add up to the mix pass the check");
+    check(profileOf(false).separationErrorDb > 1.0, "a stem missing from the sum shows in the check");
+
+    ma::StemTarget target;
+    target.name = "test";
+    target.profiles.push_back(profile);
+    target.rebuild();
+    ma::StemTarget parsed;
+    check(ma::parseStemTarget(ma::serialiseStemTarget(target), parsed) && parsed.profiles.size() == 1
+              && std::abs(parsed.level[1].centre - target.level[1].centre) < 0.01
+              && parsed.shape[1][5].valid == target.shape[1][5].valid && parsed.profiles[0].name == "synthetic",
+          "stem target file round trip");
+
+    // Our mix: the same groups, the bass 5 dB too loud and the vocal thin in the presence region.
+    auto bandsOf = [](const ma::SpectrumAnalyzer::Bands& tilt, double offset) {
+        auto out = tilt;
+        for (auto& v : out)
+            v += offset;
+        return out;
+    };
+    std::array<ma::SpectrumAnalyzer::Bands, 4> ref {}, side {};
+    {
+        // Spectra that make the reference measure as `profile` does are not needed: build both
+        // sides from the same simple spectra instead.
+        for (int g = 0; g < 4; ++g)
+        {
+            ref[static_cast<size_t>(g)].fill(-200.0);
+            side[static_cast<size_t>(g)].fill(-200.0);
+        }
+        for (int b = 0; b < 40; ++b)
+        {
+            const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+            const auto at = static_cast<size_t>(b);
+            ref[0][at] = -30.0 - 6.0 * std::abs(std::log2(hz / 80.0)) * (hz < 80.0 ? 2.0 : 0.6);
+            ref[1][at] = hz < 400.0 ? -28.0 - 20.0 * std::max(0.0, std::log2(hz / 120.0)) : -200.0;
+            ref[2][at] = hz > 150.0 && hz < 9000.0 ? -36.0 : -200.0;
+            ref[3][at] = hz > 200.0 && hz < 14000.0 ? -38.0 : -200.0;
+            side[3][at] = ref[3][at] - 3.0;
+        }
+    }
+    const std::array<bool, 4> all { true, true, true, true };
+    ma::StemTarget simple;
+    simple.name = "simple";
+    simple.profiles.push_back({ "ref", ma::measureStemGroups(ref, side, all), 20.0, -1.0 });
+    simple.rebuild();
+
+    auto ours = ref;
+    ours[1] = bandsOf(ref[1], 5.0);
+    const auto comparison = ma::compareStems(ma::measureStemGroups(ours, side, all), simple);
+    check(comparison.valid && comparison.groups[1].compared && comparison.groups[1].levelDeviationDb > 1.0,
+          "a bass too loud against the references shows");
+    const auto levels = ma::planStemLevels(ours, all, simple);
+    check(levels.any && levels.gainDb[1] < -1.0 && levels.gainDb[1] >= -3.0, "the bass group is turned down, at most 3 dB a pass");
+    auto applied = ours;
+    for (size_t g = 0; g < 4; ++g)
+        applied[g] = bandsOf(ours[g], levels.gainDb[g]);
+    const auto second = ma::planStemLevels(applied, all, simple);
+    auto settled = applied;
+    for (size_t g = 0; g < 4; ++g)
+        settled[g] = bandsOf(applied[g], second.gainDb[g]);
+    check(!ma::planStemLevels(settled, all, simple).any, "planning again once it is in the corridor changes nothing");
+
+    // The solver gives the vocal its presence back on its own channel.
+    auto thin = ref;
+    for (int b = 0; b < 40; ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        if (hz >= 2000.0 && hz < 5500.0)
+            thin[2][static_cast<size_t>(b)] -= 6.0;
+    }
+    std::vector<ma::SolverChannel> channels(4);
+    ma::StemShapeInput stems;
+    stems.target = &simple;
+    for (size_t c = 0; c < 4; ++c)
+    {
+        channels[c].rawDb = thin[c];
+        channels[c].priority = c == 2 ? 1 : 5;
+        channels[c].valid = true;
+        stems.groupOf.push_back(static_cast<int>(c));
+        stems.dropDb.push_back(thin[c]);
+        stems.dropSideDb.push_back(side[c]);
+    }
+    ma::SolverOptions options;
+    options.stems = &stems;
+    const auto solved = ma::solve(channels, options);
+    const auto boost = std::find_if(solved.changes.begin(), solved.changes.end(),
+                                    [](const auto& c) { return c.kind == ma::SolverChange::Kind::stemBoost; });
+    check(boost != solved.changes.end() && boost->channel == 2 && boost->group == 2 && boost->lowHz >= 1999.0 && boost->gainDb >= 1.0
+              && boost->gainDb <= 3.0,
+          "a vocal thin in the presence gets a broad boost there");
+    // Solved from the same pre-EQ spectra, so solving again gives the same EQ.
+    const auto again = ma::solve(channels, options);
+    check(std::memcmp(&again.eq[2], &solved.eq[2], sizeof(ma::EqSettings)) == 0, "solving again does not stack the boost");
+}
+
 void testWavRoundTrip()
 {
     const auto a = sine(44100.0, 0.5, 2, 440.0, 0.25);
@@ -1503,6 +1698,7 @@ int main()
     testChainPlanner();
     testResonances();
     testStereo();
+    testStems();
     testWavRoundTrip();
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "OK" : "FAILED", failures, failures == 1 ? "" : "s");

@@ -27,7 +27,15 @@ jobs:
       - name: Configure
         run: cmake -S . -B build -A x64
       - name: Build
-        run: cmake --build build --config Release --parallel
+        shell: pwsh
+        run: |
+          # Compiler errors also go out as annotations, readable without the raw log.
+          cmake --build build --config Release --parallel 2>&1 | Tee-Object -FilePath build.log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            Select-String -Path build.log -Pattern ': (fatal )?error ' | Select-Object -First 10 | ForEach-Object { "::error::$($_.Line.Trim())" }
+          }
+          exit $code
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
       - name: Validate plugins (pluginval)

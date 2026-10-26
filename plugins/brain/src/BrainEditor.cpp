@@ -132,7 +132,7 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     proposalViewport.setScrollBarsShown(true, false);
     addAndMakeVisible(proposalViewport);
 
-    for (auto* button : { &channelsViewButton, &tonalViewButton, &translationViewButton, &stereoViewButton, &verdictViewButton })
+    for (auto* button : { &channelsViewButton, &tonalViewButton, &translationViewButton, &stereoViewButton, &stemsViewButton, &verdictViewButton })
     {
         button->setClickingTogglesState(true);
         button->setRadioGroupId(1);
@@ -142,6 +142,7 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     }
     channelsViewButton.setButtonText(pl("Kanały"));
     tonalViewButton.setButtonText(pl("Balans tonalny"));
+    tonalViewButton.setTooltip(pl("Balans tonalny sumy wobec celu z referencji."));
     translationViewButton.setButtonText(pl("Translacja"));
     channelsViewButton.onClick = [this] { showView(View::channels); };
     tonalViewButton.onClick = [this] { showView(View::tonal); };
@@ -150,6 +151,28 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     stereoViewButton.setTooltip(pl("Faza w pasmach sumy, jak Correlometer: na dole przeciwfaza. Kropki: zaznaczony kanał."));
     stereoViewButton.onClick = [this] { showView(View::stereo); };
     addChildComponent(stereoView);
+    stemsViewButton.setButtonText(pl("Referencje"));
+    stemsViewButton.setTooltip(pl("Perkusja, bas, wokal i reszta wobec stemów referencji, drop do dropu: poziom, barwa, szerokość."));
+    stemsViewButton.onClick = [this] { showView(View::stems); };
+    addChildComponent(stemView);
+    stemBox.setTextWhenNothingSelected(pl("wybierz zestaw"));
+    stemBox.setColour(juce::ComboBox::backgroundColourId, colours::panel);
+    stemBox.onChange = [this] {
+        if (stemBox.getSelectedId() > 0)
+            processor.selectStemTarget(stemBox.getText());
+    };
+    addChildComponent(stemBox);
+    styleButton(newStemsButton, pl("Nowy zestaw"));
+    styleButton(loadStemsButton, pl("Wczytaj stemy..."));
+    styleButton(removeStemsButton, pl("Usuń ostatnią"));
+    loadStemsButton.setTooltip(pl("Zaznacz stemy jednego utworu referencyjnego (drums, bass, vocals, other z FL Studio albo Demucs) "
+                                  "i, jeśli masz, cały utwór („mix”) do sprawdzenia separacji."));
+    newStemsButton.onClick = [this] { askForNewStemTarget(); };
+    loadStemsButton.onClick = [this] { chooseStems(); };
+    removeStemsButton.onClick = [this] { processor.removeLastStemProfile(); };
+    for (auto* c : std::initializer_list<juce::Component*> { &newStemsButton, &loadStemsButton, &removeStemsButton })
+        addChildComponent(c);
+    refreshStemTargets();
     verdictViewButton.setButtonText(pl("Werdykt"));
     verdictViewButton.onClick = [this] { showView(View::verdict); };
     verdictView.onSelect = [this](std::uint64_t owner) { select(owner == selected ? 0 : owner); };
@@ -219,6 +242,8 @@ void BrainEditor::showView(View view)
     translationView.setVisible(view == View::translation);
     verdictViewport.setVisible(view == View::verdict);
     stereoView.setVisible(view == View::stereo);
+    for (auto* c : std::initializer_list<juce::Component*> { &stemView, &stemBox, &newStemsButton, &loadStemsButton, &removeStemsButton })
+        c->setVisible(view == View::stems);
     overlayLabel.setVisible(false);
     for (auto* c : std::initializer_list<juce::Component*> { &tonalView, &targetBox, &newTargetButton, &captureButton, &removeReferenceButton })
         c->setVisible(tonal);
@@ -235,6 +260,47 @@ void BrainEditor::refreshTargets()
     const int index = names.indexOf(current);
     if (index >= 0)
         targetBox.setSelectedId(index + 1, juce::dontSendNotification);
+}
+
+void BrainEditor::refreshStemTargets()
+{
+    stemBox.clear(juce::dontSendNotification);
+    const auto names = processor.stemTargetNames();
+    stemBox.addItemList(names, 1);
+    const auto current = juce::String::fromUTF8(processor.stemTarget().name.c_str());
+    shownStems = current;
+    const int index = names.indexOf(current);
+    if (index >= 0)
+        stemBox.setSelectedId(index + 1, juce::dontSendNotification);
+}
+
+void BrainEditor::askForNewStemTarget()
+{
+    nameDialog = std::make_unique<juce::AlertWindow>(pl("Nowy zestaw referencji"),
+                                                     pl("Nazwa zestawu, np. „Tech house”. Potem wczytaj do niego stemy kilku utworów."),
+                                                     juce::MessageBoxIconType::NoIcon, this);
+    nameDialog->addTextEditor("name", {}, pl("Nazwa"));
+    nameDialog->addButton("OK", 1, juce::KeyPress(juce::KeyPress::returnKey));
+    nameDialog->addButton(pl("Anuluj"), 0, juce::KeyPress(juce::KeyPress::escapeKey));
+    nameDialog->enterModalState(true, juce::ModalCallbackFunction::create([this](int result) {
+        if (result == 1 && nameDialog != nullptr && processor.createStemTarget(nameDialog->getTextEditorContents("name")))
+            refreshStemTargets();
+        nameDialog.reset();
+    }));
+}
+
+void BrainEditor::chooseStems()
+{
+    stemChooser = std::make_unique<juce::FileChooser>(pl("Stemy jednego utworu referencyjnego"), juce::File(),
+                                                      "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.ogg");
+    const auto mode = juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles
+                      | juce::FileBrowserComponent::canSelectMultipleItems;
+    stemChooser->launchAsync(mode, [this](const juce::FileChooser& chooser) {
+        const auto files = chooser.getResults();
+        if (!files.isEmpty())
+            processor.loadStems(files);
+        timerCallback();
+    });
 }
 
 void BrainEditor::askForNewTarget()
@@ -315,6 +381,34 @@ void BrainEditor::timerCallback()
         tonalStatus = pl("Cel „") + targetName + "\" (" + juce::String(static_cast<int>(target.references.size()))
                       + pl(" ref.), miks z ") + juce::String(juce::roundToInt(processor.secondsAnalysed())) + " s";
     tonalView.setData(target, mix.tonal, tonalStatus);
+
+    const auto& stems = processor.stemTarget();
+    const auto stemsName = juce::String::fromUTF8(stems.name.c_str());
+    if (shownStems != stemsName)
+        refreshStemTargets();
+    juce::String stemStatus;
+    bool stemWarning = false;
+    if (processor.isAnalysingStems())
+        stemStatus = pl("Analizuję stemy: ") + juce::String(juce::roundToInt(processor.stemProgress() * 100.0)) + "%";
+    else if (stemsName.isEmpty())
+        stemStatus = pl("Utwórz zestaw („Nowy zestaw”) i wczytaj stemy utworów referencyjnych (drums, bass, vocals, other).");
+    else if (processor.stemMessage().isNotEmpty())
+    {
+        stemStatus = processor.stemMessage();
+        stemWarning = processor.stemMessageIsWarning();
+    }
+    else if (!stems.valid())
+        stemStatus = pl("Zestaw „") + stemsName + pl("” jest pusty. Kliknij „Wczytaj stemy...”.");
+    else if (!mix.stems.valid)
+        stemStatus = pl("Zestaw „") + stemsName + "\" (" + juce::String(static_cast<int>(stems.profiles.size()))
+                     + pl(" ref.). Puść drop swojego utworu: ") + juce::String(juce::roundToInt(mix.dropSeconds)) + " / "
+                     + juce::String(juce::roundToInt(BrainProcessor::kMinimumDropSeconds)) + " s";
+    else
+        stemStatus = pl("Zestaw „") + stemsName + "\" (" + juce::String(static_cast<int>(stems.profiles.size()))
+                     + pl(" ref.), drop miksu: ") + juce::String(juce::roundToInt(mix.dropSeconds)) + " s";
+    stemView.setData(stems, mix.stems, stemStatus, stemWarning);
+    loadStemsButton.setEnabled(stemsName.isNotEmpty() && !processor.isAnalysingStems());
+    removeStemsButton.setEnabled(stems.valid() && !processor.isAnalysingStems());
     translationView.setData(mix);
     {
         std::array<double, ma::ui::CoherenceView::kBands> sum {}, channel {};
@@ -438,11 +532,13 @@ void BrainEditor::resized()
     auto overlayHeader = area.removeFromTop(24);
     channelsViewButton.setBounds(overlayHeader.removeFromLeft(90));
     overlayHeader.removeFromLeft(4);
-    tonalViewButton.setBounds(overlayHeader.removeFromLeft(120));
+    tonalViewButton.setBounds(overlayHeader.removeFromLeft(110));
     overlayHeader.removeFromLeft(4);
     translationViewButton.setBounds(overlayHeader.removeFromLeft(100));
     overlayHeader.removeFromLeft(4);
-    stereoViewButton.setBounds(overlayHeader.removeFromLeft(80));
+    stereoViewButton.setBounds(overlayHeader.removeFromLeft(70));
+    overlayHeader.removeFromLeft(4);
+    stemsViewButton.setBounds(overlayHeader.removeFromLeft(95));
     overlayHeader.removeFromLeft(4);
     verdictViewButton.setBounds(overlayHeader.removeFromLeft(90));
     profilesButton.setBounds(overlayHeader.removeFromRight(170));
@@ -465,6 +561,19 @@ void BrainEditor::resized()
         removeReferenceButton.setBounds(controls.removeFromLeft(110));
         viewArea.removeFromTop(4);
         tonalView.setBounds(viewArea);
+    }
+    if (stemView.isVisible())
+    {
+        auto controls = viewArea.removeFromTop(26);
+        stemBox.setBounds(controls.removeFromLeft(170));
+        controls.removeFromLeft(6);
+        newStemsButton.setBounds(controls.removeFromLeft(110));
+        controls.removeFromLeft(6);
+        loadStemsButton.setBounds(controls.removeFromLeft(140));
+        controls.removeFromLeft(6);
+        removeStemsButton.setBounds(controls.removeFromLeft(110));
+        viewArea.removeFromTop(4);
+        stemView.setBounds(viewArea);
     }
     area.removeFromTop(10);
     issuesLabel.setBounds(area.removeFromTop(22));

@@ -774,4 +774,127 @@ private:
     std::uint64_t selected = 0;
 };
 
+// Phase 9: drums, bass, vocals and the rest against the stem references, drop to drop:
+// level against the whole mix (corridor and our dot), shape per region, width.
+class StemView : public juce::Component
+{
+public:
+    void setData(const ma::StemTarget& newTarget, const ma::StemComparison& newComparison, const juce::String& newStatus,
+                 bool newWarning)
+    {
+        target = newTarget;
+        comparison = newComparison;
+        status = newStatus;
+        warning = newWarning;
+        repaint();
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        namespace colours = ma::ui::colours;
+        using ma::ui::pl;
+        auto area = getLocalBounds().toFloat();
+        g.setColour(colours::panel);
+        g.fillRoundedRectangle(area, 4.0f);
+        area = area.reduced(8.0f, 6.0f);
+
+        g.setFont(juce::FontOptions(12.5f));
+        g.setColour(warning ? colours::warning : colours::quiet);
+        g.drawFittedText(status, area.removeFromTop(32.0f).toNearestInt(), juce::Justification::topLeft, 2);
+        if (!target.valid())
+            return;
+
+        constexpr float nameWidth = 90.0f, levelWidth = 190.0f, widthWidth = 92.0f;
+        const float regionWidth = (area.getWidth() - nameWidth - levelWidth - widthWidth - 12.0f) / ma::kStemRegions;
+        const char* const regions[ma::kStemRegions] { "sub", "bas", "dół-środek", "środek", "prezencja", "powietrze" };
+
+        auto header = area.removeFromTop(16.0f);
+        g.setFont(juce::FontOptions(10.5f));
+        g.setColour(colours::quiet);
+        header.removeFromLeft(nameWidth);
+        g.drawText(pl("poziom wobec całości (dB)"), header.removeFromLeft(levelWidth), juce::Justification::centredLeft);
+        header.removeFromLeft(6.0f);
+        for (int r = 0; r < ma::kStemRegions; ++r)
+            g.drawText(pl(regions[r]), header.removeFromLeft(regionWidth), juce::Justification::centred);
+        header.removeFromLeft(6.0f);
+        g.drawText(pl("szerokość"), header, juce::Justification::centred);
+
+        const float rowHeight = std::min(34.0f, area.getHeight() / ma::kStemGroups);
+        constexpr double lowest = -30.0, highest = 0.0;
+        for (int group = 0; group < ma::kStemGroups; ++group)
+        {
+            auto row = area.removeFromTop(rowHeight).reduced(0.0f, 2.0f);
+            const auto& c = comparison.groups[static_cast<size_t>(group)];
+            const auto& corridor = target.level[static_cast<size_t>(group)];
+
+            g.setFont(juce::FontOptions(12.5f));
+            g.setColour(corridor.valid ? colours::text : colours::quiet);
+            static const char* const names[ma::kStemGroups] { "Perkusja", "Bas", "Wokal", "Reszta" };
+            g.drawText(pl(names[group]), row.removeFromLeft(nameWidth), juce::Justification::centredLeft);
+
+            // Level: the references' corridor, our dot.
+            auto level = row.removeFromLeft(levelWidth);
+            auto bar = level.withSizeKeepingCentre(level.getWidth() - 40.0f, 8.0f).withX(level.getX());
+            const auto xOf = [&bar, lowest, highest](double db) {
+                return bar.getX() + static_cast<float>(bar.getWidth() * (juce::jlimit(lowest, highest, db) - lowest) / (highest - lowest));
+            };
+            g.setColour(colours::background);
+            g.fillRoundedRectangle(bar, 3.0f);
+            if (corridor.valid)
+            {
+                g.setColour(colours::accent.withAlpha(0.5f));
+                g.fillRoundedRectangle(juce::Rectangle<float>::leftTopRightBottom(xOf(corridor.low), bar.getY(), xOf(corridor.high), bar.getBottom()), 3.0f);
+            }
+            g.setFont(juce::FontOptions(10.5f));
+            if (c.compared)
+            {
+                const auto colour = std::abs(c.levelDeviationDb) < 0.5 ? colours::good
+                                    : std::abs(c.levelDeviationDb) < 3.0 ? colours::warning : colours::critical;
+                g.setColour(colour);
+                g.fillEllipse(juce::Rectangle<float>(10.0f, 10.0f).withCentre({ xOf(c.levelDb), bar.getCentreY() }));
+                g.drawText(juce::String(c.levelDb, 1), level.removeFromRight(36.0f), juce::Justification::centredRight);
+            }
+            else
+            {
+                g.setColour(colours::quiet);
+                g.drawText(c.missing ? pl("brak") : "-", level.removeFromRight(36.0f), juce::Justification::centredRight);
+            }
+            row.removeFromLeft(6.0f);
+
+            // Shape per region: green inside the references, amber or red outside.
+            for (int r = 0; r < ma::kStemRegions; ++r)
+            {
+                auto cell = row.removeFromLeft(regionWidth).reduced(2.0f, 0.0f);
+                const bool compared = c.compared && c.shapeCompared[static_cast<size_t>(r)];
+                const double d = c.shapeDeviationDb[static_cast<size_t>(r)];
+                auto colour = !compared ? colours::background
+                              : std::abs(d) < 1.5 ? colours::good.withAlpha(0.35f)
+                              : std::abs(d) < 3.0 ? colours::warning.withAlpha(0.45f) : colours::critical.withAlpha(0.55f);
+                g.setColour(colour);
+                g.fillRoundedRectangle(cell, 3.0f);
+                g.setColour(compared ? colours::text : colours::quiet);
+                g.drawText(!compared ? juce::String("-") : std::abs(d) < 1.5 ? juce::String("ok")
+                                                                              : (d > 0.0 ? "+" : "") + juce::String(d, 1),
+                           cell, juce::Justification::centred);
+            }
+            row.removeFromLeft(6.0f);
+
+            // Width: side share, ours against the references.
+            const auto& w = target.width[static_cast<size_t>(group)];
+            g.setColour(c.widthCompared && std::abs(c.widthDeviation) >= 0.04 ? colours::warning : colours::quiet);
+            const auto widthText = c.widthCompared ? juce::String(juce::roundToInt(c.width * 100.0)) + "%" : juce::String("-");
+            const auto refText = w.valid ? " (" + juce::String(juce::roundToInt(w.low * 100.0)) + pl("–")
+                                               + juce::String(juce::roundToInt(w.high * 100.0)) + "%)"
+                                         : juce::String();
+            g.drawText(widthText + refText, row, juce::Justification::centred);
+        }
+    }
+
+private:
+    ma::StemTarget target;
+    ma::StemComparison comparison;
+    juce::String status;
+    bool warning = false;
+};
+
 } // namespace brain

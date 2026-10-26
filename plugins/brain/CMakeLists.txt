@@ -18,3 +18,6 @@ target_sources(MixAssistantBrain PRIVATE
     src/BrainEditor.cpp)
 
 ma_configure_plugin(MixAssistantBrain)
+
+# Stem references from online separators often come as MP3.
+target_compile_definitions(MixAssistantBrain PUBLIC JUCE_USE_MP3AUDIOFORMAT=1)

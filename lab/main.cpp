@@ -2,21 +2,27 @@
 //
 //   ma-lab [--target-rms -18] [--json] stem1.wav stem2.wav ...
 //   ma-lab --make-target "House" --out House.matarget ref1.wav ref2.wav ...
+//   ma-lab --add-stems "Tech house" --out "Tech house.mastems" drums.wav bass.wav vocals.wav other.wav [mix.wav]
 //
 // Prints loudness, peaks, RMS, crest factor and the gain-staging trim for each
 // file. With more than one file it also analyses their sum, i.e. the mix.
 // --make-target builds a tonal-balance target from reference tracks, the same file
 // the Brain writes when it records references; copy it to the Brain's targets folder.
+// --add-stems measures one reference track from its stems (the Brain's "Wczytaj stemy")
+// and adds it to a stem reference set, creating the file if needed.
 
 #include "ma/Decibels.h"
 #include "ma/LevelStats.h"
 #include "ma/LoudnessMeter.h"
 #include "ma/SpectrumAnalyzer.h"
+#include "ma/StemReference.h"
 #include "ma/TonalBalance.h"
 #include "ma/TruePeakMeter.h"
 #include "ma/Wav.h"
 
 #include <algorithm>
+#include <array>
+#include <iterator>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -180,7 +186,8 @@ void printJson(const std::vector<Report>& reports, double targetRmsDb)
 int usage()
 {
     std::fprintf(stderr, "usage: ma-lab [--target-rms dBFS] [--json] file.wav [file2.wav ...]\n"
-                         "       ma-lab --make-target NAME --out FILE.matarget ref.wav [ref2.wav ...]\n");
+                         "       ma-lab --make-target NAME --out FILE.matarget ref.wav [ref2.wav ...]\n"
+                         "       ma-lab --add-stems SET --out FILE.mastems drums.wav bass.wav vocals.wav other.wav [mix.wav]\n");
     return 2;
 }
 
@@ -221,6 +228,153 @@ int makeTarget(const std::string& name, const std::string& out, const std::vecto
     return 0;
 }
 
+int addStems(const std::string& name, const std::string& out, const std::vector<std::string>& paths)
+{
+    const auto groups = ma::stemGroupsFromNames(paths);
+    std::vector<ma::AudioData> audio;
+    std::vector<int> kinds;
+    for (size_t i = 0; i < paths.size(); ++i)
+    {
+        if (groups[i] == ma::kStemUnknown)
+        {
+            std::fprintf(stderr, "error: cannot tell what %s is (name it drums/bass/vocals/other, or mix)\n", paths[i].c_str());
+            return 1;
+        }
+        audio.push_back(ma::readWav(paths[i]));
+        kinds.push_back(groups[i]);
+        if (audio.back().sampleRate != audio.front().sampleRate)
+        {
+            std::fprintf(stderr, "error: different sample rates\n");
+            return 1;
+        }
+    }
+    int length = audio.front().numSamples();
+    bool haveMix = false;
+    for (size_t i = 0; i < audio.size(); ++i)
+    {
+        length = std::min(length, audio[i].numSamples());
+        haveMix = haveMix || kinds[i] == ma::kStemFullMix;
+    }
+
+    ma::StemProfiler profiler;
+    profiler.prepare(audio.front().sampleRate, haveMix);
+    const int n = profiler.blockLength();
+    std::array<std::vector<float>, ma::kStemGroups> left, right;
+    std::vector<float> sumL, sumR, mixL, mixR;
+    std::array<bool, ma::kStemGroups> has {};
+    auto fill = [&](int start, int len) {
+        for (auto* v : { &sumL, &sumR, &mixL, &mixR })
+            v->assign(static_cast<size_t>(len), 0.0f);
+        for (int g = 0; g < ma::kStemGroups; ++g)
+        {
+            left[static_cast<size_t>(g)].assign(static_cast<size_t>(len), 0.0f);
+            right[static_cast<size_t>(g)].assign(static_cast<size_t>(len), 0.0f);
+        }
+        for (size_t i = 0; i < audio.size(); ++i)
+        {
+            const auto& a = audio[i];
+            const auto& l = a.channels.front();
+            const auto& r = a.numChannels() > 1 ? a.channels[1] : a.channels.front();
+            const bool mix = kinds[i] == ma::kStemFullMix;
+            for (int k = 0; k < len; ++k)
+            {
+                const auto at = static_cast<size_t>(start + k), to = static_cast<size_t>(k);
+                if (mix)
+                {
+                    mixL[to] += l[at];
+                    mixR[to] += r[at];
+                    continue;
+                }
+                left[static_cast<size_t>(kinds[i])][to] += l[at];
+                right[static_cast<size_t>(kinds[i])][to] += r[at];
+                sumL[to] += l[at];
+                sumR[to] += r[at];
+            }
+            if (!mix)
+                has[static_cast<size_t>(kinds[i])] = true;
+        }
+    };
+    for (int start = 0; start < length; start += n)
+    {
+        const int len = std::min(n, length - start);
+        fill(start, len);
+        profiler.measureBlock(sumL.data(), sumR.data(), len);
+    }
+    profiler.chooseDrop();
+    int block = 0;
+    for (int start = 0; start < length; start += n, ++block)
+    {
+        if (!profiler.inDrop(block))
+            continue;
+        const int len = std::min(n, length - start);
+        fill(start, len);
+        std::array<const float*, ma::kStemGroups> l {}, r {};
+        for (size_t g = 0; g < l.size(); ++g)
+            if (has[g])
+            {
+                l[g] = left[g].data();
+                r[g] = right[g].data();
+            }
+        profiler.analyseBlock(block, l, r, haveMix ? mixL.data() : nullptr, haveMix ? mixR.data() : nullptr, len);
+    }
+
+    // The reference's title: what the file names share.
+    std::string title = paths.front();
+    for (const auto& p : paths)
+    {
+        size_t same = 0;
+        while (same < title.size() && same < p.size() && title[same] == p[same])
+            ++same;
+        title.resize(same);
+    }
+    const auto slash = title.find_last_of("/\\");
+    if (slash != std::string::npos)
+        title = title.substr(slash + 1);
+    while (!title.empty() && std::string(" -_.(").find(title.back()) != std::string::npos)
+        title.pop_back();
+    const auto profile = profiler.finish(title.empty() ? "reference" : title);
+
+    ma::StemTarget target;
+    {
+        std::ifstream existing(out);
+        if (existing)
+        {
+            const std::string text((std::istreambuf_iterator<char>(existing)), std::istreambuf_iterator<char>());
+            if (!ma::parseStemTarget(text, target))
+            {
+                std::fprintf(stderr, "error: %s is not a stem reference set\n", out.c_str());
+                return 1;
+            }
+        }
+    }
+    target.name = name;
+    target.profiles.push_back(profile);
+    target.rebuild();
+    std::ofstream(out) << ma::serialiseStemTarget(target);
+
+    std::printf("\"%s\": drop %.0f s, separation %s\n", profile.name.c_str(), profile.dropSeconds,
+                profile.separationErrorDb < 0.0 ? "not checked" : (std::to_string(profile.separationErrorDb).substr(0, 4) + " dB").c_str());
+    const char* names[ma::kStemGroups] { "drums", "bass", "vocals", "music" };
+    for (int g = 0; g < ma::kStemGroups; ++g)
+    {
+        const auto& m = profile.measure.groups[static_cast<size_t>(g)];
+        if (!m.present)
+        {
+            std::printf("  %-7s -\n", names[g]);
+            continue;
+        }
+        std::printf("  %-7s level %6.1f dB  width %3.0f%%  shape", names[g], m.levelDb, m.width * 100.0);
+        for (int r = 0; r < ma::kStemRegions; ++r)
+            if (m.shapeValid[static_cast<size_t>(r)])
+                std::printf(" %+5.1f", m.shapeDb[static_cast<size_t>(r)]);
+            else
+                std::printf("     -");
+        std::printf("\n");
+    }
+    std::printf("set \"%s\" with %zu references written to %s\n", name.c_str(), target.profiles.size(), out.c_str());
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -228,7 +382,7 @@ int main(int argc, char** argv)
     double targetRmsDb = -18.0;
     bool asJson = false;
     std::vector<std::string> paths;
-    std::string targetName, targetOut;
+    std::string targetName, targetOut, stemsName;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -237,6 +391,8 @@ int main(int argc, char** argv)
             asJson = true;
         else if (arg == "--make-target" && i + 1 < argc)
             targetName = argv[++i];
+        else if (arg == "--add-stems" && i + 1 < argc)
+            stemsName = argv[++i];
         else if (arg == "--out" && i + 1 < argc)
             targetOut = argv[++i];
         else if (arg == "--target-rms" && i + 1 < argc)
@@ -246,13 +402,15 @@ int main(int argc, char** argv)
         else
             paths.push_back(arg);
     }
-    if (paths.empty() || (!targetName.empty() && targetOut.empty()))
+    if (paths.empty() || ((!targetName.empty() || !stemsName.empty()) && targetOut.empty()))
         return usage();
 
     try
     {
         if (!targetName.empty())
             return makeTarget(targetName, targetOut, paths);
+        if (!stemsName.empty())
+            return addStems(stemsName, targetOut, paths);
 
         std::vector<ma::AudioData> stems;
         std::vector<Report> reports;
