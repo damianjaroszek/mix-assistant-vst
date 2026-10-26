@@ -262,6 +262,7 @@ BrainProcessor::BrainProcessor()
 {
     peakCeiling = parameters.getRawParameterValue(peakCeilingId);
     adaptive = parameters.getRawParameterValue(adaptiveId);
+    masterTarget = parameters.getRawParameterValue(masterTargetId);
     for (auto& b : bands)
         b.store(-INFINITY);
     for (auto& b : averageBands)
@@ -297,6 +298,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout BrainProcessor::createLayout
         juce::NormalisableRange<float> { -12.0f, 0.0f, 0.5f }, -6.0f,
         juce::AudioParameterFloatAttributes().withLabel("dBTP")));
     layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { adaptiveId, 2 }, "Adaptive mode", false));
+    // Phase 11: the loudness the master will get in Ozone, for the master preview.
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID { masterTargetId, 3 }, "Master loudness target", juce::NormalisableRange<float> { -14.0f, -5.0f, 0.5f }, -8.0f,
+        juce::AudioParameterFloatAttributes().withLabel("LUFS")));
 
     return layout;
 }
@@ -319,6 +324,8 @@ void BrainProcessor::prepareToPlay(double sampleRate, int)
     correlation.prepare(sampleRate);
     masterStereo.prepare(sampleRate);
     keyDetector.prepare(sampleRate);
+    masterPreview.setGainDb(previewGainDb.load());
+    masterPreview.prepare(sampleRate, channels);
     simulator.prepare(sampleRate);
     stereo.store(channels >= 2);
     outputGain.reset(sampleRate, 0.1);
@@ -344,6 +351,8 @@ void BrainProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     }
     if (keyResetRequested.exchange(false))
         keyDetector.reset();
+    if (previewResetRequested.exchange(false))
+        masterPreview.reset();
 
     if (auto* head = getPlayHead())
         if (const auto position = head->getPosition())
@@ -377,6 +386,20 @@ void BrainProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         keyBass[k].store(static_cast<float>(keyDetector.bassChroma()[k]));
     }
     keySeconds.store(keyDetector.secondsHeard());
+
+    // The master preview hears the real mix too (before the listening simulation).
+    masterPreview.setGainDb(previewGainDb.load());
+    masterPreview.process(input, numChannels, numSamples);
+    {
+        const auto stats = masterPreview.stats();
+        previewSeconds.store(stats.seconds);
+        previewAverage.store(stats.averageReductionDb);
+        previewTypical.store(stats.typicalReductionDb);
+        previewMax.store(stats.maxReductionDb);
+        previewHeavy.store(stats.heavyShare);
+        previewLufs.store(stats.outputLufs);
+        previewPeak.store(stats.outputPeakDb);
+    }
 
     integrated.store(loudness.integratedLufs());
     shortTerm.store(loudness.shortTermLufs());
@@ -436,6 +459,7 @@ void BrainProcessor::timerCallback()
     collectChannels(*region, now);
     accumulateDrop();
     updateKey();
+    updatePreview();
     if (stemJob != nullptr && stemJob->done.load())
         finishStemJob();
 
@@ -958,6 +982,14 @@ void BrainProcessor::buildReport()
             item.detail = pl("Szczyt ") + juce::String(peak - ceiling, 1) + pl(" dB ponad limitem ")
                           + ma::ui::formatDb(ceiling, "dBTP") + pl(". Ścisz kanały (Agent: niższy cel) zamiast sumy.");
         }
+        report.push_back(item);
+    }
+
+    // Phase 11: will it stand being mastered loud?
+    {
+        MixSnapshot::ReportItem item;
+        item.title = pl("Gotowość do głośnego mastera");
+        item.detail = previewVerdict(item.status);
         report.push_back(item);
     }
 
@@ -2940,4 +2972,303 @@ void BrainProcessor::refreshKeyedStems()
 {
     keyedTo = trackKey();
     keyedStems = ma::keyedStemTarget(currentStems, keyedTo);
+}
+
+// Phase 11: the master preview and the report for mastering.
+
+ma::PreviewStats BrainProcessor::previewStats() const
+{
+    ma::PreviewStats s;
+    s.seconds = previewSeconds.load();
+    s.averageReductionDb = previewAverage.load();
+    s.typicalReductionDb = previewTypical.load();
+    s.maxReductionDb = previewMax.load();
+    s.heavyShare = previewHeavy.load();
+    s.outputLufs = previewLufs.load();
+    s.outputPeakDb = previewPeak.load();
+    return s;
+}
+
+void BrainProcessor::updatePreview()
+{
+    loudestShortTerm = std::max(loudestShortTerm, shortTermLufs());
+    // Agents publish the peak of their latest block; held here, so the report knows whose peaks reach highest.
+    for (const auto& channel : mix.channels)
+        if (std::isfinite(channel.data.outputPeakDb))
+        {
+            auto [it, added] = peakHold.try_emplace(channel.owner, channel.data.outputPeakDb);
+            if (!added)
+                it->second = std::max(it->second, channel.data.outputPeakDb);
+        }
+    const double integratedNow = integratedLufs();
+    if (!std::isfinite(integratedNow) || integratedNow < -60.0)
+        return;
+    const double wanted = juce::jlimit(-12.0, 24.0, static_cast<double>(masterTargetLufs()) - integratedNow);
+    // A big move (a new target, the first reading) starts the statistics over; small drifts of
+    // the integrated loudness just follow.
+    if (std::isnan(appliedPreviewGain) || std::abs(wanted - appliedPreviewGain) > 1.0)
+        previewResetRequested.store(true);
+    else if (std::abs(wanted - appliedPreviewGain) < 0.1)
+        return;
+    appliedPreviewGain = wanted;
+    previewGainDb.store(wanted);
+}
+
+juce::String BrainProcessor::loudestPeakChannel() const
+{
+    juce::String loudest;
+    float highest = -100.0f;
+    for (const auto& channel : mix.channels)
+    {
+        const auto held = peakHold.find(channel.owner);
+        if (held != peakHold.end() && held->second > highest)
+        {
+            highest = held->second;
+            loudest = channel.name;
+        }
+    }
+    return loudest;
+}
+
+juce::String BrainProcessor::previewVerdict(MixSnapshot::Status& status) const
+{
+    const auto s = previewStats();
+    const double target = masterTargetLufs();
+    const auto targetText = juce::String(target, 1) + " LUFS";
+    status = MixSnapshot::Status::unknown;
+    if (s.seconds < kMinimumPreviewSeconds)
+        return pl("Słucham: sprawdzam, jak miks zniesie podciągnięcie do ") + targetText + " ("
+               + juce::String(juce::roundToInt(s.seconds)) + " / " + juce::String(juce::roundToInt(kMinimumPreviewSeconds)) + " s).";
+    const auto base = pl("Podciągnięty do ") + targetText + pl(" limiter ścina w głośnej części do ")
+                      + juce::String(s.typicalReductionDb, 1) + pl(" dB (najwięcej ") + juce::String(s.maxReductionDb, 1) + pl(" dB)");
+    const auto peaks = loudestPeakChannel();
+    const auto advice = (peaks.isNotEmpty() ? pl(" Najwyższe szczyty daje ") + quoted(peaks) + pl(": clipper na nim („Ustaw cały miks”)")
+                                            : pl(" Clipper na kanałach z najwyższymi szczytami („Ustaw cały miks”)"))
+                        + pl(" albo niższy cel, np. ") + juce::String(target - 2.0, 1) + " LUFS.";
+    // A limiter working that hard does not even get there.
+    const auto shortOf = std::isfinite(s.outputLufs) && s.outputLufs < target - 1.0
+                             ? pl(" I tak nie dobije do celu: wychodzi ") + juce::String(s.outputLufs, 1) + " LUFS."
+                             : juce::String();
+    if (s.typicalReductionDb <= 3.0)
+    {
+        status = MixSnapshot::Status::good;
+        return base + pl(". Uderzenie zostanie, miks zniesie głośny master.") + shortOf;
+    }
+    if (s.typicalReductionDb <= 6.0)
+    {
+        status = MixSnapshot::Status::warning;
+        return base + pl(". Stopa i perkusja stracą trochę uderzenia.") + shortOf + advice;
+    }
+    status = MixSnapshot::Status::problem;
+    return base + pl(". To za dużo: master zgniecie uderzenie.") + shortOf + advice;
+}
+
+namespace
+{
+juce::String html(const juce::String& text)
+{
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;");
+}
+
+juce::String statusClass(MixSnapshot::Status status)
+{
+    switch (status)
+    {
+        case MixSnapshot::Status::good: return "good";
+        case MixSnapshot::Status::warning: return "warning";
+        case MixSnapshot::Status::problem: return "problem";
+        case MixSnapshot::Status::unknown: return "unknown";
+    }
+    return "unknown";
+}
+
+juce::String signedDb(double db)
+{
+    return (db > 0.0 ? "+" : "") + juce::String(db, 1) + " dB";
+}
+} // namespace
+
+juce::String BrainProcessor::masteringReportHtml() const
+{
+    const double integratedNow = integratedLufs(), peak = truePeakDb(), ceiling = peakCeilingDb();
+    const double target = masterTargetLufs();
+    const auto s = previewStats();
+    MixSnapshot::Status previewStatus;
+    const auto previewText = previewVerdict(previewStatus);
+    const auto number = [](double v, const char* unit) { return std::isfinite(v) ? juce::String(v, 1) + " " + unit : juce::String("-"); };
+
+    juce::String out;
+    out << "<!doctype html>\n<html lang=\"pl\"><head><meta charset=\"utf-8\">"
+        << "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        << "<title>" << pl("Raport przed masteringiem") << "</title><style>"
+        << ":root{--bg:#f6f7f9;--panel:#fff;--text:#1d2129;--quiet:#667085;--line:#e3e6eb;--good:#2e9d5b;--warning:#c98a12;--problem:#d0443e}"
+        << "@media (prefers-color-scheme: dark){:root{--bg:#16181d;--panel:#1f232a;--text:#e7e9ee;--quiet:#9aa3b2;--line:#2e333c}}"
+        << "body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}"
+        << "main{max-width:880px;margin:0 auto;padding:24px 16px 48px}h1{font-size:24px;margin:0 0 4px}"
+        << "h2{font-size:17px;margin:28px 0 8px}.meta{color:var(--quiet);margin:0 0 16px}"
+        << "section{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 16px;margin:10px 0}"
+        << "table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:4px 8px 4px 0;border-bottom:1px solid var(--line);vertical-align:top}"
+        << "th{color:var(--quiet);font-weight:600}.num{text-align:right;white-space:nowrap}"
+        << ".dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:8px;background:var(--quiet)}"
+        << ".good .dot,.dot.good{background:var(--good)}.warning .dot,.dot.warning{background:var(--warning)}.problem .dot,.dot.problem{background:var(--problem)}"
+        << "ol li{margin:4px 0}.wrap{overflow-x:auto}</style></head><body><main>\n";
+
+    out << "<h1>" << pl("Raport przed masteringiem") << "</h1><p class=\"meta\">Mix Assistant " << pl("· ")
+        << juce::Time::getCurrentTime().formatted("%Y-%m-%d %H:%M") << pl(" · miks słuchany ") << juce::String(juce::roundToInt(secondsAnalysed()))
+        << " s</p>\n";
+
+    // What Ozone has to do, first: the engineer reads this while mastering.
+    out << "<h2>" << pl("Dla Ozone") << "</h2><section>";
+    // Red items are the mix's to fix, not the master's.
+    juce::StringArray first;
+    for (const auto& item : mix.report)
+        if (item.status == MixSnapshot::Status::problem)
+            first.add(item.title);
+    if (!first.isEmpty())
+        out << "<p class=\"problem\"><span class=\"dot\"></span>" << pl("Najpierw popraw w miksie (szczegóły w raporcie niżej): ")
+            << html(first.joinIntoString(", ")) << ".</p>";
+    out << "<ol>";
+    out << "<li>" << pl("Maximizer: cel ") << juce::String(target, 1) << pl(" LUFS integrated, sufit -1 dBTP.");
+    if (std::isfinite(integratedNow))
+        out << pl(" Miks ma ") << juce::String(integratedNow, 1) << pl(" LUFS, więc trzeba go podnieść o ok. ")
+            << juce::String(target - integratedNow, 1) << " dB.";
+    if (s.seconds >= kMinimumPreviewSeconds)
+        out << pl(" Podgląd: limiter ścina w głośnej części do ") << juce::String(s.typicalReductionDb, 1) << " dB.";
+    out << "</li>";
+    if (mix.tonal.valid && !mix.tonal.regions.empty())
+    {
+        out << "<li>" << pl("EQ na sumie (szeroko, względem celu ") << html(quoted(juce::String::fromUTF8(currentTarget.name.c_str()))) << "): ";
+        juce::StringArray parts;
+        for (const auto& region : mix.tonal.regions)
+            parts.add((region.hole() ? "+" : pl("−")) + juce::String(std::abs(region.deviationDb), 1) + " dB " + hzText(region.lowHz) + pl("–")
+                      + hzText(region.highHz));
+        out << html(parts.joinIntoString(", ")) << pl(". Lepiej poprawić to w miksie, jeśli to jeden kanał.") << "</li>";
+    }
+    else if (mix.tonal.valid)
+    {
+        out << "<li>" << pl("EQ na sumie: balans mieści się w korytarzu celu ") << html(quoted(juce::String::fromUTF8(currentTarget.name.c_str())))
+            << pl(", wystarczą drobne korekty do gustu.") << "</li>";
+    }
+    if (stereo.load())
+        out << "<li>" << pl("Imager: dół poniżej 120 Hz ma korelację ") << juce::String(lowCorrelation(), 2)
+            << (lowCorrelation() >= 0.7 ? pl(" (mono, nie poszerzaj go).") : pl(": zawęź go w miksie, a w Ozone ustaw dół na mono."))
+            << (mix.antiPhase.empty() ? juce::String() : pl(" Nie poszerzaj pasm w przeciwfazie (niżej)."))
+            << "</li>";
+    if (!keyedStems.name.empty() && keyedStems.valid())
+    {
+        juce::StringArray refs;
+        for (const auto& p : keyedStems.profiles)
+            refs.add(quoted(juce::String::fromUTF8(p.name.c_str())));
+        out << "<li>" << pl("Referencje do porównania w Ozone: ") << html(refs.joinIntoString(", ")) << pl(" (zestaw ")
+            << html(quoted(juce::String::fromUTF8(keyedStems.name.c_str()))) << ").</li>";
+    }
+    out << "</ol></section>\n";
+
+    out << "<h2>" << pl("Głośność i zapas") << "</h2><section><table>"
+        << "<tr><td>LUFS integrated</td><td class=\"num\">" << number(integratedNow, "LUFS") << "</td></tr>"
+        << pl("<tr><td>Najgłośniejszy fragment (short-term)</td><td class=\"num\">") << number(loudestShortTerm, "LUFS") << "</td></tr>"
+        << "<tr><td>True peak (max)</td><td class=\"num\">" << number(peak, "dBTP") << "</td></tr>"
+        << "<tr><td>PLR</td><td class=\"num\">" << (std::isfinite(peak) && std::isfinite(integratedNow) ? juce::String(peak - integratedNow, 1) + " dB" : "-")
+        << "</td></tr>"
+        << pl("<tr><td>Limit szczytu przed masteringiem</td><td class=\"num\">") << juce::String(ceiling, 1) << " dBTP</td></tr>"
+        << "</table></section>\n";
+
+    out << "<h2>" << pl("Podgląd mastera do ") << juce::String(target, 1) << " LUFS</h2><section class=\"" << statusClass(previewStatus)
+        << "\"><p><span class=\"dot\"></span>" << html(previewText) << "</p>";
+    if (s.seconds >= kMinimumPreviewSeconds)
+        out << "<table><tr><td>" << pl("Średnio ścina") << "</td><td class=\"num\">" << juce::String(s.averageReductionDb, 1) << " dB</td></tr>"
+            << "<tr><td>" << pl("W głośnej części (95% czasu poniżej)") << "</td><td class=\"num\">" << juce::String(s.typicalReductionDb, 1) << " dB</td></tr>"
+            << "<tr><td>" << pl("Najwięcej") << "</td><td class=\"num\">" << juce::String(s.maxReductionDb, 1) << " dB</td></tr>"
+            << "<tr><td>" << pl("Czas z ponad 3 dB ścinania") << "</td><td class=\"num\">" << juce::String(juce::roundToInt(s.heavyShare * 100.0))
+            << " %</td></tr></table><p class=\"meta\">"
+            << pl("Szybkie przybliżenie (limiter z 5 ms wyprzedzenia, sufit -1 dBFS), tylko do analizy. Ozone z clipperem i wielopasmowym "
+                  "limiterem zrobi to łagodniej, ale proporcje się zgadzają.")
+            << "</p>";
+    out << "</section>\n";
+
+    out << "<h2>" << pl("Raport poprawności") << "</h2><section><table>";
+    for (const auto& item : mix.report)
+        out << "<tr class=\"" << statusClass(item.status) << "\"><td><span class=\"dot\"></span><b>" << html(item.title) << "</b><br>"
+            << html(item.detail) << "</td></tr>";
+    out << "</table></section>\n";
+
+    if (stereo.load())
+    {
+        out << "<h2>Stereo</h2><section><p>" << pl("Korelacja poniżej 120 Hz: ") << juce::String(lowCorrelation(), 2) << pl(", całość: ")
+            << juce::String(fullCorrelation(), 2) << ".</p>";
+        if (mix.antiPhase.empty())
+            out << "<p>" << pl("Żadne pasmo nie wpada w przeciwfazę.") << "</p>";
+        else
+        {
+            out << "<p>" << pl("Pasma w przeciwfazie:") << "</p><ul>";
+            for (const auto& range : mix.antiPhase)
+                out << "<li>" << html(hzText(range.lowHz) + pl("–") + hzText(range.highHz)) << pl(" (najgorzej ") << juce::String(range.worst, 2) << ")</li>";
+            out << "</ul>";
+        }
+        out << "</section>\n";
+    }
+
+    if (keyedStems.valid() && mix.stems.valid)
+    {
+        out << "<h2>" << pl("Proporcje jak w referencjach (drop do dropu)") << "</h2><section>";
+        const auto key = trackKey();
+        if (key.valid())
+            out << "<p>" << pl("Tonacja utworu: ") << html(keyText(key)) << pl(". Referencje przesunięte do niej.") << "</p>";
+        out << "<div class=\"wrap\"><table><tr><th>" << pl("Grupa") << "</th><th class=\"num\">" << pl("Poziom") << "</th><th class=\"num\">"
+            << pl("Poza korytarzem") << "</th><th>" << pl("Barwa poza korytarzem") << "</th></tr>";
+        static const char* const regionNames[ma::kStemRegions] { "sub", "bas", "dolny środek", "środek", "prezencja", "powietrze" };
+        for (int g = 0; g < ma::kStemGroups; ++g)
+        {
+            const auto& c = mix.stems.groups[static_cast<size_t>(g)];
+            if (!c.compared && !c.missing)
+                continue;
+            juce::StringArray shape;
+            for (int r = 0; r < ma::kStemRegions; ++r)
+                if (c.shapeCompared[static_cast<size_t>(r)] && std::abs(c.shapeDeviationDb[static_cast<size_t>(r)]) >= 1.5)
+                    shape.add(pl(regionNames[r]) + " " + signedDb(c.shapeDeviationDb[static_cast<size_t>(r)]));
+            out << "<tr><td>" << html(stemGroupName(g)) << "</td><td class=\"num\">" << (c.compared ? juce::String(c.levelDb, 1) + " dB" : pl("brak"))
+                << "</td><td class=\"num\">" << (c.compared ? signedDb(c.levelDeviationDb) : juce::String("-")) << "</td><td>"
+                << html(shape.isEmpty() ? juce::String("ok") : shape.joinIntoString(", ")) << "</td></tr>";
+        }
+        out << "</table></div></section>\n";
+    }
+
+    out << "<h2>" << pl("Kanały") << "</h2><section class=\"wrap\"><table><tr><th>" << pl("Kanał") << "</th><th>" << pl("Rola")
+        << "</th><th class=\"num\">Trim</th><th class=\"num\">" << pl("Szczyt") << "</th><th>" << pl("Łańcuch") << "</th></tr>";
+    const auto roles = ma::ui::roleNames();
+    for (const auto& channel : mix.channels)
+    {
+        const auto& d = channel.data;
+        juce::StringArray chain;
+        if (d.cleanup.hpfHz > 0.0f)
+            chain.add("HPF " + hzText(d.cleanup.hpfHz));
+        if (d.cleanup.monoBelowHz > 0.0f)
+            chain.add(pl("mono poniżej ") + hzText(d.cleanup.monoBelowHz));
+        int eqBands = 0;
+        for (const auto& band : d.eq)
+            eqBands += std::abs(band.gainDb) > 0.05f ? 1 : 0;
+        if (eqBands > 0)
+            chain.add("EQ " + juce::String(eqBands) + pl(" pasm"));
+        if (d.compressor.on > 0.5f)
+            chain.add(pl("kompresor ") + juce::String(d.compressor.ratio, 1) + ":1");
+        if (d.clipper.on > 0.5f)
+            chain.add("clipper " + juce::String(d.clipper.ceilingDb, 1) + " dBFS");
+        if (d.duck.on > 0.5f)
+            chain.add(pl("ustępowanie"));
+        out << "<tr><td>" << html(channel.name) << "</td><td>" << html(roles[juce::jlimit(0, roles.size() - 1, static_cast<int>(d.role))])
+            << "</td><td class=\"num\">" << signedDb(d.trimDb) << "</td><td class=\"num\">"
+            << [&] {
+                   const auto held = peakHold.find(channel.owner);
+                   return held != peakHold.end() && held->second > -100.0f ? juce::String(held->second, 1) + " dBFS" : juce::String("-");
+               }()
+            << "</td><td>"
+            << html(chain.isEmpty() ? juce::String("-") : chain.joinIntoString(", ")) << "</td></tr>";
+    }
+    out << "</table></section>\n</main></body></html>\n";
+    return out;
+}
+
+bool BrainProcessor::saveMasteringReport(const juce::File& file) const
+{
+    return file.replaceWithText(masteringReportHtml(), false, false, "\n");
 }

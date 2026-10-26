@@ -75,6 +75,13 @@ private:
     brain::IssuesView issues;
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> ceilingAttachment;
+    // Phase 11: the master's loudness target and the report for mastering.
+    juce::Label targetLabel;
+    juce::Slider targetSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> targetAttachment;
+    juce::TextButton masteringReportButton;
+    std::unique_ptr<juce::FileChooser> reportChooser;
+    void saveMasteringReport();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(BrainEditor)
 };
