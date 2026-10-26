@@ -11,48 +11,7 @@ constexpr double kPi = 3.14159265358979323846;
 constexpr double kKnee = 0.5;      // -6 dBFS reaches the shaper's knee at 0 dB drive
 constexpr double kReference = 0.25; // sine peak (-12 dBFS) the wet level is matched at
 
-// Half-band designs (HIIR's designer): base <-> 2x, transition 0.04 of the 2x rate,
-// about 100 dB of rejection; 2x <-> 4x only has to clear the gap above the audio band.
-constexpr std::array<double, 8> kStage1 = { 0.04063346092419326, 0.1505051290226746, 0.30075705599187408, 0.46077450496145061,
-                                            0.6095243148961883,  0.73850384111885725, 0.84922381039206607, 0.9497427837050002 };
-constexpr std::array<double, 4> kStage2 = { 0.079866426236357507, 0.28382934487410993, 0.54532365107113223, 0.83441189148073791 };
 } // namespace
-
-template <size_t Coefs>
-double Saturator::HalfBand<Coefs>::allpasses(double in, int first)
-{
-    for (auto k = static_cast<size_t>(first); k < Coefs; k += 2)
-    {
-        const double out = c[k] * (in - y1[k]) + x1[k];
-        x1[k] = in;
-        y1[k] = out;
-        in = out;
-    }
-    return in;
-}
-
-template <size_t Coefs>
-void Saturator::HalfBand<Coefs>::up(double in, double& even, double& odd)
-{
-    even = allpasses(in, 0);
-    odd = allpasses(in, 1);
-}
-
-template <size_t Coefs>
-double Saturator::HalfBand<Coefs>::down(double even, double odd)
-{
-    const double out = 0.5 * (allpasses(even, 0) + allpasses(pendingOdd, 1));
-    pendingOdd = odd;
-    return out;
-}
-
-template <size_t Coefs>
-void Saturator::HalfBand<Coefs>::reset()
-{
-    x1.fill(0.0);
-    y1.fill(0.0);
-    pendingOdd = 0.0;
-}
 
 double Saturator::shape(SaturationMode mode, double x)
 {
@@ -77,13 +36,6 @@ void Saturator::prepare(double newSampleRate)
 {
     sampleRate = newSampleRate;
     dcCoeff = std::exp(-2.0 * kPi * 10.0 / sampleRate);
-    for (auto& s : state)
-    {
-        s.up1.c = kStage1;
-        s.down1.c = kStage1;
-        s.up2.c = kStage2;
-        s.down2.c = kStage2;
-    }
     prepared = true;
     updateGains();
     reset();
@@ -93,10 +45,7 @@ void Saturator::reset()
 {
     for (auto& s : state)
     {
-        s.up1.reset();
-        s.down1.reset();
-        s.up2.reset();
-        s.down2.reset();
+        s.oversampler.reset();
         s.dcIn = s.dcOut = 0.0;
     }
 }
@@ -141,16 +90,11 @@ double Saturator::oversampledSample(ChannelState& s, double x) const
     const double mix = std::clamp(static_cast<double>(settings.mix), 0.0, 1.0);
     const auto blend = [&](double v) { return (1.0 - mix) * v + mix * makeup * kKnee * shape(mode, v * driveGain); };
 
-    double a = 0.0, b = 0.0;
-    s.up1.up(x, a, b);
-    double o[4];
-    s.up2.up(a, o[0], o[1]);
-    s.up2.up(b, o[2], o[3]);
+    double o[Oversampler4x::kFactor];
+    s.oversampler.up(x, o);
     for (auto& v : o)
         v = blend(v);
-    const double t0 = s.down2.down(o[0], o[1]);
-    const double t1 = s.down2.down(o[2], o[3]);
-    return s.down1.down(t0, t1);
+    return s.oversampler.down(o);
 }
 
 void Saturator::process(float* const* channels, int numChannels, int numSamples)

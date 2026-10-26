@@ -40,6 +40,7 @@ void InstrumentFeatures::prepare(double newSampleRate)
     sampleRate = newSampleRate;
     hopLength = std::max(1, static_cast<int>(std::lround(0.005 * sampleRate)));
     slowCoeff = std::exp(-1.0 / (0.1 / 0.005)); // 100 ms, per hop
+    pitchTracker.prepare(sampleRate);
     reset();
 }
 
@@ -60,6 +61,12 @@ void InstrumentFeatures::reset()
     havePrevious = false;
     movementSum = 0.0;
     movementFrames = 0;
+    recentHops.fill(0.0);
+    recentIndex = 0;
+    levelHistogram.fill(0);
+    pitchTracker.reset();
+    noteHistogram.fill(0);
+    noteHops = 0;
 }
 
 void InstrumentFeatures::addSpectrumFrame(const SpectrumAnalyzer::Bands& power, int numBands)
@@ -100,6 +107,7 @@ void InstrumentFeatures::process(const float* const* channels, int numChannels, 
         const double mid = 0.5 * (l + r), side = 0.5 * (l - r);
         hopMid += mid * mid;
         hopSide += side * side;
+        pitchTracker.process(mid);
         if (++hopFill == hopLength)
             endHop();
     }
@@ -115,11 +123,26 @@ void InstrumentFeatures::endHop()
     ++hops;
     recentPeakDb = std::max(db, recentPeakDb - 0.005); // about 1 dB a second
     const bool active = db > kGateDb && db > recentPeakDb - 40.0;
+    recentHops[static_cast<size_t>(recentIndex)] = lastHops[static_cast<size_t>((hopIndex + 3) % 4)];
+    recentIndex = (recentIndex + 1) % static_cast<int>(recentHops.size());
     if (active)
     {
         ++activeHops;
         midSum += hopMid;
         sideSum += hopSide;
+        double sum = 0.0;
+        for (double p : recentHops)
+            sum += p;
+        const double level = powerToDb(sum / static_cast<double>(recentHops.size()));
+        const int bin = static_cast<int>(std::floor((level + 120.0) * 2.0));
+        if (bin >= 0)
+            ++levelHistogram[static_cast<size_t>(std::min(bin, static_cast<int>(levelHistogram.size()) - 1))];
+        const double note = pitchTracker.pitchHz();
+        if (note > 0.0)
+        {
+            ++noteHistogram[static_cast<size_t>(std::clamp(std::lround(note), 0L, 160L))];
+            ++noteHops;
+        }
     }
 
     // Onset: a jump over the slow envelope, at least 60 ms after the last one. How far the
@@ -167,6 +190,40 @@ InstrumentFeatures::Summary InstrumentFeatures::summary() const
     s.decayDb = decays > 0 ? decaySum / static_cast<double>(decays) : 0.0;
     s.width = midSum > 1e-20 ? sideSum / midSum : 0.0;
     s.movement = movementFrames > 0 ? movementSum / static_cast<double>(movementFrames) : 0.0;
+
+    long long total = 0;
+    for (auto n : levelHistogram)
+        total += n;
+    const auto percentile = [&](double share) {
+        long long seen = 0;
+        for (size_t b = 0; b < levelHistogram.size(); ++b)
+        {
+            seen += levelHistogram[b];
+            if (static_cast<double>(seen) >= share * static_cast<double>(total))
+                return -120.0 + (static_cast<double>(b) + 0.5) / 2.0;
+        }
+        return 0.0;
+    };
+    if (total > 0)
+    {
+        s.levelP10 = percentile(0.10);
+        s.levelP50 = percentile(0.50);
+        s.levelP95 = percentile(0.95);
+    }
+    // A bass line plays clear low notes most of the time; a pad or a kick does not.
+    if (activeHops > 0 && static_cast<double>(noteHops) > 0.3 * static_cast<double>(activeHops))
+    {
+        long long seen = 0;
+        for (size_t hz = 0; hz < noteHistogram.size(); ++hz)
+        {
+            seen += noteHistogram[hz];
+            if (2 * seen >= noteHops)
+            {
+                s.lowNoteHz = static_cast<double>(hz);
+                break;
+            }
+        }
+    }
     return s;
 }
 

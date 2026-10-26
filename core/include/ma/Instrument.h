@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ChannelChain.h"
 #include "SpectrumAnalyzer.h"
 
 #include <array>
@@ -43,6 +44,9 @@ public:
         double activeShare = 0.0;    // share of the passage the channel plays at all (vocals pause)
         double width = 0.0;          // side energy over mid energy
         double movement = 0.0;       // average change of spectral shape between frames, 0..1
+        // Dynamics for the mix engineer: 100 ms RMS levels while playing (dBFS, as fed in).
+        double levelP10 = -200.0, levelP50 = -200.0, levelP95 = -200.0;
+        double lowNoteHz = 0.0;      // the bass line's usual note (median), 0 = no clear low notes
         bool valid = false;
     };
     Summary summary() const;
@@ -66,6 +70,12 @@ private:
     bool havePrevious = false;
     double movementSum = 0.0;
     long long movementFrames = 0;
+    std::array<double, 20> recentHops {}; // last 100 ms of hop powers
+    int recentIndex = 0;
+    std::array<long long, 240> levelHistogram {}; // 0.5 dB steps from -120 dBFS
+    LowPitchTracker pitchTracker;
+    std::array<long long, 161> noteHistogram {}; // hops per detected note, 1 Hz steps
+    long long noteHops = 0;
 };
 
 struct RoleGuess

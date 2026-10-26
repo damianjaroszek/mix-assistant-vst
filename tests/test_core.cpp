@@ -11,6 +11,8 @@
 #include "ma/Transient.h"
 #include "ma/Saturator.h"
 #include "ma/Instrument.h"
+#include "ma/ChannelChain.h"
+#include "ma/ChainPlanner.h"
 #include "ma/EqualLoudness.h"
 #include "ma/GainStaging.h"
 #include "ma/LevelStats.h"
@@ -996,13 +998,300 @@ void testInstrumentRecognition()
         const auto summary = features.summary();
         const auto guess = ma::recogniseRole(summary, analyser.averageDb());
         const auto name = std::string(names[static_cast<int>(role)]);
-        std::printf("      %s: onsets %.1f/s, decay %.1f dB, active %.2f, width %.2f, movement %.3f, centre %.0f Hz -> %s %.0f%% (then %s)\n", name.c_str(),
-                    summary.onsetsPerSecond, summary.decayDb, summary.activeShare, summary.width, summary.movement, guess.centroidHz,
+        std::printf("      %s: onsets %.1f/s, decay %.1f dB, active %.2f, width %.2f, movement %.3f, centre %.0f Hz, levels %.1f/%.1f/%.1f, note %.0f -> %s %.0f%% (then %s)\n", name.c_str(),
+                    summary.onsetsPerSecond, summary.decayDb, summary.activeShare, summary.width, summary.movement, guess.centroidHz, summary.levelP10, summary.levelP50, summary.levelP95, summary.lowNoteHz,
                     names[static_cast<int>(guess.role)], guess.confidence * 100.0, names[static_cast<int>(guess.runnerUp)]);
         check(guess.role == role && guess.confidence >= 0.5, "recognises the " + name);
+        if (role == ma::Role::bass)
+            checkNear(summary.lowNoteHz, 55.0, 2.0, "finds the bass line's usual note");
     }
     check(ma::recogniseRole({}, {}).role == ma::Role::other, "too little heard: no guess");
+
+    // Dynamics: a part alternating between -10 and -22 dB RMS every second.
+    {
+        std::vector<float> l(static_cast<size_t>(sr * 8.0));
+        for (size_t i = 0; i < l.size(); ++i)
+        {
+            const bool loud = (i / static_cast<size_t>(sr)) % 2 == 0;
+            const double amplitude = std::pow(10.0, (loud ? -10.0 : -22.0) / 20.0) * std::sqrt(2.0);
+            l[i] = static_cast<float>(amplitude * std::sin(2.0 * kPi * 440.0 * static_cast<double>(i) / sr));
+        }
+        ma::InstrumentFeatures f;
+        f.prepare(sr);
+        const float* ch[] = { l.data(), l.data() };
+        f.process(ch, 2, static_cast<int>(l.size()));
+        const auto summary = f.summary();
+        checkNear(summary.levelP95, -10.0, 0.6, "loud parts read at their level");
+        checkNear(summary.levelP10, -22.0, 0.6, "quiet parts read at their level");
+    }
     check(ma::defaultPriority(ma::Role::kick) < ma::defaultPriority(ma::Role::pad), "the kick outranks the pad");
+}
+
+// Runs a stereo processor over two channel vectors in 512-sample blocks.
+template <typename Processor>
+void runStereo(Processor& p, std::vector<float>& l, std::vector<float>& r)
+{
+    for (size_t start = 0; start < l.size(); start += 512)
+    {
+        float* ch[] = { l.data() + start, r.data() + start };
+        p.process(ch, 2, static_cast<int>(std::min<size_t>(512, l.size() - start)));
+    }
+}
+
+void testChannelChain()
+{
+    constexpr double sr = 48000.0;
+    const size_t from = 24000, to = 72000;
+
+    // Cleanup: high-pass, mono low end, mud cut.
+    {
+        ma::CleanupSettings s;
+        s.hpfHz = 100.0f;
+        auto run = [&](double hz, double amplitude, bool antiphase, const ma::CleanupSettings& settings) {
+            auto l = sine(sr, 2.0, 1, hz, amplitude).channels[0];
+            auto r = l;
+            if (antiphase)
+                for (auto& v : r)
+                    v = -v;
+            ma::CleanupFilter f;
+            f.prepare(sr);
+            f.setSettings(settings);
+            runStereo(f, l, r);
+            return std::pair { rmsDb(l, from, to), rmsDb(r, from, to) };
+        };
+        const double ref = 20.0 * std::log10(0.5 / std::sqrt(2.0));
+        check(run(30.0, 0.5, false, s).first - ref < -35.0, "high-pass removes rumble under it");
+        checkNear(run(1000.0, 0.5, false, s).first - ref, 0.0, 0.05, "high-pass leaves the mids");
+        checkNear(run(80.0, 0.5, false, s).first - ref, ma::cleanupResponseDb(s, 80.0), 0.3, "high-pass response prediction");
+
+        ma::CleanupSettings mono;
+        mono.monoBelowHz = 120.0f;
+        check(run(40.0, 0.5, true, mono).first - ref < -25.0, "mono below 120 Hz removes a wide sub");
+        checkNear(run(3000.0, 0.5, true, mono).first - ref, 0.0, 0.5, "mono below 120 Hz keeps the width above");
+        checkNear(run(40.0, 0.5, false, mono).first - ref, 0.0, 0.1, "mono below 120 Hz keeps a centred sub");
+
+        ma::CleanupSettings mud;
+        mud.mudHz = 300.0f;
+        mud.mudDb = -3.0f;
+        checkNear(run(300.0, 0.5, false, mud).first - ref, -3.0, 0.2, "mud cut takes the set amount at its centre");
+    }
+
+    // Compressor: static curve, makeup, attack lets the transient through.
+    {
+        ma::CompressorSettings s;
+        s.on = 1.0f;
+        s.thresholdDb = -20.0f;
+        s.ratio = 4.0f;
+        s.kneeDb = 0.0f;
+        s.attackMs = 5.0f;
+        s.releaseMs = 100.0f;
+        checkNear(ma::compressorReductionDb(s, -10.0), 7.5, 1e-9, "compressor curve above the threshold");
+        check(ma::compressorReductionDb(s, -25.0) == 0.0, "compressor curve below the threshold");
+        auto run = [&](const ma::CompressorSettings& settings, double amplitude) {
+            auto l = sine(sr, 2.0, 1, 200.0, amplitude).channels[0];
+            auto r = l;
+            ma::Compressor c;
+            c.prepare(sr);
+            c.setSettings(settings);
+            runStereo(c, l, r);
+            return l;
+        };
+        const double amplitude = std::pow(10.0, -10.0 / 20.0) * std::sqrt(2.0); // -10 dB RMS
+        checkNear(rmsDb(run(s, amplitude), from, to), -17.5, 0.3, "compressor takes 7.5 dB off at -10 dB, 4:1 from -20");
+        auto makeup = s;
+        makeup.makeupDb = 7.5f;
+        checkNear(rmsDb(run(makeup, amplitude), from, to), -10.0, 0.3, "makeup restores the level");
+        const auto out = run(s, amplitude);
+        check(rmsDb(out, 0, 96) > rmsDb(out, from, to) + 4.0, "the attack lets the start through");
+    }
+
+    // Clipper: holds the ceiling, leaves what is under the knee.
+    {
+        ma::ClipperSettings s;
+        s.on = 1.0f;
+        s.ceilingDb = -6.0f;
+        s.softness = 0.0f;
+        auto l = sine(sr, 1.0, 1, 100.0, 1.0).channels[0];
+        auto r = l;
+        ma::Clipper c;
+        c.prepare(sr);
+        c.setSettings(s);
+        runStereo(c, l, r);
+        float peak = 0.0f;
+        for (size_t i = 4800; i < l.size(); ++i)
+            peak = std::max(peak, std::abs(l[i]));
+        check(peak < 0.5f * 1.06f && peak > 0.45f, "clipper holds the ceiling (" + std::to_string(peak) + ")");
+        checkNear(c.clippedDb(), 6.0, 0.3, "clipper reports what it shaved");
+        auto quietL = sine(sr, 1.0, 1, 100.0, 0.2).channels[0];
+        auto quietR = quietL;
+        const auto original = quietL;
+        s.softness = 0.5f;
+        c.setSettings(s);
+        runStereo(c, quietL, quietR);
+        checkNear(rmsDb(quietL, 4800, 48000), rmsDb(original, 4800, 48000), 0.05, "under the knee nothing changes");
+    }
+
+    // Bass notes: the tracker follows them, the evener lifts the low one for the ear.
+    {
+        auto bassNote = [&](double hz) {
+            std::vector<float> x(static_cast<size_t>(sr));
+            double phase = 0.0;
+            for (auto& v : x)
+            {
+                phase = std::fmod(phase + hz / sr, 1.0);
+                v = static_cast<float>(0.3 * (std::sin(2.0 * kPi * phase) + 0.4 * std::sin(4.0 * kPi * phase) + 0.2 * std::sin(6.0 * kPi * phase)));
+            }
+            return x;
+        };
+        for (double hz : { 41.2, 55.0, 82.4, 130.8 })
+        {
+            const auto x = bassNote(hz);
+            ma::LowPitchTracker t;
+            t.prepare(sr);
+            double got = 0.0;
+            for (float v : x)
+                got = t.process(v);
+            checkNear(got, hz, hz * 0.02, "bass pitch at " + std::to_string(static_cast<int>(hz)) + " Hz");
+        }
+        ma::BassEvenerSettings s;
+        s.on = 1.0f;
+        s.amount = 0.6f;
+        s.referenceHz = 82.4f;
+        const double expected = ma::bassEvenerGainDb(s, 41.2);
+        check(expected > 1.0 && expected <= 6.0, "a low note is lifted for the ear (+" + std::to_string(expected).substr(0, 4) + " dB)");
+        auto l = bassNote(41.2);
+        auto r = l;
+        const auto original = l;
+        ma::BassEvener e;
+        e.prepare(sr);
+        e.setSettings(s);
+        runStereo(e, l, r);
+        checkNear(rmsDb(l, 24000, 48000) - rmsDb(original, 24000, 48000), expected, 0.5, "the evener applies it");
+        auto ref = bassNote(82.4);
+        auto refR = ref;
+        const auto refOriginal = ref;
+        ma::BassEvener e2;
+        e2.prepare(sr);
+        e2.setSettings(s);
+        runStereo(e2, ref, refR);
+        checkNear(rmsDb(ref, 24000, 48000) - rmsDb(refOriginal, 24000, 48000), 0.0, 0.2, "the usual note stays as it is");
+    }
+}
+
+// A channel as the Brain would hand it to the planner, measured from a synthetic part.
+ma::ChainChannel measuredChannel(ma::Role role, int priority, double gainDb, double sr)
+{
+    auto part = syntheticPart(role, sr, 8.0);
+    const auto g = static_cast<float>(std::pow(10.0, gainDb / 20.0));
+    float peak = 0.0f;
+    for (auto& ch : part)
+        for (auto& v : ch)
+        {
+            v *= g;
+            peak = std::max(peak, std::abs(v));
+        }
+    ma::InstrumentFeatures features;
+    features.prepare(sr);
+    ma::SpectrumAnalyzer analyser;
+    analyser.prepare(sr, ma::BandScale::erb);
+    const float* ch[] = { part[0].data(), part[1].data() };
+    features.process(ch, 2, static_cast<int>(part[0].size()));
+    analyser.process(ch, 2, static_cast<int>(part[0].size()));
+    const auto summary = features.summary();
+    ma::ChainChannel c;
+    c.role = role;
+    c.priority = priority;
+    c.bandsDb = analyser.averageDb();
+    c.valid = true;
+    c.hasStats = true;
+    c.levelP10 = summary.levelP10;
+    c.levelP50 = summary.levelP50;
+    c.levelP95 = summary.levelP95;
+    c.truePeakDb = 20.0 * std::log10(std::max(peak, 1e-9f));
+    c.lowNoteHz = summary.lowNoteHz;
+    return c;
+}
+
+void testChainPlanner()
+{
+    constexpr double sr = 48000.0;
+    std::vector<ma::ChainChannel> mix = {
+        measuredChannel(ma::Role::kick, 1, 0.0, sr),   measuredChannel(ma::Role::bass, 2, 0.0, sr),
+        measuredChannel(ma::Role::vocal, 2, 0.0, sr),  measuredChannel(ma::Role::lead, 3, 0.0, sr),
+        measuredChannel(ma::Role::percussion, 4, 0.0, sr), measuredChannel(ma::Role::pad, 6, 0.0, sr),
+    };
+    const auto plans = ma::planChains(mix, { 124.0, 0.0 });
+    const auto& kick = plans[0];
+    const auto& bass = plans[1];
+    const auto& pad = plans[5];
+    std::printf("      pad hpf %.0f Hz, bass comp %.1f dB %.1f:1 makeup %.1f (spread %.1f -> %.1f), evener %.0f Hz\n",
+                pad.cleanup.hpfHz, bass.compressor.thresholdDb, bass.compressor.ratio, bass.compressor.makeupDb, bass.spreadDb,
+                bass.spreadAfterDb, bass.evener.referenceHz);
+    check(kick.cleanup.hpfHz <= 30.0f && bass.cleanup.hpfHz <= 30.0f, "kick and bass only lose rumble");
+    check(pad.highPassReason != ma::ChainPlan::HighPass::none && pad.cleanup.hpfHz >= 60.0f && pad.cleanup.hpfHz <= 250.0f,
+          "the pad loses what is under its notes");
+    // A lead with real content down low, where the kick and bass are far louder: it gives way.
+    auto wide = mix;
+    for (int b = 0; b < 40; ++b)
+        wide[3].bandsDb[static_cast<size_t>(b)] = std::max(wide[3].bandsDb[static_cast<size_t>(b)], wide[3].levelP50 - 15.0);
+    const auto widePlan = ma::planChains(wide)[3];
+    check(widePlan.highPassReason == ma::ChainPlan::HighPass::lowEndOwned && widePlan.cleanup.hpfHz >= 60.0f,
+          "a lead gives its low end to the kick and bass (" + std::to_string(static_cast<int>(widePlan.cleanup.hpfHz)) + " Hz)");
+    bool allMono = true;
+    for (const auto& p : plans)
+        allMono = allMono && p.cleanup.monoBelowHz == 120.0f;
+    check(allMono, "every channel is mono below 120 Hz");
+    check(kick.compressor.on < 0.5f && kick.percussive, "the kick keeps its hits uncompressed");
+    check(bass.compressor.on > 0.5f && bass.compressor.makeupDb > 0.0f, "the uneven bass is compressed, level kept");
+    checkNear(bass.spreadAfterDb, 4.0, 1.0, "bass dynamics land at the target");
+    checkNear(bass.evener.referenceHz, 55.0, 2.0, "bass notes evened around its usual note");
+
+    // The same vocal, 15 dB further back: now its quiet words sink under the mix.
+    auto quiet = mix;
+    quiet[2] = measuredChannel(ma::Role::vocal, 2, -15.0, sr);
+    const auto quietPlans = ma::planChains(quiet, { 124.0, 0.0 });
+    check(!plans[2].lostInQuietParts && quietPlans[2].lostInQuietParts, "a buried vocal is noticed in the mix");
+    check(quietPlans[2].targetSpreadDb < plans[2].targetSpreadDb, "and held tighter");
+
+    // A lead with a quiet bar every four: arrangement, so the compressor stops at its role's depth.
+    auto arranged = mix;
+    arranged[3].levelP10 = arranged[3].levelP95 - 18.5;
+    arranged[3].levelP50 = arranged[3].levelP95;
+    const auto arrangedPlan = ma::planChains(arranged, { 124.0, 0.0 })[3];
+    const double loudReduction = ma::compressorReductionDb(arrangedPlan.compressor, arranged[3].levelP95);
+    check(arrangedPlan.compressor.on > 0.5f && loudReduction <= 6.5 && arrangedPlan.compressor.makeupDb <= 6.5f,
+          "arrangement dynamics are not squashed (" + std::to_string(loudReduction).substr(0, 4) + " dB on the loud parts)");
+    check(arrangedPlan.arrangementDb > 5.0, "the rest is left for volume automation");
+
+    // Squashed already: no more compression, no clipper.
+    auto squashed = mix;
+    squashed[3].truePeakDb = squashed[3].levelP95 + 2.0;
+    check(ma::planChains(squashed)[3].overCompressed && ma::planChains(squashed)[3].compressor.on < 0.5f,
+          "an already squashed lead is left alone");
+
+    // Spiky percussion: the clipper shaves only the excess.
+    auto spiky = mix;
+    spiky[4].truePeakDb = spiky[4].levelP95 + 16.0;
+    const auto spikyPlan = ma::planChains(spiky)[4];
+    check(spikyPlan.clipper.on > 0.5f && spikyPlan.clipDb >= 1.0 && spikyPlan.clipDb <= 4.0,
+          "spiky percussion gets a clipper (" + std::to_string(spikyPlan.clipDb).substr(0, 4) + " dB)");
+
+    // Three channels crowding the low mids: the less important ones give way.
+    std::vector<ma::ChainChannel> crowd(3);
+    for (size_t i = 0; i < crowd.size(); ++i)
+    {
+        crowd[i].role = i == 0 ? ma::Role::lead : ma::Role::pad;
+        crowd[i].priority = static_cast<int>(3 + i * 2);
+        crowd[i].valid = true;
+        for (int b = 0; b < 40; ++b)
+        {
+            const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+            crowd[i].bandsDb[static_cast<size_t>(b)] = -30.0 - 12.0 * std::abs(std::log2(hz / 320.0));
+        }
+    }
+    const auto crowdPlans = ma::planChains(crowd);
+    check(crowdPlans[0].cleanup.mudDb == 0.0f && crowdPlans[1].cleanup.mudDb < 0.0f && crowdPlans[2].cleanup.mudDb < 0.0f,
+          "low-mid mud: the most important keeps it, the others give way");
 }
 
 void testWavRoundTrip()
@@ -1039,6 +1328,8 @@ int main()
     testTransients();
     testSaturator();
     testInstrumentRecognition();
+    testChannelChain();
+    testChainPlanner();
     testWavRoundTrip();
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "OK" : "FAILED", failures, failures == 1 ? "" : "s");

@@ -31,6 +31,13 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   from the Learn pass (rule-based on temporal features plus the ERB spectrum, tested on synthetic parts only) and sets
   it with `defaultPriority` only while the role is still "Inny". Adaptive mode is `CommandKind::adapt` (EQ only, the
   backup stays): one step a second of at most 0.25 dB towards the solver's answer, with enter/release hysteresis.
+- Phase 7 "Inżynier miksu": `ma/ChannelChain.h` (cleanup = 24 dB/oct HPF + phase-coherent mono-below + mud bell,
+  RMS compressor, 4x oversampled clipper, bass-note evener driven by a zero-crossing pitch tracker) sits after the Brain EQ
+  (order: cleanup, EQ, clipper, compressor, evener, saturator...). It IS part of `Command` and the A/B backup. The Learn pass
+  stores level percentiles and the usual low note (persisted in the Agent state). `ma/ChainPlanner.h` plans every channel at once
+  from raw post-trim spectra plus those stats (role profiles, compression capped per role so arrangement dynamics stay); the Brain's
+  `proposeWholeMix` runs it, re-runs the normal proposal on the mix with the planned cleanup, and builds a per-channel verdict.
+  `MixSnapshot::Channel::rawDb` is pre-cleanup, `bandsDb` post-cleanup pre-EQ, `heardDb` post-EQ.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 
