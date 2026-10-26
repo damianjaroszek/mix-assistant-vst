@@ -46,6 +46,10 @@ private:
     juce::TextButton newStemsButton, loadStemsButton, removeStemsButton;
     std::unique_ptr<juce::FileChooser> stemChooser;
     juce::String shownStems;
+    // Phase 10: the track's key (detected or set by hand).
+    juce::ComboBox keyBox;
+    juce::TextButton redetectKeyButton;
+    void updateKeyControls(juce::String& status, bool& warning);
     void refreshStemTargets();
     void askForNewStemTarget();
     void chooseStems();

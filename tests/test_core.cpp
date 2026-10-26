@@ -17,6 +17,7 @@
 #include "ma/Stereo.h"
 #include "ma/StereoPlanner.h"
 #include "ma/StemReference.h"
+#include "ma/Key.h"
 #include "ma/EqualLoudness.h"
 #include "ma/GainStaging.h"
 #include "ma/LevelStats.h"
@@ -1608,7 +1609,13 @@ void testStems()
     const std::array<bool, 4> all { true, true, true, true };
     ma::StemTarget simple;
     simple.name = "simple";
-    simple.profiles.push_back({ "ref", ma::measureStemGroups(ref, side, all), 20.0, -1.0 });
+    {
+        ma::StemProfile p;
+        p.name = "ref";
+        p.measure = ma::measureStemGroups(ref, side, all);
+        p.dropSeconds = 20.0;
+        simple.profiles.push_back(p);
+    }
     simple.rebuild();
 
     auto ours = ref;
@@ -1671,6 +1678,147 @@ void testWavRoundTrip()
 
 } // namespace
 
+// Phase 10: keys, and reference profiles moved to the track's key.
+void testKey()
+{
+    check(ma::keyName({ 9, true }) == "a-moll" && ma::camelotCode({ 9, true }) == "8A", "A minor is a-moll, 8A");
+    check(ma::keyName({ 0, false }) == "C-dur" && ma::camelotCode({ 0, false }) == "8B", "C major is C-dur, 8B");
+    check(ma::camelotCode({ 5, true }) == "4A" && ma::camelotCode({ 6, false }) == "2B" && ma::keyName({ 10, false }) == "B-dur",
+          "F minor 4A, F sharp major 2B, B flat is B");
+    bool roundTrip = true;
+    for (int k = 0; k < 24; ++k)
+    {
+        const auto key = ma::keyFromIndex(k);
+        roundTrip = roundTrip && ma::keyFromCamelot(ma::camelotNumber(key), key.minor) == key && ma::keyIndex(key) == k;
+    }
+    check(roundTrip, "Camelot and index round trip for all 24 keys");
+    check(ma::keyShiftSemitones({ 9, true }, { 5, true }) == -4, "a-moll to f-moll: 4 semitones down");
+    check(ma::keyShiftSemitones({ 9, true }, { 0, false }) == 0, "relative keys share their notes: no shift");
+    check(ma::keyShiftSemitones({ 7, true }, { 1, true }) == 6 && ma::keyShiftSemitones({ 2, true }, { 0, true }) == -2,
+          "always the shortest way, at most 6");
+    check(!ma::estimateKey({}).key.valid(), "no notes, no key");
+
+    // A minor-key progression with bass, chords, a kick and hats.
+    auto detect = [](double sr, int tonic, double seconds) {
+        constexpr double pi = 3.14159265358979323846;
+        // Chord roots (semitones above the tonic) and their thirds: i - VI - i - VII.
+        const int roots[4] { 0, 8, 0, 10 };
+        const bool minorChord[4] { true, false, true, false };
+        ma::KeyDetector detector;
+        detector.prepare(sr);
+        const int n = 512;
+        std::vector<float> l(static_cast<size_t>(n)), r(static_cast<size_t>(n));
+        unsigned noise = 7;
+        const auto total = static_cast<int>(seconds * sr);
+        for (int start = 0; start < total; start += n)
+        {
+            for (int i = 0; i < n; ++i)
+            {
+                const double t = (start + i) / sr;
+                const int chord = static_cast<int>(t / 2.0) % 4;
+                const int root = tonic + roots[chord];
+                // Bass on the root around 40-80 Hz, five harmonics.
+                const double bassHz = 440.0 * std::pow(2.0, (24 + ((root + 7) % 12) - 69 + 12) / 12.0) / 2.0;
+                double x = 0.0;
+                for (int h = 1; h <= 5; ++h)
+                    x += 0.25 / h * std::sin(2 * pi * bassHz * h * t);
+                const int third = minorChord[chord] ? 3 : 4;
+                for (int interval : { 0, third, 7, 12 })
+                {
+                    const double hz = 440.0 * std::pow(2.0, (48 + ((root % 12)) + interval - 69 + 12) / 12.0);
+                    for (int h = 1; h <= 3; ++h)
+                        x += 0.05 / h * std::sin(2 * pi * hz * h * t);
+                }
+                const double beat = std::fmod(t, 0.5);
+                x += beat < 0.15 ? 0.6 * std::exp(-beat * 25.0) * std::sin(2 * pi * 50.0 * beat * (1.0 + 2.0 * std::exp(-beat * 40.0))) : 0.0;
+                noise = noise * 1664525u + 1013904223u;
+                x += (std::fmod(t + 0.25, 0.5) < 0.05 ? 0.1 : 0.01) * (static_cast<double>(noise) / 4294967296.0 * 2.0 - 1.0);
+                l[static_cast<size_t>(i)] = r[static_cast<size_t>(i)] = static_cast<float>(x * 0.7);
+            }
+            const float* channels[] { l.data(), r.data() };
+            detector.process(channels, 2, n);
+        }
+        return std::make_pair(ma::estimateKey(detector.chroma()), detector.secondsHeard());
+    };
+    const auto fMinor = detect(44100.0, 5, 24.0);
+    std::printf("  key: %s %s r=%.2f margin=%.2f heard %.1f s\n", ma::keyName(fMinor.first.key).c_str(),
+                ma::camelotCode(fMinor.first.key).c_str(), fMinor.first.correlation, fMinor.first.margin, fMinor.second);
+    check(fMinor.first.key == ma::MusicalKey { 5, true } && fMinor.first.confident, "an F minor progression reads f-moll (4A)");
+    checkNear(fMinor.second, 24.0, 2.0, "the detector heard the whole part (s)");
+    const auto aMinor = detect(48000.0, 9, 24.0);
+    std::printf("  key: %s %s r=%.2f margin=%.2f\n", ma::keyName(aMinor.first.key).c_str(), ma::camelotCode(aMinor.first.key).c_str(),
+                aMinor.first.correlation, aMinor.first.margin);
+    check(aMinor.first.key == ma::MusicalKey { 9, true } && aMinor.first.confident, "an A minor progression reads a-moll (8A) at 48 kHz");
+
+    // Shifting a spectrum: a peak an octave up lands an octave up, the power stays.
+    ma::SpectrumAnalyzer::Bands peak;
+    peak.fill(-200.0);
+    auto bandAt = [](double hz) {
+        for (int b = 0; b < 40; ++b)
+            if (hz < ma::SpectrumAnalyzer::bandEdgeHz(ma::BandScale::erb, b + 1))
+                return b;
+        return 39;
+    };
+    peak[static_cast<size_t>(bandAt(100.0))] = -20.0;
+    const auto octave = ma::shiftErbSpectrum(peak, 12);
+    const auto loudest = static_cast<int>(std::max_element(octave.begin(), octave.end()) - octave.begin());
+    double totalPower = 0.0;
+    for (double v : octave)
+        totalPower += v > -199.0 ? std::pow(10.0, v / 10.0) : 0.0;
+    check(std::abs(ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, loudest) - 200.0) < 30.0, "an octave up moves 100 Hz to 200 Hz");
+    checkNear(10.0 * std::log10(totalPower), -20.0, 0.1, "shifting keeps the power (dB)");
+
+    // A reference in G minor with its bass on G2 (98 Hz, the bass region); our track in E minor:
+    // 3 semitones down puts it at 82 Hz, in the sub region.
+    std::array<ma::SpectrumAnalyzer::Bands, 4> groupDb {}, sideDb {};
+    for (size_t g = 0; g < 4; ++g)
+    {
+        groupDb[g].fill(-200.0);
+        sideDb[g].fill(-200.0);
+    }
+    for (int b = 0; b < 40; ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        const auto at = static_cast<size_t>(b);
+        groupDb[0][at] = hz > 40.0 && hz < 12000.0 ? -34.0 : -200.0;
+        groupDb[3][at] = hz > 250.0 && hz < 10000.0 ? -38.0 : -200.0;
+        sideDb[3][at] = groupDb[3][at] - 4.0;
+    }
+    groupDb[1][static_cast<size_t>(bandAt(98.0))] = -18.0;
+    groupDb[1][static_cast<size_t>(bandAt(196.0))] = -28.0;
+    ma::StemProfile reference;
+    reference.name = "g minor";
+    reference.groupDb = groupDb;
+    reference.sideDb = sideDb;
+    reference.hasBands = true;
+    reference.key = { 7, true };
+    reference.measure = ma::measureStemGroups(groupDb, sideDb, { true, true, false, true });
+    ma::StemTarget set;
+    set.name = "keys";
+    set.profiles.push_back(reference);
+    set.rebuild();
+    const auto keyed = ma::keyedStemTarget(set, { 4, true });
+    const auto& before = set.profiles[0].measure.groups[1];
+    const auto& after = keyed.profiles[0].measure.groups[1];
+    std::printf("  bass sub %.1f -> %.1f dB, bass region %.1f -> %.1f dB\n", before.shapeDb[0], after.shapeDb[0], before.shapeDb[1],
+                after.shapeDb[1]);
+    // ERB bands are about half an octave wide down there, so the move shows as a share.
+    check(keyed.profiles[0].shiftSemitones == -3 && !before.shapeValid[0] && after.shapeValid[0] && after.shapeDb[0] > -3.0,
+          "moved to E minor, the reference's bass reaches into the sub");
+    check(keyed.profiles[0].groupDb[0] == set.profiles[0].groupDb[0], "drums are not moved");
+    check(ma::keyedStemTarget(set, { 10, false }).profiles[0].shiftSemitones == 0, "the relative major needs no shift");
+    check(ma::keyedStemTarget(set, {}).profiles[0].shiftSemitones == 0, "an unknown track key leaves the set alone");
+
+    ma::StemTarget reread;
+    check(ma::parseStemTarget(ma::serialiseStemTarget(set), reread) && reread.profiles[0].key == reference.key
+              && reread.profiles[0].hasBands && std::abs(reread.profiles[0].groupDb[1][static_cast<size_t>(bandAt(98.0))] + 18.0) < 0.01,
+          "the key and the spectra are saved with the set");
+    ma::StemTarget old;
+    check(ma::parseStemTarget("old\nprofile 20 -1 x\ngroup bass 1 -3 - 2 1 - - - -\n", old) && !old.profiles[0].hasBands
+              && ma::keyedStemTarget(old, { 4, true }).profiles[0].shiftSemitones == 0,
+          "a set saved before phase 10 loads and stays where it is");
+}
+
 int main()
 {
     testLoudness();
@@ -1699,6 +1847,7 @@ int main()
     testResonances();
     testStereo();
     testStems();
+    testKey();
     testWavRoundTrip();
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "OK" : "FAILED", failures, failures == 1 ? "" : "s");

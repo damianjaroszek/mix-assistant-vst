@@ -54,6 +54,13 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   moves group levels (trims, thresholds with them) keeping the overall loudness; the solver's `stems` stage adds broad
   bells per group from pre-EQ drop spectra. Reference stems load on a worker thread (JUCE readers, MP3 enabled in the Brain).
   `MixSnapshot::Channel::rawDb` is pre-cleanup, `bandsDb` post-cleanup pre-EQ, `heardDb` post-EQ.
+  Phase 10 key (`ma/Key.h`): `KeyDetector` (downsampled to ~11 kHz, 8192-point FFT, spectral peaks to pitch classes, plus a
+  bass-only profile below 160 Hz) and `estimateKey` (Sha'ath profiles; the relative key is a tie decided by the bass, minor
+  by default). Profiles keep each group's ERB mid/side spectrum and their key (`key`/`mid`/`side` lines in `.mastems`; old sets
+  parse without them and are never shifted). `keyedStemTarget` shifts bass/vocals/music spectra (`shiftErbSpectrum`, power
+  spread evenly over each band) by `keyShiftSemitones` (via relative majors, -5..+6) and re-measures; the Brain keeps the saved
+  set (`currentStems`) and the keyed one (`keyedStems`, used everywhere for comparing and planning). The master's key detector
+  ignores `requestReset`; its chroma is saved in the Brain state (`keyChroma`, `keySeconds`) with the manual `keyOverride`.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

@@ -137,12 +137,25 @@ std::array<double, kStemGroups> weightedPowers(const std::array<SpectrumAnalyzer
     return out;
 }
 
-std::string number(double value)
+std::string number(double value, int decimals = 4)
 {
     std::ostringstream out;
-    out.precision(4);
+    out.precision(decimals);
     out << std::fixed << value;
     return out.str();
+}
+
+bool bandsPresent(const SpectrumAnalyzer::Bands& db)
+{
+    return *std::max_element(db.begin(), db.begin() + numBands()) > -120.0;
+}
+
+StemMeasure measureProfile(const StemProfile& profile)
+{
+    std::array<bool, kStemGroups> present {};
+    for (int g = 0; g < kStemGroups; ++g)
+        present[static_cast<size_t>(g)] = bandsPresent(profile.groupDb[static_cast<size_t>(g)]);
+    return measureStemGroups(profile.groupDb, profile.sideDb, present);
 }
 } // namespace
 
@@ -200,6 +213,12 @@ std::vector<int> stemGroupsFromNames(const std::vector<std::string>& fileNames)
         groups.push_back(group);
     }
     return groups;
+}
+
+bool stemGroupHasKey(int group)
+{
+    return group == static_cast<int>(StemGroup::bass) || group == static_cast<int>(StemGroup::vocals)
+           || group == static_cast<int>(StemGroup::music);
 }
 
 int stemGroupForRole(Role role)
@@ -322,6 +341,7 @@ void StemProfiler::prepare(double rate, bool haveFullMix)
     fullMix = haveFullMix;
     meter.prepare(rate, 2);
     meter.reset();
+    keys.prepare(rate);
     loudness.clear();
     drop.clear();
     for (auto& g : groups)
@@ -339,11 +359,15 @@ void StemProfiler::prepare(double rate, bool haveFullMix)
     dropBlocks = 0;
 }
 
-void StemProfiler::measureBlock(const float* left, const float* right, int numSamples)
+void StemProfiler::measureBlock(const float* left, const float* right, int numSamples, const float* keyLeft,
+                                const float* keyRight)
 {
     const float* channels[] { left, right };
     meter.process(channels, 2, numSamples);
     loudness.push_back(meter.shortTermLufs());
+    // The key over the whole track, not only the drop: more notes, a surer guess.
+    const float* keyChannels[] { keyLeft != nullptr ? keyLeft : left, keyRight != nullptr ? keyRight : (keyLeft != nullptr ? keyLeft : right) };
+    keys.process(keyChannels, 2, numSamples);
 }
 
 void StemProfiler::chooseDrop()
@@ -434,6 +458,15 @@ StemProfile StemProfiler::finish(const std::string& name) const
                                                             groupDb[static_cast<size_t>(g)].begin() + numBands()) > -120.0;
     }
     profile.measure = measureStemGroups(groupDb, sideDb, present);
+    profile.groupDb = groupDb;
+    profile.sideDb = sideDb;
+    profile.hasBands = true;
+    const auto key = keys.estimate();
+    if (key.confident)
+    {
+        profile.key = key.key;
+        profile.keyCorrelation = key.correlation;
+    }
 
     // Do the stems add up to the track? Missing stems or a poor separation show here.
     if (fullMix && mix.framesAnalysed() > 0 && sum.framesAnalysed() > 0)
@@ -493,6 +526,18 @@ std::string serialiseStemTarget(const StemTarget& target)
     for (const auto& p : target.profiles)
     {
         out << "profile " << number(p.dropSeconds) << " " << number(p.separationErrorDb) << " " << p.name << "\n";
+        if (p.key.valid())
+            out << "key " << p.key.tonic << " " << (p.key.minor ? 1 : 0) << " " << number(p.keyCorrelation) << "\n";
+        if (p.hasBands)
+            for (int g = 0; g < kStemGroups; ++g)
+                for (int which = 0; which < 2; ++which)
+                {
+                    const auto& db = (which == 0 ? p.groupDb : p.sideDb)[static_cast<size_t>(g)];
+                    out << (which == 0 ? "mid " : "side ") << stemGroupKey(static_cast<StemGroup>(g));
+                    for (int b = 0; b < numBands(); ++b)
+                        out << " " << number(std::max(kAbsentDb, db[static_cast<size_t>(b)]), 2);
+                    out << "\n";
+                }
         for (int g = 0; g < kStemGroups; ++g)
         {
             const auto& m = p.measure.groups[static_cast<size_t>(g)];
@@ -529,7 +574,44 @@ bool parseStemTarget(const std::string& text, StemTarget& target)
                 return false;
             std::getline(words >> std::ws, p.name);
             p.measure.valid = true;
+            for (auto* set : { &p.groupDb, &p.sideDb })
+                for (auto& db : *set)
+                    db.fill(kAbsentDb);
             parsed.profiles.push_back(p);
+        }
+        else if (kind == "key")
+        {
+            if (parsed.profiles.empty())
+                return false;
+            int tonic = -1, minor = 0;
+            double correlation = 0.0;
+            words >> tonic >> minor >> correlation;
+            if (words.fail() || tonic < 0 || tonic >= 12)
+                return false;
+            parsed.profiles.back().key = { tonic, minor != 0 };
+            parsed.profiles.back().keyCorrelation = correlation;
+        }
+        else if (kind == "mid" || kind == "side")
+        {
+            if (parsed.profiles.empty())
+                return false;
+            std::string key;
+            words >> key;
+            int g = -1;
+            for (int k = 0; k < kStemGroups; ++k)
+                if (key == stemGroupKey(static_cast<StemGroup>(k)))
+                    g = k;
+            if (g < 0)
+                return false;
+            auto& p = parsed.profiles.back();
+            auto& db = (kind == "mid" ? p.groupDb : p.sideDb)[static_cast<size_t>(g)];
+            for (int b = 0; b < numBands(); ++b)
+            {
+                words >> db[static_cast<size_t>(b)];
+                if (words.fail())
+                    return false;
+            }
+            p.hasBands = true;
         }
         else if (kind == "group")
         {
@@ -570,6 +652,33 @@ bool parseStemTarget(const std::string& text, StemTarget& target)
     parsed.rebuild();
     target = std::move(parsed);
     return true;
+}
+
+StemTarget keyedStemTarget(const StemTarget& target, MusicalKey trackKey)
+{
+    StemTarget out = target;
+    bool moved = false;
+    for (auto& p : out.profiles)
+    {
+        p.shiftSemitones = 0;
+        if (!trackKey.valid() || !p.key.valid() || !p.hasBands)
+            continue;
+        const int shift = keyShiftSemitones(p.key, trackKey);
+        if (shift == 0)
+            continue;
+        for (int g = 0; g < kStemGroups; ++g)
+            if (stemGroupHasKey(g))
+            {
+                p.groupDb[static_cast<size_t>(g)] = shiftErbSpectrum(p.groupDb[static_cast<size_t>(g)], shift);
+                p.sideDb[static_cast<size_t>(g)] = shiftErbSpectrum(p.sideDb[static_cast<size_t>(g)], shift);
+            }
+        p.measure = measureProfile(p);
+        p.shiftSemitones = shift;
+        moved = true;
+    }
+    if (moved)
+        out.rebuild();
+    return out;
 }
 
 StemComparison compareStems(const StemMeasure& mix, const StemTarget& target)

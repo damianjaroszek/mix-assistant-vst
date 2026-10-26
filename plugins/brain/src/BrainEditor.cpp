@@ -173,6 +173,30 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     for (auto* c : std::initializer_list<juce::Component*> { &newStemsButton, &loadStemsButton, &removeStemsButton })
         addChildComponent(c);
     refreshStemTargets();
+    // Items: 1 = detect, then 2.. the 24 keys around the Camelot wheel (1A, 1B, 2A, ...).
+    keyBox.addItem(pl("Tonacja: wykryj"), 1);
+    for (int number = 1; number <= 12; ++number)
+        for (bool minor : { true, false })
+        {
+            const auto key = ma::keyFromCamelot(number, minor);
+            keyBox.addItem(juce::String(ma::camelotCode(key)) + "  " + juce::String(ma::keyName(key)), 2 + ma::keyIndex(key));
+        }
+    keyBox.setColour(juce::ComboBox::backgroundColourId, colours::panel);
+    keyBox.setTooltip(pl("Tonacja Twojego utworu. Profile referencji (bas, wokal, reszta) przesuwam do niej, "
+                         "żeby bas referencji w innej tonacji nie udawał za dużo albo za mało suba. "
+                         "Wykrywam ją z mastera; jeśli ją znasz, wybierz ręcznie."));
+    keyBox.onChange = [this] {
+        if (keyBox.getSelectedId() > 0)
+            processor.setKeyOverride(keyBox.getSelectedId() - 2);
+    };
+    addChildComponent(keyBox);
+    styleButton(redetectKeyButton, pl("Wykryj od nowa"));
+    redetectKeyButton.setTooltip(pl("Zapomina tonację usłyszaną do tej pory (np. po zmianie utworu w projekcie) i słucha mastera od nowa."));
+    redetectKeyButton.onClick = [this] {
+        processor.restartKeyDetection();
+        processor.setKeyOverride(-1);
+    };
+    addChildComponent(redetectKeyButton);
     verdictViewButton.setButtonText(pl("Werdykt"));
     verdictViewButton.onClick = [this] { showView(View::verdict); };
     verdictView.onSelect = [this](std::uint64_t owner) { select(owner == selected ? 0 : owner); };
@@ -242,7 +266,8 @@ void BrainEditor::showView(View view)
     translationView.setVisible(view == View::translation);
     verdictViewport.setVisible(view == View::verdict);
     stereoView.setVisible(view == View::stereo);
-    for (auto* c : std::initializer_list<juce::Component*> { &stemView, &stemBox, &newStemsButton, &loadStemsButton, &removeStemsButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &stemView, &stemBox, &newStemsButton, &loadStemsButton, &removeStemsButton,
+                                                             &keyBox, &redetectKeyButton })
         c->setVisible(view == View::stems);
     overlayLabel.setVisible(false);
     for (auto* c : std::initializer_list<juce::Component*> { &tonalView, &targetBox, &newTargetButton, &captureButton, &removeReferenceButton })
@@ -406,7 +431,10 @@ void BrainEditor::timerCallback()
     else
         stemStatus = pl("Zestaw „") + stemsName + "\" (" + juce::String(static_cast<int>(stems.profiles.size()))
                      + pl(" ref.), drop miksu: ") + juce::String(juce::roundToInt(mix.dropSeconds)) + " s";
-    stemView.setData(stems, mix.stems, stemStatus, stemWarning);
+    juce::String keyStatus;
+    bool keyWarning = false;
+    updateKeyControls(keyStatus, keyWarning);
+    stemView.setData(stems, mix.stems, stemStatus, stemWarning, keyStatus, keyWarning);
     loadStemsButton.setEnabled(stemsName.isNotEmpty() && !processor.isAnalysingStems());
     removeStemsButton.setEnabled(stems.valid() && !processor.isAnalysingStems());
     translationView.setData(mix);
@@ -573,6 +601,11 @@ void BrainEditor::resized()
         controls.removeFromLeft(6);
         removeStemsButton.setBounds(controls.removeFromLeft(110));
         viewArea.removeFromTop(4);
+        auto keyRow = viewArea.removeFromTop(26);
+        keyBox.setBounds(keyRow.removeFromLeft(220));
+        keyRow.removeFromLeft(6);
+        redetectKeyButton.setBounds(keyRow.removeFromLeft(130));
+        viewArea.removeFromTop(4);
         stemView.setBounds(viewArea);
     }
     area.removeFromTop(10);
@@ -602,4 +635,50 @@ void BrainEditor::layoutProposal()
     const int width = proposalViewport.getMaximumVisibleWidth();
     proposalView.setSize(width, 10);
     proposalView.setSize(width, std::max(proposalViewport.getHeight(), proposalView.contentHeight()));
+}
+
+void BrainEditor::updateKeyControls(juce::String& status, bool& warning)
+{
+    const auto& heard = processor.detectedKey();
+    const double seconds = processor.keySecondsHeard();
+    const int manual = processor.keyOverrideIndex();
+    const bool sure = seconds >= BrainProcessor::kMinimumKeySeconds && heard.confident;
+    keyBox.changeItemText(1, sure ? pl("Wykryta: ") + BrainProcessor::keyText(heard.key) : pl("Tonacja: wykryj"));
+    if (keyBox.getSelectedId() != manual + 2)
+        keyBox.setSelectedId(manual + 2, juce::dontSendNotification);
+
+    const auto key = processor.trackKey();
+    warning = false;
+    if (!key.valid())
+    {
+        warning = seconds >= BrainProcessor::kMinimumKeySeconds;
+        status = seconds < BrainProcessor::kMinimumKeySeconds
+                     ? pl("Tonacja utworu: słucham mastera (") + juce::String(juce::roundToInt(seconds)) + " / "
+                           + juce::String(juce::roundToInt(BrainProcessor::kMinimumKeySeconds)) + pl(" s). Do tego czasu referencji nie przesuwam.")
+                     : pl("Tonacja utworu niepewna (najbliżej ") + BrainProcessor::keyText(heard.key)
+                           + pl("). Wybierz ją ręcznie, wtedy przesunę referencje.");
+        return;
+    }
+    status = pl("Tonacja utworu: ") + BrainProcessor::keyText(key) + (manual >= 0 ? pl(" (ręcznie)") : pl(" (wykryta)")) + ". ";
+    const auto& stems = processor.stemTarget();
+    if (stems.profiles.empty())
+        return;
+    juce::StringArray moved;
+    int unknown = 0;
+    for (const auto& p : stems.profiles)
+    {
+        const auto name = juce::String::fromUTF8(p.name.c_str());
+        if (!p.key.valid() || !p.hasBands)
+            ++unknown;
+        else if (p.shiftSemitones != 0)
+            moved.add(name + " " + BrainProcessor::keyText(p.key) + ": " + (p.shiftSemitones > 0 ? "+" : "")
+                      + juce::String(p.shiftSemitones) + pl(" półt."));
+    }
+    status += moved.isEmpty() ? pl("Referencje są w tej samej tonacji (albo równoległej), nic nie przesuwam.")
+                              : pl("Przesunięte: ") + moved.joinIntoString(", ") + ".";
+    if (unknown > 0)
+    {
+        status += " " + juce::String(unknown) + pl(" bez przesunięcia (tonacja niepewna albo zestaw sprzed tej wersji).");
+        warning = true;
+    }
 }
