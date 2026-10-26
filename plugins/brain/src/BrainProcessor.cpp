@@ -2,6 +2,7 @@
 
 #include "BrainEditor.h"
 #include "MaUi.h"
+#include "ma/Instrument.h"
 
 #include <algorithm>
 #include <functional>
@@ -26,6 +27,13 @@ constexpr double kOnsetShare = 0.5;              // share of a percussive channe
 constexpr float kMaxHarmonicsDb = -3.0f;
 constexpr float kMaxPercussiveHarmonicsDb = -8.0f;
 constexpr float kMaxAttackDb = 6.0f;
+constexpr std::uint64_t kAdaptEveryMs = 1000;   // adaptive mode: one small step a second ...
+constexpr double kAdaptStepDb = 0.25;           // ... of at most this much per band
+constexpr double kAdaptDeadbandDb = 0.3;        // closer than this to the answer counts as there
+constexpr int kAdaptReleaseRounds = 5;          // a band is let go only after the solver drops it this many times in a row ...
+constexpr int kAdaptEnterRounds = 3;            // ... and a new one starts after it asked for it this many times
+constexpr double kAdaptMinimumLufs = -40.0;     // quieter than this (momentary) is a break, not the mix ...
+constexpr std::uint64_t kAdaptSettleMs = 4000;  // ... and the averaged spectra need this long after one to settle
 
 juce::String quoted(const juce::String& name)
 {
@@ -71,6 +79,7 @@ BrainProcessor::BrainProcessor()
       parameters(*this, nullptr, "BrainState", createLayout())
 {
     peakCeiling = parameters.getRawParameterValue(peakCeilingId);
+    adaptive = parameters.getRawParameterValue(adaptiveId);
     for (auto& b : bands)
         b.store(-INFINITY);
     for (auto& b : averageBands)
@@ -99,6 +108,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout BrainProcessor::createLayout
         juce::ParameterID { peakCeilingId, 1 }, "Pre-master peak ceiling",
         juce::NormalisableRange<float> { -12.0f, 0.0f, 0.5f }, -6.0f,
         juce::AudioParameterFloatAttributes().withLabel("dBTP")));
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { adaptiveId, 2 }, "Adaptive mode", false));
 
     return layout;
 }
@@ -241,7 +251,140 @@ void BrainProcessor::timerCallback()
     }
     mix.translation = ma::analyseTranslation(translation);
     updateLoudnessMatch(now);
+    adaptStep(now);
     buildReport();
+}
+
+ma::SolverResult BrainProcessor::solveNow(double headroomGainDb) const
+{
+    std::vector<ma::SolverChannel> channels(mix.channels.size());
+    for (size_t c = 0; c < mix.channels.size(); ++c)
+    {
+        channels[c].valid = mix.channels[c].spectrumValid;
+        channels[c].priority = mix.channels[c].data.priority;
+        for (int b = 0; b < ma::bus::kBands; ++b)
+            channels[c].rawDb[static_cast<size_t>(b)] = mix.channels[c].bandsDb[static_cast<size_t>(b)];
+    }
+    ma::SolverOptions options;
+    options.headroomGainDb = headroomGainDb;
+    if (mix.tonal.valid)
+        options.tonal = &mix.tonal;
+    return ma::solve(channels, options);
+}
+
+void BrainProcessor::adaptStep(std::uint64_t now)
+{
+    adaptiveState.running = false;
+    adaptiveState.waitingFor = {};
+    if (!isAdaptive())
+    {
+        adaptVotes.clear();
+        return;
+    }
+    int playing = 0;
+    for (const auto& channel : mix.channels)
+        playing += channel.spectrumValid ? 1 : 0;
+    if (useProfiles)
+        adaptiveState.waitingFor = pl("działa na tym, co gra, nie na nauczonych profilach");
+    else if (comparing || capturing)
+        adaptiveState.waitingFor = comparing ? pl("trwa porównanie przed / po") : pl("trwa nagrywanie referencji");
+    else if (playing < 2)
+        adaptiveState.waitingFor = pl("potrzeba co najmniej dwóch grających kanałów");
+    // A break (or its first seconds back) must not move anything: the spectra are still fading.
+    const bool playingNow = std::isfinite(momentaryLufs()) && momentaryLufs() >= kAdaptMinimumLufs;
+    playingSinceMs = playingNow ? (playingSinceMs == 0 ? now : playingSinceMs) : 0;
+    if (adaptiveState.waitingFor.isEmpty() && (playingSinceMs == 0 || now - playingSinceMs < kAdaptSettleMs))
+        adaptiveState.waitingFor = pl("czeka na muzykę (przerwy nie zmieniają ustawień)");
+    if (adaptiveState.waitingFor.isNotEmpty())
+        return;
+    adaptiveState.running = true;
+    if (now - lastAdaptMs < kAdaptEveryMs)
+        return;
+    lastAdaptMs = now;
+
+    // The solver's full answer from the pre-EQ spectra; each band then moves a small step towards it.
+    auto solved = solveNow(0.0);
+    // A low collision the masker already gives way to dynamically (kick and bass) needs no static cut too.
+    for (const auto& change : solved.changes)
+    {
+        if (change.kind != ma::SolverChange::Kind::eqCut || change.highHz > kDuckMaxHz)
+            continue;
+        const auto& masker = mix.channels[static_cast<size_t>(change.channel)];
+        if (masker.data.duck.on > 0.5f)
+            solved.eq[static_cast<size_t>(change.channel)][static_cast<size_t>(change.eqSlot)] = {};
+    }
+    int moved = 0;
+    for (size_t c = 0; c < mix.channels.size(); ++c)
+    {
+        const auto& channel = mix.channels[c];
+        if (!channel.spectrumValid || channel.data.eqBypass != 0)
+            continue;
+        auto& votes = adaptVotes[channel.owner];
+        ma::EqSettings next {};
+        bool changed = false;
+        for (int b = 0; b < ma::kEqBands; ++b)
+        {
+            const auto slot = static_cast<size_t>(b);
+            const auto current = channel.data.eq[b];
+            auto target = solved.eq[c][slot];
+            next[slot] = current;
+
+            // Letting a band go needs the solver to agree several times; it may only be wavering.
+            const bool same = ma::isOn(current) && ma::isOn(target) && std::abs(std::log2(current.hz / target.hz)) < 1.0 / 3.0;
+            if (ma::isOn(current) && !same)
+            {
+                if (++votes.release[slot] < kAdaptReleaseRounds)
+                    continue;
+            }
+            else
+            {
+                votes.release[slot] = 0;
+            }
+            if (!ma::isOn(current) && ma::isOn(target))
+            {
+                if (++votes.enter[slot] < kAdaptEnterRounds)
+                    continue;
+            }
+            else
+            {
+                votes.enter[slot] = 0;
+            }
+
+            if (same || !ma::isOn(current))
+            {
+                if (!ma::isOn(target))
+                    continue;
+                // Same band (or a free slot): follow the answer's frequency and Q, step the gain.
+                const double gap = target.gainDb - (ma::isOn(current) ? current.gainDb : 0.0);
+                if (ma::isOn(current) && std::abs(gap) < kAdaptDeadbandDb)
+                    continue;
+                const double from = ma::isOn(current) ? current.gainDb : 0.0;
+                next[slot] = { target.hz, static_cast<float>(from + juce::jlimit(-kAdaptStepDb, kAdaptStepDb, gap)), target.q };
+            }
+            else
+            {
+                // A band the answer no longer has (or has elsewhere): fade it out first.
+                const double gain = current.gainDb;
+                next[slot].gainDb = std::abs(gain) <= kAdaptStepDb ? 0.0f : static_cast<float>(gain - std::copysign(kAdaptStepDb, gain));
+            }
+            changed = changed || !ma::sameBand(next[slot], current);
+        }
+        if (!changed)
+            continue;
+        ma::bus::Command command {};
+        command.target = channel.owner;
+        command.serial = ++commandSerial;
+        command.kind = ma::bus::CommandKind::adapt;
+        for (int b = 0; b < ma::kEqBands; ++b)
+            command.eq[b] = next[static_cast<size_t>(b)];
+        sendCommand(channel.owner, command);
+        ++moved;
+    }
+    if (moved > 0)
+    {
+        adaptiveState.lastChangeMs = now;
+        adaptiveState.channelsMoved = moved;
+    }
 }
 
 void BrainProcessor::collectChannels(ma::bus::Region& region, std::uint64_t now)
@@ -395,14 +538,17 @@ void BrainProcessor::buildReport()
     // Gain staging of the channels.
     if (!mix.channels.empty())
     {
-        juce::StringArray notLearned, limited, hot;
+        juce::StringArray notLearned, limited, hot, driven;
         for (const auto& channel : mix.channels)
         {
             if (channel.data.hasProfile == 0)
                 notLearned.add(channel.name);
             if (channel.data.trimLimited != 0)
                 limited.add(channel.name);
-            if (channel.data.outputPeakDb > 0.0f)
+            // A channel marked for deliberate overdrive may go over: it is reported, not flagged.
+            if (channel.data.intentionalDrive != 0)
+                driven.add(channel.name);
+            else if (channel.data.outputPeakDb > 0.0f)
                 hot.add(channel.name);
         }
 
@@ -411,7 +557,8 @@ void BrainProcessor::buildReport()
         if (!hot.isEmpty())
         {
             item.status = Status::problem;
-            item.detail = pl("Ponad 0 dBFS na wyjściu: ") + joinNames(hot) + pl(". Naucz poziom albo obniż trim.");
+            item.detail = pl("Ponad 0 dBFS na wyjściu: ") + joinNames(hot)
+                          + pl(". Naucz poziom albo obniż trim. Jeśli to zamierzone, zaznacz w Agencie „Celowy przester”.");
         }
         else if (!limited.isEmpty() || !notLearned.isEmpty())
         {
@@ -425,7 +572,47 @@ void BrainProcessor::buildReport()
         else
         {
             item.status = Status::good;
-            item.detail = pl("Wszystkie kanały nauczone, bez przesterowań.");
+            item.detail = driven.isEmpty() ? pl("Wszystkie kanały nauczone, bez przesterowań.") : pl("Wszystkie kanały nauczone.");
+        }
+        if (!driven.isEmpty())
+            item.detail << "\n" << pl("Celowo przesterowane (bez ostrzeżeń): ") << joinNames(driven) << ".";
+        report.push_back(item);
+
+        // Roles drive priorities and every proposal; the Agent recognises them while it learns.
+        juce::StringArray noRole;
+        for (const auto& channel : mix.channels)
+            if (channel.data.role == static_cast<int>(ma::Role::other))
+                noRole.add(channel.name);
+        if (!noRole.isEmpty())
+        {
+            MixSnapshot::ReportItem roles;
+            roles.title = pl("Role kanałów");
+            roles.status = Status::warning;
+            roles.detail = pl("Bez roli: ") + joinNames(noRole)
+                           + pl(". „Naucz poziom” w Agencie rozpozna instrument i ustawi rolę i priorytet, albo wybierz ją sam.");
+            report.push_back(roles);
+        }
+    }
+
+    // Adaptive mode.
+    if (isAdaptive())
+    {
+        MixSnapshot::ReportItem item;
+        item.title = pl("Tryb adaptacyjny");
+        const auto& a = adaptiveState;
+        if (!a.running)
+        {
+            item.status = Status::warning;
+            item.detail = pl("Włączony, wstrzymany: ") + a.waitingFor + ".";
+        }
+        else
+        {
+            item.status = Status::good;
+            item.detail = pl("Śledzi miks: korekcje EQ zmieniają się najwyżej o ") + juce::String(kAdaptStepDb, 2)
+                          + pl(" dB na sekundę, w limitach solvera.");
+            if (a.lastChangeMs != 0)
+                item.detail << pl(" Ostatnia zmiana ") << juce::String(static_cast<int>((ma::SharedSession::nowMs() - a.lastChangeMs) / 1000))
+                            << pl(" s temu (kanały: ") << juce::String(a.channelsMoved) << ").";
         }
         report.push_back(item);
     }
@@ -605,24 +792,9 @@ void BrainProcessor::propose()
     currentProposal = {};
     currentProposal.made = true;
 
-    std::vector<ma::SolverChannel> channels(mix.channels.size());
-    for (size_t c = 0; c < mix.channels.size(); ++c)
-    {
-        channels[c].valid = mix.channels[c].spectrumValid;
-        channels[c].priority = mix.channels[c].data.priority;
-        for (int b = 0; b < ma::bus::kBands; ++b)
-            channels[c].rawDb[static_cast<size_t>(b)] = mix.channels[c].bandsDb[static_cast<size_t>(b)];
-    }
-
-    ma::SolverOptions options;
     const double peak = truePeakDb();
     const double over = std::isfinite(peak) ? peak - peakCeilingDb() : 0.0;
-    if (over > 0.0)
-        options.headroomGainDb = -std::ceil((over + 0.5) * 2.0) / 2.0;
-
-    if (mix.tonal.valid)
-        options.tonal = &mix.tonal;
-    const auto solved = ma::solve(channels, options);
+    const auto solved = solveNow(over > 0.0 ? -std::ceil((over + 0.5) * 2.0) / 2.0 : 0.0);
     currentProposal.crowdingBefore = solved.crowdingBefore;
     currentProposal.crowdingAfter = solved.crowdingAfter;
     for (size_t c = 0; c < mix.channels.size(); ++c)

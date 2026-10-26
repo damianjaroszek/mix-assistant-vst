@@ -60,6 +60,12 @@ private:
     juce::Slider attackFreqSlider, attackAmountSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> attackOnAttachment;
 
+    juce::Label satLabel, satDriveLabel, satMixLabel;
+    juce::ToggleButton satOnButton, intentionalButton;
+    juce::ComboBox satModeBox;
+    juce::Slider satDriveSlider, satMixSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> satOnAttachment, intentionalAttachment;
+
     juce::Label spectrumLabel;
     juce::ToggleButton showProfileButton;
     ma::ui::SpectrumView spectrumView { -84.0 };
@@ -67,10 +73,10 @@ private:
     using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;
     using ComboAttachment = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
     std::unique_ptr<SliderAttachment> priorityAttachment, targetAttachment, trimAttachment, ceilingAttachment, learnTimeAttachment;
-    std::unique_ptr<ComboAttachment> roleAttachment, measureAttachment, duckModeAttachment, duckSyncAttachment;
+    std::unique_ptr<ComboAttachment> roleAttachment, measureAttachment, duckModeAttachment, duckSyncAttachment, satModeAttachment;
     std::unique_ptr<SliderAttachment> duckFreqAttachment, duckDepthAttachment, duckThresholdAttachment, duckAttackAttachment,
         duckReleaseAttachment, harmonicsFreqAttachment, harmonicsAmountAttachment,
-        attackFreqAttachment, attackAmountAttachment;
+        attackFreqAttachment, attackAmountAttachment, satDriveAttachment, satMixAttachment;
     void updateDuckStatus();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AgentEditor)

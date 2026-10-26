@@ -6,6 +6,8 @@
 #include "ma/CorrelationMeter.h"
 #include "ma/Ducker.h"
 #include "ma/Harmonics.h"
+#include "ma/Instrument.h"
+#include "ma/Saturator.h"
 #include "ma/Transient.h"
 #include "ma/LoudnessMeter.h"
 #include "ma/SpectrumAnalyzer.h"
@@ -74,6 +76,9 @@ public:
         double measuredDb = 0.0;
         double truePeakDb = 0.0;
         double trimDb = 0.0;
+        // Role recognised from the same passage; set on the channel when it still had none.
+        ma::RoleGuess guess {};
+        bool roleSet = false, prioritySet = false;
     };
     LearnResult lastResult() const;
 
@@ -130,8 +135,19 @@ public:
     static constexpr const char* attackOnId = "attackOn";
     static constexpr const char* attackFreqId = "attackFreq";
     static constexpr const char* attackAmountId = "attackAmount";
+    // Creative saturation and deliberate overdrive (phase 6). "Celowy przester" tells the
+    // Learn pass and the Brain that this channel is meant to distort: no peak limit on the
+    // trim, no clipping warnings.
+    static constexpr const char* satOnId = "satOn";
+    static constexpr const char* satModeId = "satMode";
+    static constexpr const char* satDriveId = "satDrive";
+    static constexpr const char* satMixId = "satMix";
+    static constexpr const char* intentionalDriveId = "intentionalDrive";
     static juce::StringArray duckModeNames();
     static juce::StringArray duckSyncNames();
+    static juce::StringArray saturationModeNames();
+    ma::SaturationSettings currentSaturation() const;
+    bool intentionalDrive() const;
 
     struct DynamicState
     {
@@ -157,6 +173,7 @@ private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
     void timerCallback() override;
     void applyLearned();
+    void recogniseRole();
     bool measuresLufs() const;
     void publishToBrain();
     void handleBrainCommand(ma::bus::Region& region);
@@ -174,6 +191,8 @@ private:
     ma::Ducker ducker;
     ma::HarmonicEnhancer harmonics;
     ma::TransientEnhancer transients;
+    ma::Saturator saturator;
+    ma::InstrumentFeatures learnFeatures; // audio thread while learning, read once it has finished
     ma::SpectrumAnalyzer outputSpectrum;
     std::array<std::atomic<double>, kBands> outputBands; // raw dBFS after the whole chain
     ma::CorrelationMeter sidechainCorrelation; // this channel (L) against the sidechain (R)

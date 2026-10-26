@@ -109,6 +109,14 @@ BrainEditor::BrainEditor(BrainProcessor& p)
         processor.toggleProposalItem(index);
         timerCallback();
     };
+    adaptiveButton.setButtonText(pl("Tryb adaptacyjny"));
+    adaptiveButton.setTooltip(pl("Mózg dalej słucha i powoli (0,25 dB na sekundę) przesuwa korekcje EQ w Agentach za miksem, "
+                                 "w limitach solvera. Wyłączenie zamraża to, co jest ustawione."));
+    adaptiveButton.setColour(juce::ToggleButton::textColourId, colours::quiet);
+    addAndMakeVisible(adaptiveButton);
+    adaptiveAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        processor.parameters, BrainProcessor::adaptiveId, adaptiveButton);
+
     proposalViewport.setViewedComponent(&proposalView, false);
     proposalViewport.setScrollBarsShown(true, false);
     addAndMakeVisible(proposalViewport);
@@ -423,7 +431,9 @@ void BrainEditor::resized()
         proposalHeader.removeFromLeft(6);
     }
     area.removeFromTop(4);
-    proposalStatus.setBounds(area.removeFromTop(20));
+    auto statusRow = area.removeFromTop(22);
+    adaptiveButton.setBounds(statusRow.removeFromRight(150));
+    proposalStatus.setBounds(statusRow);
     area.removeFromTop(2);
     proposalViewport.setBounds(area);
     layoutProposal();

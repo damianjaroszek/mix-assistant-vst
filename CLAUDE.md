@@ -25,6 +25,12 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   Agents publish `outputDb` (after their whole chain) for it; `ma/Harmonics.h` adds overtones and
   `predictHarmonics` / `predictTransients` (`ma/Transient.h`, attack emphasis) let the Brain size a proposal
   before applying it; the translation steps are chosen most important channel first on a running trial mix.
+- Phase 6: `ma/Saturator.h` (4x oversampled shaper, polyphase IIR half-bands, mix inside the oversampled domain so
+  dry and wet stay in phase) sits after the Agent's EQ; it is not part of `Command` or the A/B backup. The Agent's
+  `intentionalDrive` lifts the peak limit on Learn and the Brain's clipping warning. `ma/Instrument.h` guesses a role
+  from the Learn pass (rule-based on temporal features plus the ERB spectrum, tested on synthetic parts only) and sets
+  it with `defaultPriority` only while the role is still "Inny". Adaptive mode is `CommandKind::adapt` (EQ only, the
+  backup stays): one step a second of at most 0.25 dB towards the solver's answer, with enter/release hysteresis.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

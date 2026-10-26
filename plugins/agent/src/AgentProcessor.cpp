@@ -87,6 +87,11 @@ juce::StringArray AgentProcessor::duckSyncNames()
     return { ma::ui::pl("Ręcznie"), "1/32", "1/16", "1/8", "1/4" };
 }
 
+juce::StringArray AgentProcessor::saturationModeNames()
+{
+    return { ma::ui::pl("Taśma"), ma::ui::pl("Lampa"), ma::ui::pl("Miękki clip"), ma::ui::pl("Twardy clip"), ma::ui::pl("Fałdowanie") };
+}
+
 juce::AudioProcessorValueTreeState::ParameterLayout AgentProcessor::createLayout()
 {
     using Range = juce::NormalisableRange<float>;
@@ -183,6 +188,18 @@ juce::AudioProcessorValueTreeState::ParameterLayout AgentProcessor::createLayout
                                                            Range { 0.0f, 12.0f, 0.5f }, emphasis.amountDb,
                                                            juce::AudioParameterFloatAttributes().withLabel("dB")));
 
+    const ma::SaturationSettings saturation {};
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { satOnId, 6 }, "Saturation", false));
+    layout.add(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID { satModeId, 6 }, "Saturation mode",
+                                                            saturationModeNames(), 0));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { satDriveId, 6 }, "Saturation drive",
+                                                           Range { 0.0f, 24.0f, 0.1f }, saturation.driveDb,
+                                                           juce::AudioParameterFloatAttributes().withLabel("dB")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { satMixId, 6 }, "Saturation mix",
+                                                           Range { 0.0f, 100.0f, 1.0f }, 100.0f,
+                                                           juce::AudioParameterFloatAttributes().withLabel("%")));
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { intentionalDriveId, 6 }, "Intentional overdrive", false));
+
     return layout;
 }
 
@@ -211,6 +228,8 @@ void AgentProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     ducker.prepare(sampleRate);
     harmonics.prepare(sampleRate);
     transients.prepare(sampleRate);
+    saturator.prepare(sampleRate);
+    learnFeatures.prepare(sampleRate);
     outputSpectrum.prepare(sampleRate, ma::BandScale::erb);
     sidechainCorrelation.prepare(sampleRate);
     mainMono.assign(static_cast<size_t>(std::max(samplesPerBlock, 512)), 0.0f);
@@ -287,12 +306,18 @@ void AgentProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     if (state == LearnState::resetRequested)
     {
         learnAnalyzer.reset();
+        learnFeatures.reset();
         if (learnState.compare_exchange_strong(state, LearnState::learning))
             state = LearnState::learning;
     }
     if (state == LearnState::learning)
     {
+        const int frames = learnAnalyzer.spectrumAnalyzer().framesAnalysed();
         learnAnalyzer.process(input, numChannels, numSamples);
+        learnFeatures.process(input, numChannels, numSamples);
+        const auto& analyser = learnAnalyzer.spectrumAnalyzer();
+        if (analyser.framesAnalysed() != frames)
+            learnFeatures.addSpectrumFrame(analyser.lastFramePower(), analyser.numBands());
         learnMeasured.store(measuresLufs() ? learnAnalyzer.integratedLufs() : learnAnalyzer.rmsDb());
         learnTruePeak.store(learnAnalyzer.truePeakDb());
         const auto bands = learnAnalyzer.perceivedSpectrumDb();
@@ -388,6 +413,10 @@ void AgentProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     }
     eq.setBands(bands);
     eq.process(mainBuffer.getArrayOfWritePointers(), numChannels, numSamples);
+
+    // Saturation sees the gain-staged level, so its drive means the same on every channel.
+    saturator.setSettings(currentSaturation());
+    saturator.process(mainBuffer.getArrayOfWritePointers(), numChannels, numSamples);
 
     harmonics.setSettings(dynamics.harmonics);
     harmonics.process(mainBuffer.getArrayOfWritePointers(), numChannels, numSamples);
@@ -515,6 +544,10 @@ void AgentProcessor::publishToBrain()
     data.polarityInverted = dynamics.polarityInverted ? 1 : 0;
     data.harmonics = dynamics.harmonics;
     data.transients = dynamics.transients;
+    data.saturation = currentSaturation();
+    data.intentionalDrive = intentionalDrive() ? 1 : 0;
+    data.detectedRole = static_cast<std::int32_t>(result.guess.role);
+    data.detectedConfidence = static_cast<float>(result.guess.confidence);
     data.sidechainConnected = sidechainSeen ? 1 : 0;
     data.sidechainDb = toShared(sidechainShownDb);
     data.duckReductionDb = static_cast<float>(reductionShownDb);
@@ -561,6 +594,13 @@ void AgentProcessor::handleBrainCommand(ma::bus::Region& region)
         setEqParams(next);
         setParam(eqBypassId, 0.0f);
         setDynamics({ command.duck, command.duckSync, command.polarityInverted != 0, command.harmonics, command.transients });
+    }
+    else if (command.kind == ma::bus::CommandKind::adapt && !eqBypassed())
+    {
+        ma::EqSettings next {};
+        for (int b = 0; b < ma::kEqBands; ++b)
+            next[static_cast<size_t>(b)] = command.eq[b];
+        setEqParams(next);
     }
     else if (command.kind == ma::bus::CommandKind::undo && backupValid)
     {
@@ -637,6 +677,22 @@ AgentProcessor::DynamicState AgentProcessor::currentDynamics() const
     return state;
 }
 
+ma::SaturationSettings AgentProcessor::currentSaturation() const
+{
+    const auto value = [this](const char* id) { return parameters.getRawParameterValue(id)->load(); };
+    ma::SaturationSettings settings;
+    settings.on = value(satOnId) > 0.5f ? 1.0f : 0.0f;
+    settings.mode = static_cast<float>(juce::roundToInt(value(satModeId)));
+    settings.driveDb = value(satDriveId);
+    settings.mix = value(satMixId) / 100.0f;
+    return settings;
+}
+
+bool AgentProcessor::intentionalDrive() const
+{
+    return parameters.getRawParameterValue(intentionalDriveId)->load() > 0.5f;
+}
+
 ma::EqSettings AgentProcessor::currentEq() const
 {
     ma::EqSettings out {};
@@ -699,7 +755,8 @@ void AgentProcessor::applyLearned()
     const double measured = learnMeasured.load();
     const double peak = learnTruePeak.load();
     const double target = parameters.getRawParameterValue(targetId)->load();
-    const double ceiling = parameters.getRawParameterValue(peakCeilingId)->load();
+    // A channel meant to distort may peak where it likes: only the level target counts.
+    const double ceiling = intentionalDrive() ? 100.0 : parameters.getRawParameterValue(peakCeilingId)->load();
     const auto plan = ma::planTrim(measured, peak, target, ceiling);
 
     result.serial += 1;
@@ -708,6 +765,7 @@ void AgentProcessor::applyLearned()
     result.measuredDb = measured;
     result.truePeakDb = peak;
     result.trimDb = plan.trimDb;
+    recogniseRole();
 
     if (!plan.valid)
         return;
@@ -716,6 +774,30 @@ void AgentProcessor::applyLearned()
     param->beginChangeGesture();
     param->setValueNotifyingHost(param->convertTo0to1(static_cast<float>(plan.trimDb)));
     param->endChangeGesture();
+}
+
+void AgentProcessor::recogniseRole()
+{
+    // The learning pass has ended, so the audio thread no longer touches the features.
+    // The profile is stored ear-weighted; the recogniser wants raw levels.
+    ma::SpectrumAnalyzer::Bands raw {};
+    const auto& weights = ma::erbEqualLoudnessWeights();
+    for (size_t b = 0; b < kBands; ++b)
+        raw[b] = learnProfile[b].load() + weights[b];
+    result.guess = ma::recogniseRole(learnFeatures.summary(), raw);
+    result.roleSet = result.prioritySet = false;
+    if (result.guess.role == ma::Role::other || result.guess.confidence < 0.5)
+        return;
+    // Only a channel nobody has set up yet: a role chosen by hand always wins.
+    if (juce::roundToInt(parameters.getRawParameterValue(roleId)->load()) != static_cast<int>(ma::Role::other))
+        return;
+    setParam(roleId, static_cast<float>(result.guess.role));
+    result.roleSet = true;
+    if (juce::roundToInt(parameters.getRawParameterValue(priorityId)->load()) == 5)
+    {
+        setParam(priorityId, static_cast<float>(ma::defaultPriority(result.guess.role)));
+        result.prioritySet = true;
+    }
 }
 
 AgentProcessor::LearnResult AgentProcessor::lastResult() const

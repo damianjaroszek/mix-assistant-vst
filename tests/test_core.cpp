@@ -9,6 +9,8 @@
 #include "ma/Harmonics.h"
 #include "ma/Translation.h"
 #include "ma/Transient.h"
+#include "ma/Saturator.h"
+#include "ma/Instrument.h"
 #include "ma/EqualLoudness.h"
 #include "ma/GainStaging.h"
 #include "ma/LevelStats.h"
@@ -20,6 +22,7 @@
 #include "ma/TruePeakMeter.h"
 #include "ma/Wav.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -770,6 +773,238 @@ void testTransients()
     check(predicted[2] - bands[2] < 0.1 && predicted[35] - bands[35] > 2.0, "attack prediction lifts only the highs");
 }
 
+// Level of one frequency in a signal (dB re a full-scale sine), by Goertzel over [from, to).
+double toneDb(const std::vector<float>& x, double sr, double hz, size_t from, size_t to)
+{
+    const double w = 2.0 * kPi * hz / sr;
+    double re = 0.0, im = 0.0;
+    for (size_t i = from; i < to; ++i)
+    {
+        // Hann window keeps leakage from the loud fundamental out of the weak components.
+        const double win = 0.5 - 0.5 * std::cos(2.0 * kPi * static_cast<double>(i - from) / static_cast<double>(to - from));
+        re += win * x[i] * std::cos(w * static_cast<double>(i));
+        im -= win * x[i] * std::sin(w * static_cast<double>(i));
+    }
+    const double amplitude = 4.0 * std::sqrt(re * re + im * im) / static_cast<double>(to - from);
+    return 20.0 * std::log10(std::max(amplitude, 1e-12));
+}
+
+void testSaturator()
+{
+    constexpr double sr = 48000.0;
+    auto run1 = [&](std::vector<float> x, const ma::SaturationSettings& s) {
+        ma::Saturator sat;
+        sat.prepare(sr);
+        sat.setSettings(s);
+        for (size_t start = 0; start < x.size(); start += 512)
+        {
+            float* ch[] = { x.data() + start };
+            sat.process(ch, 1, static_cast<int>(std::min<size_t>(512, x.size() - start)));
+        }
+        return x;
+    };
+    const size_t from = 24000, to = 72000;
+
+    ma::SaturationSettings dry;
+    dry.on = 1.0f;
+    dry.mix = 0.0f;
+    for (double hz : { 100.0, 1000.0, 15000.0, 19000.0 })
+    {
+        const auto x = sine(sr, 2.0, 1, hz, 0.25).channels[0];
+        checkNear(rmsDb(run1(x, dry), from, to) - rmsDb(x, from, to), 0.0, 0.1,
+                  "4x oversampling is transparent at " + std::to_string(static_cast<int>(hz)) + " Hz");
+    }
+
+    // A clipped 7 kHz sine: its 5th and 7th harmonics (35 and 49 kHz) would fold back to 13 and 1 kHz.
+    ma::SaturationSettings clip;
+    clip.on = 1.0f;
+    clip.mode = static_cast<float>(ma::SaturationMode::hardClip);
+    clip.driveDb = 18.0f;
+    const auto high = sine(sr, 2.0, 1, 7000.0, 0.25).channels[0];
+    const auto clipped = run1(high, clip);
+    std::vector<float> naive(high.size());
+    const double drive = std::pow(10.0, 18.0 / 20.0) / 0.5;
+    for (size_t i = 0; i < high.size(); ++i)
+        naive[i] = static_cast<float>(0.5 * std::clamp(high[i] * drive, -1.0, 1.0));
+    const double fundamental = toneDb(clipped, sr, 7000.0, from, to);
+    const double alias = std::max(toneDb(clipped, sr, 13000.0, from, to), toneDb(clipped, sr, 1000.0, from, to)) - fundamental;
+    const double naiveAlias = std::max(toneDb(naive, sr, 13000.0, from, to), toneDb(naive, sr, 1000.0, from, to)) - toneDb(naive, sr, 7000.0, from, to);
+    check(alias < -50.0 && alias < naiveAlias - 30.0, "oversampling keeps clipping aliases down (" + std::to_string(static_cast<int>(alias))
+                                                 + " dB vs " + std::to_string(static_cast<int>(naiveAlias)) + " dB without)");
+
+    // Every mode keeps the reference level, whatever the drive, and colours it its own way.
+    const auto reference = sine(sr, 2.0, 1, 200.0, 0.25).channels[0];
+    const double inDb = rmsDb(reference, from, to);
+    double second[ma::kSaturationModes] {}, third[ma::kSaturationModes] {};
+    for (int m = 0; m < ma::kSaturationModes; ++m)
+    {
+        auto s = clip;
+        s.mode = static_cast<float>(m);
+        s.driveDb = 12.0f;
+        const auto out = run1(reference, s);
+        checkNear(rmsDb(out, from, to) - inDb, 0.0, 0.5, "saturation mode " + std::to_string(m) + " keeps the level");
+        const double base = toneDb(out, sr, 200.0, from, to);
+        second[m] = toneDb(out, sr, 400.0, from, to) - base;
+        third[m] = toneDb(out, sr, 600.0, from, to) - base;
+    }
+    const auto tape = static_cast<size_t>(ma::SaturationMode::tape);
+    const auto tube = static_cast<size_t>(ma::SaturationMode::tube);
+    check(second[tube] > -30.0 && second[tape] < -60.0, "the tube adds even harmonics, the tape does not");
+    check(third[static_cast<size_t>(ma::SaturationMode::hardClip)] > -20.0 && third[tape] > -40.0, "drive adds odd harmonics");
+
+    auto half = clip;
+    half.mode = static_cast<float>(ma::SaturationMode::tape);
+    half.mix = 0.5f;
+    const auto blended = run1(reference, half);
+    checkNear(rmsDb(blended, from, to) - inDb, 0.0, 1.0, "half dry, half wet stays in phase (no level loss)");
+
+    auto off = clip;
+    off.on = 0.0f;
+    check(run1(high, off) == high, "saturation switched off is bypassed");
+}
+
+// Typical parts of a 124 BPM house track, synthesised: what the role recogniser has to tell apart.
+std::vector<std::vector<float>> syntheticPart(ma::Role role, double sr, double seconds)
+{
+    const size_t n = static_cast<size_t>(sr * seconds);
+    std::vector<std::vector<float>> out(2, std::vector<float>(n, 0.0f));
+    const double beat = 60.0 / 124.0;
+    unsigned noise = 12345u;
+    auto white = [&] {
+        noise = noise * 1664525u + 1013904223u;
+        return static_cast<double>(noise >> 8) / 8388608.0 - 1.0;
+    };
+    double lp1 = 0.0, lp2 = 0.0, hp1 = 0.0, phase = 0.0, phase2 = 0.0;
+    double f1 = 0.0, f2 = 0.0, f3 = 0.0, f1b = 0.0, f2b = 0.0, f3b = 0.0;
+    for (size_t i = 0; i < n; ++i)
+    {
+        const double t = static_cast<double>(i) / sr;
+        double l = 0.0, r = 0.0;
+        switch (role)
+        {
+        case ma::Role::kick:
+        {
+            const double tb = std::fmod(t, beat);
+            phase += 2.0 * kPi * (50.0 + 100.0 * std::exp(-tb * 30.0)) / sr;
+            l = r = 0.8 * std::exp(-tb * 9.0) * std::sin(phase) + 0.2 * std::exp(-tb * 300.0) * white();
+            break;
+        }
+        case ma::Role::bass:
+        {
+            // Off-beat eighths, a filtered saw at 55 Hz.
+            const double te = std::fmod(t + beat / 2.0, beat);
+            const double gate = te < 0.2 ? std::min(1.0, te / 0.005) : std::max(0.0, 1.0 - (te - 0.2) / 0.02);
+            phase = std::fmod(phase + 55.0 / sr, 1.0);
+            lp1 += 0.05 * ((2.0 * phase - 1.0) - lp1);
+            l = r = 0.6 * gate * lp1;
+            break;
+        }
+        case ma::Role::percussion:
+        {
+            // Sixteenth hats plus a clap on two and four.
+            const double ts = std::fmod(t, beat / 4.0);
+            const double tc = std::fmod(t + beat, 2.0 * beat);
+            const double w = white();
+            const double hat = w - hp1;
+            hp1 = w;
+            lp1 += 0.3 * (w - lp1);
+            lp2 += 0.3 * (lp1 - lp2);
+            const double clap = lp1 - lp2;
+            l = 0.3 * std::exp(-ts * 60.0) * hat + 0.8 * std::exp(-tc * 25.0) * clap;
+            r = 0.3 * std::exp(-ts * 60.0) * hat * 0.8 + 0.8 * std::exp(-tc * 25.0) * clap;
+            break;
+        }
+        case ma::Role::pad:
+        {
+            // A held chord of detuned saws, slow attack, wide.
+            const double tn = std::fmod(t, 4.0 * beat * 2.0);
+            const double env = std::min(1.0, tn / 0.6);
+            double sl = 0.0, sr2 = 0.0;
+            for (double hz : { 220.0, 277.2, 329.6, 440.0 })
+            {
+                sl += std::sin(2.0 * kPi * hz * 1.003 * t) + 0.5 * std::sin(4.0 * kPi * hz * 1.003 * t);
+                sr2 += std::sin(2.0 * kPi * hz * 0.997 * t) + 0.5 * std::sin(4.0 * kPi * hz * 0.997 * t);
+            }
+            l = 0.1 * env * sl;
+            r = 0.1 * env * sr2;
+            break;
+        }
+        case ma::Role::lead:
+        {
+            // An eighth-note riff, bright saw.
+            const int step = static_cast<int>(t / (beat / 2.0));
+            const double te = std::fmod(t, beat / 2.0);
+            const double notes[] = { 440.0, 523.3, 659.3, 587.3, 523.3, 440.0, 392.0, 440.0 };
+            const double gate = te < 0.21 ? std::min(1.0, te / 0.003) : std::max(0.0, 1.0 - (te - 0.21) / 0.02);
+            phase = std::fmod(phase + notes[step % 8] / sr, 1.0);
+            lp1 += 0.5 * ((2.0 * phase - 1.0) - lp1);
+            l = r = 0.4 * gate * lp1;
+            break;
+        }
+        case ma::Role::vocal:
+        {
+            // Phrases of 1.5 s with half-second breaths; syllables at 4 Hz; a voice through vowel formants.
+            const double tp = std::fmod(t, 2.0);
+            const double phrase = tp < 1.5 ? std::min(1.0, tp / 0.03) * std::min(1.0, (1.5 - tp) / 0.05) : 0.0;
+            const double syllable = 0.55 + 0.45 * std::sin(2.0 * kPi * 4.0 * t);
+            phase2 += 2.0 * kPi * 5.0 / sr;
+            phase = std::fmod(phase + (200.0 + 4.0 * std::sin(phase2)) / sr, 1.0);
+            const double source = 2.0 * phase - 1.0;
+            auto resonate = [&](double& a, double& b, double hz, double x) {
+                const double rr = 0.985, w = 2.0 * kPi * hz / sr;
+                const double y = x + 2.0 * rr * std::cos(w) * a - rr * rr * b;
+                b = a;
+                a = y;
+                return y;
+            };
+            const double v = 0.02 * resonate(f1, f1b, 700.0, source) + 0.015 * resonate(f2, f2b, 1200.0, source)
+                             + 0.006 * resonate(f3, f3b, 2600.0, source);
+            l = r = 0.5 * phrase * syllable * v;
+            break;
+        }
+        default:
+            break;
+        }
+        out[0][i] = static_cast<float>(l);
+        out[1][i] = static_cast<float>(r);
+    }
+    return out;
+}
+
+void testInstrumentRecognition()
+{
+    constexpr double sr = 48000.0;
+    const char* names[] = { "other", "kick", "bass", "percussion", "vocal", "lead", "pad", "effects", "bus", "send" };
+    for (auto role : { ma::Role::kick, ma::Role::bass, ma::Role::percussion, ma::Role::pad, ma::Role::lead, ma::Role::vocal })
+    {
+        const auto part = syntheticPart(role, sr, 8.0);
+        const float* ch[] = { part[0].data(), part[1].data() };
+        ma::InstrumentFeatures features;
+        features.prepare(sr);
+        ma::SpectrumAnalyzer analyser;
+        analyser.prepare(sr, ma::BandScale::erb);
+        for (size_t start = 0; start < part[0].size(); start += 512)
+        {
+            const int count = static_cast<int>(std::min<size_t>(512, part[0].size() - start));
+            const float* block[] = { ch[0] + start, ch[1] + start };
+            features.process(block, 2, count);
+            const int frames = analyser.framesAnalysed();
+            analyser.process(block, 2, count);
+            if (analyser.framesAnalysed() != frames)
+                features.addSpectrumFrame(analyser.lastFramePower(), analyser.numBands());
+        }
+        const auto summary = features.summary();
+        const auto guess = ma::recogniseRole(summary, analyser.averageDb());
+        const auto name = std::string(names[static_cast<int>(role)]);
+        std::printf("      %s: onsets %.1f/s, decay %.1f dB, active %.2f, width %.2f, movement %.3f, centre %.0f Hz -> %s %.0f%% (then %s)\n", name.c_str(),
+                    summary.onsetsPerSecond, summary.decayDb, summary.activeShare, summary.width, summary.movement, guess.centroidHz,
+                    names[static_cast<int>(guess.role)], guess.confidence * 100.0, names[static_cast<int>(guess.runnerUp)]);
+        check(guess.role == role && guess.confidence >= 0.5, "recognises the " + name);
+    }
+    check(ma::recogniseRole({}, {}).role == ma::Role::other, "too little heard: no guess");
+    check(ma::defaultPriority(ma::Role::kick) < ma::defaultPriority(ma::Role::pad), "the kick outranks the pad");
+}
+
 void testWavRoundTrip()
 {
     const auto a = sine(44100.0, 0.5, 2, 440.0, 0.25);
@@ -802,6 +1037,8 @@ int main()
     testHarmonics();
     testTranslation();
     testTransients();
+    testSaturator();
+    testInstrumentRecognition();
     testWavRoundTrip();
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "OK" : "FAILED", failures, failures == 1 ? "" : "s");

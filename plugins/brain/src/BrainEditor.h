@@ -47,6 +47,8 @@ private:
 
     juce::Label proposalLabel, proposalStatus;
     juce::TextButton proposeButton, applyButton, undoButton, compareButton;
+    juce::ToggleButton adaptiveButton;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> adaptiveAttachment;
     brain::ProposalView proposalView;
     juce::Viewport proposalViewport;
     void layoutProposal();

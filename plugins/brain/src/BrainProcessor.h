@@ -13,6 +13,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 
 #include <array>
+#include <map>
 #include <atomic>
 #include <vector>
 
@@ -183,6 +184,19 @@ public:
     juce::AudioProcessorValueTreeState parameters;
 
     static constexpr const char* peakCeilingId = "peakCeiling";
+    // Adaptive mode (phase 6): the solver keeps running and moves the Agents' EQ slowly
+    // towards its answer, within hard limits. Off by default; switching it off freezes
+    // whatever is set.
+    static constexpr const char* adaptiveId = "adaptive";
+    bool isAdaptive() const { return adaptive->load() > 0.5f; }
+    struct AdaptiveStatus
+    {
+        bool running = false;       // conditions met, the solver is following the mix
+        juce::String waitingFor;    // why not, when it is on but holding
+        std::uint64_t lastChangeMs = 0;
+        int channelsMoved = 0;      // in the last step that changed anything
+    };
+    const AdaptiveStatus& adaptiveStatus() const { return adaptiveState; }
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
@@ -193,11 +207,14 @@ private:
     void sendCommand(std::uint64_t owner, const ma::bus::Command& command);
     void proposeDynamics();
     void proposeHarmonics(); // translation steps and harmonics for tonal holes
+    void adaptStep(std::uint64_t now);
+    ma::SolverResult solveNow(double headroomGainDb) const;
     juce::String kickName() const; // the channel most likely feeding the sidechains
     static juce::File targetFolder();
     void saveTarget();
 
     std::atomic<float>* peakCeiling = nullptr;
+    std::atomic<float>* adaptive = nullptr;
 
     ma::LoudnessMeter loudness;
     ma::TruePeakMeter truePeakMeter;
@@ -235,6 +252,16 @@ private:
     double loudnessBefore = -INFINITY, loudnessAfter = -INFINITY;
     ma::TonalTarget currentTarget;
     bool capturing = false;
+    AdaptiveStatus adaptiveState;
+    std::uint64_t lastAdaptMs = 0;
+    std::uint64_t playingSinceMs = 0; // adaptive mode: music has played without a break since then
+    // Per channel and EQ slot: solver rounds in a row that wanted a band gone, or a new one
+    // started (hysteresis, so a collision on the edge does not make bands come and go).
+    struct AdaptVotes
+    {
+        std::array<int, ma::kEqBands> release {}, enter {};
+    };
+    std::map<std::uint64_t, AdaptVotes> adaptVotes;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(BrainProcessor)
 };

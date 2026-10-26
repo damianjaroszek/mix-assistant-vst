@@ -47,6 +47,8 @@ public:
     Bands recentDb() const;
 
     int framesAnalysed() const { return frames; }
+    // Mean-square power per band of the newest frame (linear, not dB).
+    const Bands& lastFramePower() const { return frame; }
 
 private:
     void analyseFrame();

@@ -176,6 +176,29 @@ AgentEditor::AgentEditor(AgentProcessor& p)
         addAndMakeVisible(slider);
     }
 
+    styleLabel(satLabel, pl("Przester"), colours::quiet);
+    satLabel.setTooltip(pl("Saturacja z 4x nadpróbkowaniem. Głośność zostaje, zmienia się barwa."));
+    styleLabel(satDriveLabel, "Drive", colours::quiet, 13.0f);
+    styleLabel(satMixLabel, pl("Miks"), colours::quiet, 13.0f);
+    for (auto* label : { &satLabel, &satDriveLabel, &satMixLabel })
+        addAndMakeVisible(label);
+    satOnButton.setButtonText(pl("Włącz"));
+    intentionalButton.setButtonText(pl("Celowy przester"));
+    intentionalButton.setTooltip(pl("Kanał ma brzmieć brudno: nauka poziomu nie pilnuje szczytów, a Mózg nie ostrzega o przesterowaniu."));
+    for (auto* button : { &satOnButton, &intentionalButton })
+    {
+        button->setColour(juce::ToggleButton::textColourId, colours::quiet);
+        addAndMakeVisible(button);
+    }
+    styleCombo(satModeBox, AgentProcessor::saturationModeNames());
+    addAndMakeVisible(satModeBox);
+    for (auto* slider : { &satDriveSlider, &satMixSlider })
+    {
+        styleSlider(*slider);
+        slider->setTextBoxStyle(juce::Slider::TextBoxRight, false, 70, 20);
+        addAndMakeVisible(slider);
+    }
+
     auto& state = processor.parameters;
     roleAttachment = std::make_unique<ComboAttachment>(state, AgentProcessor::roleId, roleBox);
     measureAttachment = std::make_unique<ComboAttachment>(state, AgentProcessor::measureId, measureBox);
@@ -201,10 +224,16 @@ AgentEditor::AgentEditor(AgentProcessor& p)
     attackOnAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(state, AgentProcessor::attackOnId, attackOnButton);
     attackFreqAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::attackFreqId, attackFreqSlider);
     attackAmountAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::attackAmountId, attackAmountSlider);
+    satOnAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(state, AgentProcessor::satOnId, satOnButton);
+    intentionalAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        state, AgentProcessor::intentionalDriveId, intentionalButton);
+    satModeAttachment = std::make_unique<ComboAttachment>(state, AgentProcessor::satModeId, satModeBox);
+    satDriveAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::satDriveId, satDriveSlider);
+    satMixAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::satMixId, satMixSlider);
 
     shownResultSerial = processor.lastResult().serial;
     processor.setSpectrumVisible(true);
-    setSize(520, 960);
+    setSize(520, 1000);
     startTimerHz(30);
 }
 
@@ -240,6 +269,18 @@ void AgentEditor::showResult(const AgentProcessor::LearnResult& r)
     if (r.limitedByPeak)
         text += pl("\nTrim ograniczony, żeby szczyt nie przekroczył limitu. Kanał ma duże szczyty: "
                    "rozważ kompresję albo limiter przed Agentem.");
+    if (r.guess.role != ma::Role::other)
+    {
+        const auto roles = AgentProcessor::roleNames();
+        const auto percent = juce::String(juce::roundToInt(r.guess.confidence * 100.0)) + "%";
+        text += pl("\nRozpoznano: ") + roles[static_cast<int>(r.guess.role)] + " (" + percent + ")";
+        if (r.roleSet)
+            text += r.prioritySet ? pl(", ustawiono rolę i priorytet.") : pl(", ustawiono rolę.");
+        else if (r.guess.confidence < 0.5)
+            text += pl(", za mało pewne, rola bez zmian.");
+        else
+            text += ".";
+    }
     status.setText(text, juce::dontSendNotification);
     status.setColour(juce::Label::textColourId, r.limitedByPeak ? colours::warning : colours::good);
 }
@@ -414,7 +455,7 @@ void AgentEditor::resized()
     area.removeFromTop(8);
     learnButton.setBounds(area.removeFromTop(32).removeFromLeft(200));
     area.removeFromTop(6);
-    status.setBounds(area.removeFromTop(44));
+    status.setBounds(area.removeFromTop(58));
 
     area.removeFromTop(6);
     row = area.removeFromTop(22);
@@ -476,6 +517,23 @@ void AgentEditor::resized()
         group[2]->setBounds(row.removeFromLeft(70));
         group[3]->setBounds(row);
         area.removeFromTop(2);
+    }
+
+    area.removeFromTop(4);
+    row = area.removeFromTop(24);
+    satLabel.setBounds(row.removeFromLeft(110));
+    satOnButton.setBounds(row.removeFromLeft(72));
+    satModeBox.setBounds(row.removeFromLeft(120).reduced(0, 1));
+    row.removeFromLeft(12);
+    intentionalButton.setBounds(row);
+    area.removeFromTop(2);
+    row = area.removeFromTop(24);
+    {
+        auto left = row.removeFromLeft(row.getWidth() / 2).withTrimmedRight(8);
+        satDriveLabel.setBounds(left.removeFromLeft(70));
+        satDriveSlider.setBounds(left);
+        satMixLabel.setBounds(row.removeFromLeft(70));
+        satMixSlider.setBounds(row);
     }
 
     area.removeFromTop(8);
