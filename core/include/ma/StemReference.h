@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Instrument.h"
+#include "Key.h"
 #include "LoudnessMeter.h"
 #include "SpectrumAnalyzer.h"
 #include "Stereo.h"
@@ -71,7 +72,20 @@ struct StemProfile
     StemMeasure measure;
     double dropSeconds = 0.0;
     double separationErrorDb = -1.0; // average distance of the stems' sum from the full mix, < 0 = not checked
+
+    // Phase 10: its key (from the stems that have one; unknown when the guess was not sure)
+    // and each group's spectrum over the drop, so the profile can move to another key.
+    // Sets saved before phase 10 have no spectra and stay where they are.
+    MusicalKey key;
+    double keyCorrelation = 0.0;
+    bool hasBands = false;
+    std::array<SpectrumAnalyzer::Bands, kStemGroups> groupDb {}, sideDb {};
+    int shiftSemitones = 0; // applied by keyedStemTarget, not saved
 };
+
+// Stems that carry the key: bass, vocals and the rest. Drums do not (the kick's own pitch is
+// a separate question).
+bool stemGroupHasKey(int group);
 
 // Two passes over the stems, block by block (100 ms): first the loudness of their sum, to
 // find the drop, then the analysis of each group over the drop only. Allocates in prepare().
@@ -81,8 +95,10 @@ public:
     void prepare(double sampleRate, bool haveFullMix);
     int blockLength() const { return block; }
 
-    // Pass 1: the stems' sum, one block at a time.
-    void measureBlock(const float* left, const float* right, int numSamples);
+    // Pass 1: the stems' sum, one block at a time, and the sum of the stems with a key (bass,
+    // vocals, the rest) for the key; nullptr = take the whole sum.
+    void measureBlock(const float* left, const float* right, int numSamples, const float* keyLeft = nullptr,
+                      const float* keyRight = nullptr);
     // Between the passes: the blocks within 3 dB of the loudest short-term loudness.
     void chooseDrop();
     bool inDrop(int blockIndex) const;
@@ -100,6 +116,7 @@ private:
     int block = 4800;
     bool fullMix = false;
     LoudnessMeter meter;
+    KeyDetector keys;
     std::vector<double> loudness;
     std::vector<char> drop;
     std::array<StereoAnalyzer, kStemGroups> groups;
@@ -130,6 +147,11 @@ struct StemTarget
     void rebuild();
     bool valid() const { return !profiles.empty(); }
 };
+
+// The set moved to the track's key: each profile with a known key and spectra is shifted (its
+// groups with a key, the drums stay) and measured again; the corridors rebuilt. An unknown
+// `trackKey` leaves it as it is.
+StemTarget keyedStemTarget(const StemTarget& target, MusicalKey trackKey);
 
 std::string serialiseStemTarget(const StemTarget& target);
 bool parseStemTarget(const std::string& text, StemTarget& target);

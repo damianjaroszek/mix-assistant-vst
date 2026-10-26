@@ -188,13 +188,14 @@ struct BrainProcessor::StemJob
         ma::StemProfiler profiler;
         profiler.prepare(rate, fullMix);
         const int n = profiler.blockLength();
-        juce::AudioBuffer<float> read(2, n), sum(2, n), mix(2, n);
+        juce::AudioBuffer<float> read(2, n), sum(2, n), mix(2, n), tonal(2, n); // tonal: the stems with a key
         std::array<juce::AudioBuffer<float>, ma::kStemGroups> perGroup;
         for (auto& buffer : perGroup)
             buffer.setSize(2, n);
         auto readBlock = [&](juce::int64 start, int len) {
             sum.clear();
             mix.clear();
+            tonal.clear();
             for (auto& buffer : perGroup)
                 buffer.clear();
             for (auto& source : sources)
@@ -209,10 +210,13 @@ struct BrainProcessor::StemJob
                     into.addFrom(ch, 0, read, ch, 0, len);
                     if (source.group != ma::kStemFullMix)
                         sum.addFrom(ch, 0, read, ch, 0, len);
+                    if (ma::stemGroupHasKey(source.group))
+                        tonal.addFrom(ch, 0, read, ch, 0, len);
                 }
             }
         };
 
+        const bool haveTonal = std::any_of(sources.begin(), sources.end(), [](const Source& s) { return ma::stemGroupHasKey(s.group); });
         const auto blocks = static_cast<int>((length + n - 1) / n);
         for (int b = 0; b < blocks; ++b)
         {
@@ -221,7 +225,8 @@ struct BrainProcessor::StemJob
             const juce::int64 start = static_cast<juce::int64>(b) * n;
             const int len = static_cast<int>(std::min<juce::int64>(n, length - start));
             readBlock(start, len);
-            profiler.measureBlock(sum.getReadPointer(0), sum.getReadPointer(1), len);
+            profiler.measureBlock(sum.getReadPointer(0), sum.getReadPointer(1), len, haveTonal ? tonal.getReadPointer(0) : nullptr,
+                                  haveTonal ? tonal.getReadPointer(1) : nullptr);
             progress.store(0.5 * (b + 1) / blocks);
         }
         profiler.chooseDrop();
@@ -264,6 +269,9 @@ BrainProcessor::BrainProcessor()
     for (auto* set : { &masterMid, &masterSide })
         for (auto& b : *set)
             b.store(-200.0f);
+    for (auto* set : { &keyChroma, &keyBass })
+        for (auto& k : *set)
+            k.store(0.0f);
     startTimerHz(kUpdateHz);
 }
 
@@ -310,6 +318,7 @@ void BrainProcessor::prepareToPlay(double sampleRate, int)
     hopSeconds = 2048.0 / sampleRate; // half of the analyser's 4096-point FFT
     correlation.prepare(sampleRate);
     masterStereo.prepare(sampleRate);
+    keyDetector.prepare(sampleRate);
     simulator.prepare(sampleRate);
     stereo.store(channels >= 2);
     outputGain.reset(sampleRate, 0.1);
@@ -333,6 +342,8 @@ void BrainProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         correlation.reset();
         masterStereo.reset();
     }
+    if (keyResetRequested.exchange(false))
+        keyDetector.reset();
 
     if (auto* head = getPlayHead())
         if (const auto position = head->getPosition())
@@ -357,6 +368,15 @@ void BrainProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             masterSide[b].store(static_cast<float>(std::max(-200.0, side[b])));
         }
     }
+
+    // The key keeps listening across resets: applying a proposal does not change it.
+    keyDetector.process(input, numChannels, numSamples);
+    for (size_t k = 0; k < 12; ++k)
+    {
+        keyChroma[k].store(static_cast<float>(keyDetector.chroma()[k]));
+        keyBass[k].store(static_cast<float>(keyDetector.bassChroma()[k]));
+    }
+    keySeconds.store(keyDetector.secondsHeard());
 
     integrated.store(loudness.integratedLufs());
     shortTerm.store(loudness.shortTermLufs());
@@ -415,6 +435,7 @@ void BrainProcessor::timerCallback()
 
     collectChannels(*region, now);
     accumulateDrop();
+    updateKey();
     if (stemJob != nullptr && stemJob->done.load())
         finishStemJob();
 
@@ -468,7 +489,7 @@ void BrainProcessor::timerCallback()
         std::array<ma::SpectrumAnalyzer::Bands, ma::kStemGroups> side {};
         const auto groups = stemGroupDb(true, present, &side, nullptr);
         mix.stemMeasure = ma::measureStemGroups(groups, side, present);
-        mix.stems = ma::compareStems(mix.stemMeasure, currentStems);
+        mix.stems = ma::compareStems(mix.stemMeasure, keyedStems);
         // What the cleanup or the Brain's cuts took out on purpose is not asked back.
         for (int g = 0; g < ma::kStemGroups; ++g)
             for (int r = 0; r < ma::kStemRegions; ++r)
@@ -846,7 +867,7 @@ ma::StemShapeInput BrainProcessor::stemShapeInput() const
     ma::StemShapeInput in;
     if (!stemsReady())
         return in;
-    in.target = &currentStems;
+    in.target = &keyedStems;
     for (const auto& channel : mix.channels)
     {
         const auto found = drop.find(channel.owner);
@@ -1659,7 +1680,7 @@ void BrainProcessor::proposeWholeMix()
         }
         std::array<bool, ma::kStemGroups> present {};
         const auto groups = stemGroupDb(true, present, nullptr, &proposedEq);
-        const auto levels = ma::planStemLevels(groups, present, currentStems);
+        const auto levels = ma::planStemLevels(groups, present, keyedStems);
         const auto setName = quoted(juce::String::fromUTF8(currentStems.name.c_str()));
         for (int g = 0; g < ma::kStemGroups && levels.any; ++g)
         {
@@ -1672,7 +1693,7 @@ void BrainProcessor::proposeWholeMix()
                     names.add(quoted(channel.name));
             if (names.isEmpty())
                 continue;
-            const auto& corridor = currentStems.level[static_cast<size_t>(g)];
+            const auto& corridor = keyedStems.level[static_cast<size_t>(g)];
             Proposal::Item item;
             item.action = Proposal::Item::Action::level;
             item.group = g;
@@ -2472,6 +2493,7 @@ bool BrainProcessor::selectStemTarget(const juce::String& name)
         if (ma::parseStemTarget(file.loadFileAsString().toStdString(), t) && juce::String::fromUTF8(t.name.c_str()) == name)
         {
             currentStems = t;
+            refreshKeyedStems();
             parameters.state.setProperty("stems", name, nullptr);
             return true;
         }
@@ -2486,6 +2508,7 @@ bool BrainProcessor::createStemTarget(const juce::String& name)
         return false;
     currentStems = {};
     currentStems.name = trimmed.toStdString();
+    refreshKeyedStems();
     parameters.state.setProperty("stems", trimmed, nullptr);
     saveStemTarget();
     return true;
@@ -2507,6 +2530,7 @@ void BrainProcessor::removeLastStemProfile()
         return;
     currentStems.profiles.pop_back();
     currentStems.rebuild();
+    refreshKeyedStems();
     saveStemTarget();
     stemNote = {};
 }
@@ -2560,13 +2584,16 @@ void BrainProcessor::finishStemJob()
 
     currentStems.profiles.push_back(profile);
     currentStems.rebuild();
+    refreshKeyedStems();
     saveStemTarget();
 
     juce::StringArray groups, missing;
     for (int g = 0; g < ma::kStemGroups; ++g)
         (profile.measure.groups[static_cast<size_t>(g)].present ? groups : missing).add(stemGroupName(g).toLowerCase());
     stemNote = pl("Dodano ") + title + pl(": drop ") + juce::String(juce::roundToInt(profile.dropSeconds)) + " s, "
-               + groups.joinIntoString(", ") + (missing.isEmpty() ? juce::String() : pl(" (bez: ") + missing.joinIntoString(", ") + ")") + ". ";
+               + groups.joinIntoString(", ") + (missing.isEmpty() ? juce::String() : pl(" (bez: ") + missing.joinIntoString(", ") + ")") + ", "
+               + (profile.key.valid() ? pl("tonacja ") + keyText(profile.key) + ". "
+                                      : pl("tonacji nie rozpoznałem pewnie, więc tej referencji nie przesuwam do Twojej. "));
     stemWarning = false;
     if (profile.separationErrorDb < 0.0)
     {
@@ -2798,6 +2825,15 @@ void BrainProcessor::updateLoudnessMatch(std::uint64_t now)
 
 void BrainProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
+    // The key heard so far goes with the project, so it is known again right after loading.
+    juce::StringArray chroma;
+    for (size_t k = 0; k < 12; ++k)
+        chroma.add(juce::String(savedChroma[k] + keyChroma[k].load(), 6));
+    for (size_t k = 0; k < 12; ++k)
+        chroma.add(juce::String(savedBass[k] + keyBass[k].load(), 6));
+    parameters.state.setProperty("keyChroma", chroma.joinIntoString(" "), nullptr);
+    parameters.state.setProperty("keySeconds", savedKeySeconds + keySeconds.load(), nullptr);
+    parameters.state.setProperty("keyOverride", keyOverride, nullptr);
     if (auto xml = parameters.copyState().createXml())
         copyXmlToBinary(*xml, destData);
 }
@@ -2814,6 +2850,28 @@ void BrainProcessor::setStateInformation(const void* data, int sizeInBytes)
             const auto stems = parameters.state.getProperty("stems").toString();
             if (stems.isNotEmpty())
                 selectStemTarget(stems);
+            auto chroma = juce::StringArray::fromTokens(parameters.state.getProperty("keyChroma").toString(), " ", "");
+            chroma.removeEmptyStrings();
+            savedChroma = {};
+            savedBass = {};
+            savedKeySeconds = 0.0;
+            if (chroma.size() == 24)
+            {
+                for (int k = 0; k < 12; ++k)
+                {
+                    savedChroma[static_cast<size_t>(k)] = std::max(0.0, chroma[k].getDoubleValue());
+                    savedBass[static_cast<size_t>(k)] = std::max(0.0, chroma[k + 12].getDoubleValue());
+                }
+                savedKeySeconds = std::max(0.0, static_cast<double>(parameters.state.getProperty("keySeconds", 0.0)));
+                // What the master played before loading belongs to another project.
+                keyResetRequested.store(true);
+                for (auto* set : { &keyChroma, &keyBass })
+                    for (auto& k : *set)
+                        k.store(0.0f);
+                keySeconds.store(0.0);
+            }
+            keyOverride = juce::jlimit(-1, 23, static_cast<int>(parameters.state.getProperty("keyOverride", -1)));
+            updateKey();
         }
 }
 
@@ -2825,4 +2883,61 @@ juce::AudioProcessorEditor* BrainProcessor::createEditor()
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new BrainProcessor();
+}
+
+// Phase 10: the track's key.
+
+juce::String BrainProcessor::keyText(ma::MusicalKey key)
+{
+    if (!key.valid())
+        return "?";
+    return juce::String(ma::keyName(key)) + " (" + juce::String(ma::camelotCode(key)) + ")";
+}
+
+ma::MusicalKey BrainProcessor::trackKey() const
+{
+    if (keyOverride >= 0)
+        return ma::keyFromIndex(keyOverride);
+    if (heardKeySeconds >= kMinimumKeySeconds && heardKey.confident)
+        return heardKey.key;
+    return {};
+}
+
+void BrainProcessor::setKeyOverride(int index)
+{
+    keyOverride = juce::jlimit(-1, 23, index);
+    updateKey();
+}
+
+void BrainProcessor::restartKeyDetection()
+{
+    savedChroma = {};
+    savedBass = {};
+    savedKeySeconds = 0.0;
+    keyResetRequested.store(true);
+    for (auto* set : { &keyChroma, &keyBass })
+        for (auto& k : *set)
+            k.store(0.0f);
+    keySeconds.store(0.0);
+    updateKey();
+}
+
+void BrainProcessor::updateKey()
+{
+    std::array<double, 12> chroma {}, bass {};
+    for (size_t k = 0; k < 12; ++k)
+    {
+        chroma[k] = savedChroma[k] + keyChroma[k].load();
+        bass[k] = savedBass[k] + keyBass[k].load();
+    }
+    heardKey = ma::estimateKey(chroma, bass);
+    heardKeySeconds = savedKeySeconds + keySeconds.load();
+    if (trackKey() != keyedTo)
+        refreshKeyedStems();
+}
+
+void BrainProcessor::refreshKeyedStems()
+{
+    keyedTo = trackKey();
+    keyedStems = ma::keyedStemTarget(currentStems, keyedTo);
 }

@@ -260,10 +260,10 @@ int addStems(const std::string& name, const std::string& out, const std::vector<
     profiler.prepare(audio.front().sampleRate, haveMix);
     const int n = profiler.blockLength();
     std::array<std::vector<float>, ma::kStemGroups> left, right;
-    std::vector<float> sumL, sumR, mixL, mixR;
+    std::vector<float> sumL, sumR, mixL, mixR, keyL, keyR; // keyL/R: the stems with a key (not drums)
     std::array<bool, ma::kStemGroups> has {};
     auto fill = [&](int start, int len) {
-        for (auto* v : { &sumL, &sumR, &mixL, &mixR })
+        for (auto* v : { &sumL, &sumR, &mixL, &mixR, &keyL, &keyR })
             v->assign(static_cast<size_t>(len), 0.0f);
         for (int g = 0; g < ma::kStemGroups; ++g)
         {
@@ -289,6 +289,11 @@ int addStems(const std::string& name, const std::string& out, const std::vector<
                 right[static_cast<size_t>(kinds[i])][to] += r[at];
                 sumL[to] += l[at];
                 sumR[to] += r[at];
+                if (ma::stemGroupHasKey(kinds[i]))
+                {
+                    keyL[to] += l[at];
+                    keyR[to] += r[at];
+                }
             }
             if (!mix)
                 has[static_cast<size_t>(kinds[i])] = true;
@@ -298,7 +303,9 @@ int addStems(const std::string& name, const std::string& out, const std::vector<
     {
         const int len = std::min(n, length - start);
         fill(start, len);
-        profiler.measureBlock(sumL.data(), sumR.data(), len);
+        const bool tonal = has[static_cast<size_t>(ma::StemGroup::bass)] || has[static_cast<size_t>(ma::StemGroup::vocals)]
+                           || has[static_cast<size_t>(ma::StemGroup::music)];
+        profiler.measureBlock(sumL.data(), sumR.data(), len, tonal ? keyL.data() : nullptr, tonal ? keyR.data() : nullptr);
     }
     profiler.chooseDrop();
     int block = 0;
@@ -352,8 +359,9 @@ int addStems(const std::string& name, const std::string& out, const std::vector<
     target.rebuild();
     std::ofstream(out) << ma::serialiseStemTarget(target);
 
-    std::printf("\"%s\": drop %.0f s, separation %s\n", profile.name.c_str(), profile.dropSeconds,
-                profile.separationErrorDb < 0.0 ? "not checked" : (std::to_string(profile.separationErrorDb).substr(0, 4) + " dB").c_str());
+    std::printf("\"%s\": drop %.0f s, separation %s, key %s\n", profile.name.c_str(), profile.dropSeconds,
+                profile.separationErrorDb < 0.0 ? "not checked" : (std::to_string(profile.separationErrorDb).substr(0, 4) + " dB").c_str(),
+                profile.key.valid() ? (ma::keyName(profile.key) + " (" + ma::camelotCode(profile.key) + ")").c_str() : "not sure");
     const char* names[ma::kStemGroups] { "drums", "bass", "vocals", "music" };
     for (int g = 0; g < ma::kStemGroups; ++g)
     {

@@ -780,12 +780,14 @@ class StemView : public juce::Component
 {
 public:
     void setData(const ma::StemTarget& newTarget, const ma::StemComparison& newComparison, const juce::String& newStatus,
-                 bool newWarning)
+                 bool newWarning, const juce::String& newKeyStatus, bool newKeyWarning)
     {
         target = newTarget;
         comparison = newComparison;
         status = newStatus;
         warning = newWarning;
+        keyStatus = newKeyStatus;
+        keyWarning = newKeyWarning;
         repaint();
     }
 
@@ -801,6 +803,12 @@ public:
         g.setFont(juce::FontOptions(12.5f));
         g.setColour(warning ? colours::warning : colours::quiet);
         g.drawFittedText(status, area.removeFromTop(32.0f).toNearestInt(), juce::Justification::topLeft, 2);
+        // Phase 10: the track's key and how far each reference was moved to it.
+        if (keyStatus.isNotEmpty())
+        {
+            g.setColour(keyWarning ? colours::warning : colours::quiet);
+            g.drawFittedText(keyStatus, area.removeFromTop(32.0f).toNearestInt(), juce::Justification::topLeft, 2);
+        }
         if (!target.valid())
             return;
 
@@ -893,8 +901,8 @@ public:
 private:
     ma::StemTarget target;
     ma::StemComparison comparison;
-    juce::String status;
-    bool warning = false;
+    juce::String status, keyStatus;
+    bool warning = false, keyWarning = false;
 };
 
 } // namespace brain

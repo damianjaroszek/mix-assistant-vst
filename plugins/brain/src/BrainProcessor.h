@@ -243,7 +243,8 @@ public:
     // tracks, each loaded as its stems (and, if there is one, the full track for a check of
     // the separation). Kept as .mastems files next to the tonal targets.
     juce::StringArray stemTargetNames() const;
-    const ma::StemTarget& stemTarget() const { return currentStems; }
+    // The set as compared: moved to the track's key (phase 10) where the key is known.
+    const ma::StemTarget& stemTarget() const { return keyedStems; }
     bool selectStemTarget(const juce::String& name);
     bool createStemTarget(const juce::String& name);
     void removeLastStemProfile();
@@ -256,6 +257,17 @@ public:
     bool stemMessageIsWarning() const { return stemWarning; }
     static juce::String stemGroupName(int group);
     static constexpr double kMinimumDropSeconds = 8.0;
+
+    // Phase 10: the track's key, heard on the master (kept with the project) or set by hand.
+    // The stem references are moved to it.
+    const ma::KeyEstimate& detectedKey() const { return heardKey; }
+    double keySecondsHeard() const { return heardKeySeconds; }
+    int keyOverrideIndex() const { return keyOverride; } // -1 = detect
+    void setKeyOverride(int index);
+    void restartKeyDetection();
+    ma::MusicalKey trackKey() const; // unknown until sure (or set by hand)
+    static juce::String keyText(ma::MusicalKey key); // "f-moll (4A)"
+    static constexpr double kMinimumKeySeconds = 20.0;
 
     juce::AudioProcessorValueTreeState parameters;
 
@@ -292,6 +304,8 @@ private:
     static juce::File targetFolder();
     void saveTarget();
     void saveStemTarget();
+    void refreshKeyedStems();
+    void updateKey();
     void accumulateDrop();
     void finishStemJob();
     // Per stem group, what the drop sounds like through each channel's cleanup (and EQ when
@@ -314,6 +328,10 @@ private:
     ma::CorrelationMeter correlation;
     ma::StereoAnalyzer masterStereo;
     std::array<std::atomic<float>, ma::SpectrumAnalyzer::kMaxBands> masterMid, masterSide;
+    ma::KeyDetector keyDetector;
+    std::array<std::atomic<float>, 12> keyChroma, keyBass;
+    std::atomic<double> keySeconds { 0.0 };
+    std::atomic<bool> keyResetRequested { false };
 
     std::atomic<bool> resetRequested { false };
     std::atomic<double> integrated { -INFINITY };
@@ -368,7 +386,15 @@ private:
     double dropLevel = -INFINITY; // short-term loudness of the loudest part so far
     bool dropResetPending = false;
     int dropHoldUpdates = 0;
-    ma::StemTarget currentStems;
+    ma::StemTarget currentStems; // as saved
+    ma::StemTarget keyedStems;   // moved to keyedTo
+    ma::MusicalKey keyedTo;
+    // Key heard before this session (from the project) plus what the master plays now.
+    std::array<double, 12> savedChroma {}, savedBass {};
+    double savedKeySeconds = 0.0;
+    ma::KeyEstimate heardKey;
+    double heardKeySeconds = 0.0;
+    int keyOverride = -1;
     struct StemJob;
     std::unique_ptr<StemJob> stemJob;
     juce::String stemNote;
