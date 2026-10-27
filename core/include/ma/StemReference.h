@@ -81,6 +81,18 @@ struct StemProfile
     bool hasBands = false;
     std::array<SpectrumAnalyzer::Bands, kStemGroups> groupDb {}, sideDb {};
     int shiftSemitones = 0; // applied by keyedStemTarget, not saved
+
+    // Phase 12: the break, the part without drums (the drums at least 15 dB under their drop level
+    // while the rest still plays), measured the same way, and how much quieter it is than the drop.
+    struct Section
+    {
+        bool valid = false;
+        double seconds = 0.0;
+        double belowDropDb = 0.0; // short-term loudness of the drop minus the break's
+        StemMeasure measure;
+        std::array<SpectrumAnalyzer::Bands, kStemGroups> groupDb {}, sideDb {};
+    };
+    Section breakdown;
 };
 
 // Stems that carry the key: bass, vocals and the rest. Drums do not (the kick's own pitch is
@@ -99,13 +111,19 @@ public:
     // vocals, the rest) for the key; nullptr = take the whole sum.
     void measureBlock(const float* left, const float* right, int numSamples, const float* keyLeft = nullptr,
                       const float* keyRight = nullptr);
-    // Between the passes: the blocks within 3 dB of the loudest short-term loudness.
+    // Pass 1, phase 12: the drums stem's level of the same block, so the break can be found
+    // (no drums stem, no break).
+    void measureDrums(const float* left, const float* right, int numSamples);
+    // Between the passes: the blocks within 3 dB of the loudest short-term loudness, and the
+    // break (drums 15 dB under their drop level, the rest within 20 dB of the drop).
     void chooseDrop();
     bool inDrop(int blockIndex) const;
+    bool inBreak(int blockIndex) const;
+    bool needed(int blockIndex) const { return inDrop(blockIndex) || inBreak(blockIndex); }
     int blocks() const { return static_cast<int>(loudness.size()); }
 
     // Pass 2, the same blocks: each group's signal (nullptr = the group has no stem) and the
-    // full mix if one was loaded. Blocks outside the drop are skipped inside.
+    // full mix if one was loaded. Blocks outside the drop and the break are skipped inside.
     void analyseBlock(int blockIndex, const std::array<const float*, kStemGroups>& left,
                       const std::array<const float*, kStemGroups>& right, const float* mixLeft, const float* mixRight,
                       int numSamples);
@@ -117,10 +135,11 @@ private:
     bool fullMix = false;
     LoudnessMeter meter;
     KeyDetector keys;
-    std::vector<double> loudness;
-    std::vector<char> drop;
-    std::array<StereoAnalyzer, kStemGroups> groups;
-    std::array<bool, kStemGroups> seen {};
+    std::vector<double> loudness, drums;
+    std::vector<char> drop, breakdown;
+    std::array<StereoAnalyzer, kStemGroups> groups, breakGroups;
+    std::array<bool, kStemGroups> seen {}, breakSeen {};
+    int breakBlocks = 0;
     SpectrumAnalyzer sum, mix;
     std::vector<float> sumLeft, sumRight;
     int dropBlocks = 0;
@@ -143,10 +162,15 @@ struct StemTarget
     std::array<StemCorridor, kStemGroups> level {};
     std::array<std::array<StemCorridor, kStemRegions>, kStemGroups> shape {};
     std::array<StemCorridor, kStemGroups> width {};
+    StemCorridor breakContrast; // phase 12: how much quieter the references' break is than their drop (dB)
 
     void rebuild();
     bool valid() const { return !profiles.empty(); }
 };
+
+// Phase 12: the same set as its breaks (profiles without one left out), to compare with the
+// break of the mix through the same functions.
+StemTarget stemBreakTarget(const StemTarget& target);
 
 // The set moved to the track's key: each profile with a known key and spectra is shifted (its
 // groups with a key, the drums stay) and measured again; the corridors rebuilt. An unknown
@@ -163,6 +187,7 @@ struct StemComparison
     {
         bool compared = false;     // present in our mix and in the references
         bool missing = false;      // the references have it, our mix does not
+        bool extra = false;        // our mix has it, the references do not (a break with the bass left in), at least -25 dB against the sum (ear-weighted, so a sub bass reads low)
         double levelDb = 0.0, levelDeviationDb = 0.0; // deviation = distance outside the corridor
         std::array<double, kStemRegions> shapeDeviationDb {};
         std::array<bool, kStemRegions> shapeCompared {};

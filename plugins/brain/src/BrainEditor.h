@@ -49,6 +49,9 @@ private:
     // Phase 10: the track's key (detected or set by hand).
     juce::ComboBox keyBox;
     juce::TextButton redetectKeyButton;
+    // Phase 12: which section the view compares.
+    juce::TextButton dropSectionButton, breakSectionButton;
+    bool showBreak = false;
     void updateKeyControls(juce::String& status, bool& warning);
     void refreshStemTargets();
     void askForNewStemTarget();

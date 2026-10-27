@@ -227,6 +227,8 @@ struct BrainProcessor::StemJob
             readBlock(start, len);
             profiler.measureBlock(sum.getReadPointer(0), sum.getReadPointer(1), len, haveTonal ? tonal.getReadPointer(0) : nullptr,
                                   haveTonal ? tonal.getReadPointer(1) : nullptr);
+            if (groups[0])
+                profiler.measureDrums(perGroup[0].getReadPointer(0), perGroup[0].getReadPointer(1), len);
             progress.store(0.5 * (b + 1) / blocks);
         }
         profiler.chooseDrop();
@@ -235,7 +237,7 @@ struct BrainProcessor::StemJob
             if (cancel.load())
                 return fail({});
             progress.store(0.5 + 0.5 * (b + 1) / blocks);
-            if (!profiler.inDrop(b))
+            if (!profiler.needed(b))
                 continue;
             const juce::int64 start = static_cast<juce::int64>(b) * n;
             const int len = static_cast<int>(std::min<juce::int64>(n, length - start));
@@ -523,6 +525,19 @@ void BrainProcessor::timerCallback()
                     d = 0.0;
             }
     }
+    mix.breakMeasure = {};
+    mix.breakStems = {};
+    mix.breakBelowDropDb = NAN;
+    mix.breakSeconds = static_cast<double>(breakUpdates) / kUpdateHz;
+    if (breakReady())
+    {
+        std::array<bool, ma::kStemGroups> present {};
+        std::array<ma::SpectrumAnalyzer::Bands, ma::kStemGroups> side {};
+        const auto groups = stemGroupDb(true, present, &side, nullptr, true);
+        mix.breakMeasure = ma::measureStemGroups(groups, side, present);
+        mix.breakStems = ma::compareStems(mix.breakMeasure, keyedBreakStems);
+        mix.breakBelowDropDb = dropLevelSum / static_cast<double>(std::max(1L, dropUpdates)) - breakLevelSum / static_cast<double>(breakUpdates);
+    }
     updateLoudnessMatch(now);
     adaptStep(now);
     buildReport();
@@ -789,6 +804,9 @@ void BrainProcessor::accumulateDrop()
         dropLevel = -INFINITY;
         mix.dropSeconds = 0.0;
         dropResetPending = false;
+        breakSums.clear();
+        breakUpdates = 0;
+        dropDrumsSum = dropLevelSum = breakLevelSum = 0.0;
         // The short-term loudness needs its 3 s window refilled (and the meter its reset) first.
         dropHoldUpdates = 4 * kUpdateHz;
     }
@@ -807,12 +825,60 @@ void BrainProcessor::accumulateDrop()
         {
             drop.clear();
             dropUpdates = 0;
+            breakSums.clear();
+            breakUpdates = 0;
+            dropDrumsSum = dropLevelSum = breakLevelSum = 0.0;
         }
         dropLevel = level;
     }
     dropLevel = std::max(dropLevel, level);
+
+    // The drums group's power now (Agents' live spectra are about a second long, so the gaps
+    // between kicks do not count).
+    double drumsNow = 0.0;
+    bool anyDrums = false;
+    for (const auto& channel : mix.channels)
+        if (groupOfChannel(channel) == static_cast<int>(ma::StemGroup::drums))
+        {
+            anyDrums = true;
+            if (channel.data.liveValid != 0)
+                for (int b = 0; b < ma::bus::kBands; ++b)
+                    drumsNow += std::pow(10.0, (channel.data.liveDb[b] + channel.data.trimDb) / 10.0);
+        }
+
+    auto accumulate = [this](std::map<std::uint64_t, DropSum>& into) {
+        for (const auto& channel : mix.channels)
+        {
+            if (channel.data.liveValid == 0)
+                continue;
+            auto& sum = into[channel.owner];
+            for (int b = 0; b < ma::bus::kBands; ++b)
+            {
+                const auto at = static_cast<size_t>(b);
+                sum.power[at] += std::pow(10.0, (channel.data.liveDb[b] + channel.data.trimDb) / 10.0);
+                if (channel.data.stereoValid != 0)
+                    sum.side[at] += std::pow(10.0, (channel.data.sideDb[b] + channel.data.trimDb) / 10.0);
+            }
+        }
+    };
+
     if (level < dropLevel - 3.0)
+    {
+        // Phase 12: the break, once the drop is known: the drums 15 dB under their drop level,
+        // the rest within 20 dB of the drop.
+        const bool dropKnown = dropUpdates >= static_cast<long>(kMinimumDropSeconds * kUpdateHz) && dropDrumsSum > 0.0;
+        if (anyDrums && dropKnown && level >= dropLevel - 20.0
+            && drumsNow <= dropDrumsSum / static_cast<double>(dropUpdates) * std::pow(10.0, -1.5))
+        {
+            accumulate(breakSums);
+            ++breakUpdates;
+            breakLevelSum += level;
+            mix.breakSeconds = static_cast<double>(breakUpdates) / kUpdateHz;
+        }
         return;
+    }
+    dropDrumsSum += drumsNow;
+    dropLevelSum += level;
     for (const auto& channel : mix.channels)
     {
         if (channel.data.liveValid == 0)
@@ -830,6 +896,11 @@ void BrainProcessor::accumulateDrop()
     mix.dropSeconds = static_cast<double>(dropUpdates) / kUpdateHz;
 }
 
+bool BrainProcessor::breakReady() const
+{
+    return keyedBreakStems.valid() && stemsReady() && breakUpdates >= static_cast<long>(kMinimumDropSeconds * kUpdateHz);
+}
+
 bool BrainProcessor::stemsReady() const
 {
     return currentStems.valid() && mix.dropSeconds >= kMinimumDropSeconds && dropUpdates > 0;
@@ -838,16 +909,18 @@ bool BrainProcessor::stemsReady() const
 std::array<ma::SpectrumAnalyzer::Bands, ma::kStemGroups>
 BrainProcessor::stemGroupDb(bool withEq, std::array<bool, ma::kStemGroups>& present,
                             std::array<ma::SpectrumAnalyzer::Bands, ma::kStemGroups>* side,
-                            const std::vector<ma::EqSettings>* eqs) const
+                            const std::vector<ma::EqSettings>* eqs, bool fromBreak) const
 {
     std::array<ma::SpectrumAnalyzer::Bands, ma::kStemGroups> power {}, sidePower {};
     present = {};
+    const auto& sums = fromBreak ? breakSums : drop;
+    const double updates = static_cast<double>(std::max(1L, fromBreak ? breakUpdates : dropUpdates));
     for (size_t c = 0; c < mix.channels.size(); ++c)
     {
         const auto& channel = mix.channels[c];
         const int group = groupOfChannel(channel);
-        const auto found = drop.find(channel.owner);
-        if (group < 0 || found == drop.end())
+        const auto found = sums.find(channel.owner);
+        if (group < 0 || found == sums.end())
             continue;
         const auto& cleanup = channel.data.cleanup;
         ma::EqSettings eq {};
@@ -862,9 +935,9 @@ BrainProcessor::stemGroupDb(bool withEq, std::array<bool, ma::kStemGroups>& pres
             const auto at = static_cast<size_t>(b);
             const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
             const double gain = std::pow(10.0, (ma::cleanupResponseDb(cleanup, hz) + ma::eqResponseDb(eq, hz)) / 10.0);
-            const double p = found->second.power[at] / static_cast<double>(dropUpdates) * gain;
+            const double p = found->second.power[at] / updates * gain;
             power[static_cast<size_t>(group)][at] += p;
-            sidePower[static_cast<size_t>(group)][at] += found->second.side[at] / static_cast<double>(dropUpdates) * gain
+            sidePower[static_cast<size_t>(group)][at] += found->second.side[at] / updates * gain
                                                          * std::pow(10.0, ma::sideResponseDb(channel.data.stereo, hz) / 10.0);
             any = any || p > 1e-12;
         }
@@ -1335,6 +1408,46 @@ void BrainProcessor::buildReport()
                 item.status = worst >= 3.0 ? Status::problem : Status::warning;
                 item.detail = parts.joinIntoString(", ") + pl(". „Ustaw cały miks” dopasuje poziomy grup i barwę szerokimi korekcjami.");
             }
+        }
+        report.push_back(item);
+    }
+
+    // Phase 12: the break against the references' breaks. Advice only: levels inside a section
+    // are the arrangement's and the volume automation's, not the EQ's.
+    if (keyedBreakStems.valid())
+    {
+        MixSnapshot::ReportItem item;
+        item.title = pl("Break jak w referencjach");
+        const bool anyDrums = std::any_of(mix.channels.begin(), mix.channels.end(),
+                                          [](const auto& c) { return groupOfChannel(c) == static_cast<int>(ma::StemGroup::drums); });
+        if (!anyDrums)
+            item.detail = pl("Żaden kanał nie ma roli stopy ani perkusji, więc nie odróżnię breaku od dropu.");
+        else if (!mix.breakStems.valid)
+            item.detail = pl("Puść break (część bez stopy) po dropie: ") + juce::String(juce::roundToInt(mix.breakSeconds)) + " / "
+                          + juce::String(juce::roundToInt(kMinimumDropSeconds)) + " s.";
+        else
+        {
+            juce::StringArray parts;
+            for (int g = 0; g < ma::kStemGroups; ++g)
+            {
+                const auto& c = mix.breakStems.groups[static_cast<size_t>(g)];
+                if (c.compared && std::abs(c.levelDeviationDb) >= 1.0)
+                    parts.add(stemGroupName(g) + pl(" o ") + juce::String(std::abs(c.levelDeviationDb), 1)
+                              + (c.levelDeviationDb > 0.0 ? pl(" dB za głośno") : pl(" dB za cicho")));
+                else if (c.extra)
+                    parts.add(stemGroupName(g) + pl(" gra, w breakach referencji milknie"));
+                else if (c.missing)
+                    parts.add(stemGroupName(g) + pl(" milknie, w breakach referencji gra"));
+            }
+            const auto& contrast = keyedBreakStems.breakContrast;
+            const double below = mix.breakBelowDropDb;
+            if (contrast.valid && std::isfinite(below) && std::abs(contrast.outside(below)) >= 1.0)
+                parts.add(pl("break jest ") + juce::String(below, 1) + pl(" dB cichszy od dropu, w referencjach ") + juce::String(contrast.low, 1)
+                          + pl("–") + juce::String(contrast.high, 1) + " dB"
+                          + (contrast.outside(below) < 0.0 ? pl(": drop się nie wybija") : pl(": break za bardzo siada")));
+            item.status = parts.isEmpty() ? Status::good : Status::warning;
+            item.detail = parts.isEmpty() ? pl("Proporcje w breaku i jego głośność względem dropu jak w referencjach.")
+                                          : parts.joinIntoString(", ") + pl(". To sprawa aranżu i automatyki głośności w breaku, nie EQ.");
         }
         report.push_back(item);
     }
@@ -2702,7 +2815,10 @@ void BrainProcessor::finishStemJob()
     stemNote = pl("Dodano ") + title + pl(": drop ") + juce::String(juce::roundToInt(profile.dropSeconds)) + " s, "
                + groups.joinIntoString(", ") + (missing.isEmpty() ? juce::String() : pl(" (bez: ") + missing.joinIntoString(", ") + ")") + ", "
                + (profile.key.valid() ? pl("tonacja ") + keyText(profile.key) + ". "
-                                      : pl("tonacji nie rozpoznałem pewnie, więc tej referencji nie przesuwam do Twojej. "));
+                                      : pl("tonacji nie rozpoznałem pewnie, więc tej referencji nie przesuwam do Twojej. "))
+               + (profile.breakdown.valid ? pl("Break ") + juce::String(juce::roundToInt(profile.breakdown.seconds)) + pl(" s, ")
+                                                + juce::String(profile.breakdown.belowDropDb, 1) + pl(" dB ciszej niż drop. ")
+                                          : pl("Breaku nie znalazłem (potrzebny stem perkusji i co najmniej 8 s bez niej). "));
     stemWarning = false;
     if (profile.separationErrorDb < 0.0)
     {
@@ -3049,6 +3165,7 @@ void BrainProcessor::refreshKeyedStems()
 {
     keyedTo = trackKey();
     keyedStems = ma::keyedStemTarget(currentStems, keyedTo);
+    keyedBreakStems = ma::stemBreakTarget(keyedStems);
 }
 
 // Phase 11: the master preview and the report for mastering.
@@ -3285,29 +3402,43 @@ juce::String BrainProcessor::masteringReportHtml() const
         out << "</section>\n";
     }
 
-    if (keyedStems.valid() && mix.stems.valid)
-    {
-        out << "<h2>" << pl("Proporcje jak w referencjach (drop do dropu)") << "</h2><section>";
-        const auto key = trackKey();
-        if (key.valid())
-            out << "<p>" << pl("Tonacja utworu: ") << html(keyText(key)) << pl(". Referencje przesunięte do niej.") << "</p>";
-        out << "<div class=\"wrap\"><table><tr><th>" << pl("Grupa") << "</th><th class=\"num\">" << pl("Poziom") << "</th><th class=\"num\">"
-            << pl("Poza korytarzem") << "</th><th>" << pl("Barwa poza korytarzem") << "</th></tr>";
+    const auto groupTable = [](const ma::StemComparison& comparison) {
         static const char* const regionNames[ma::kStemRegions] { "sub", "bas", "dolny środek", "środek", "prezencja", "powietrze" };
+        juce::String t;
+        t << "<div class=\"wrap\"><table><tr><th>" << pl("Grupa") << "</th><th class=\"num\">" << pl("Poziom") << "</th><th class=\"num\">"
+          << pl("Poza korytarzem") << "</th><th>" << pl("Barwa poza korytarzem") << "</th></tr>";
         for (int g = 0; g < ma::kStemGroups; ++g)
         {
-            const auto& c = mix.stems.groups[static_cast<size_t>(g)];
+            const auto& c = comparison.groups[static_cast<size_t>(g)];
             if (!c.compared && !c.missing)
                 continue;
             juce::StringArray shape;
             for (int r = 0; r < ma::kStemRegions; ++r)
                 if (c.shapeCompared[static_cast<size_t>(r)] && std::abs(c.shapeDeviationDb[static_cast<size_t>(r)]) >= 1.5)
                     shape.add(pl(regionNames[r]) + " " + signedDb(c.shapeDeviationDb[static_cast<size_t>(r)]));
-            out << "<tr><td>" << html(stemGroupName(g)) << "</td><td class=\"num\">" << (c.compared ? juce::String(c.levelDb, 1) + " dB" : pl("brak"))
-                << "</td><td class=\"num\">" << (c.compared ? signedDb(c.levelDeviationDb) : juce::String("-")) << "</td><td>"
-                << html(shape.isEmpty() ? juce::String("ok") : shape.joinIntoString(", ")) << "</td></tr>";
+            t << "<tr><td>" << html(stemGroupName(g)) << "</td><td class=\"num\">" << (c.compared ? juce::String(c.levelDb, 1) + " dB" : pl("brak"))
+              << "</td><td class=\"num\">" << (c.compared ? signedDb(c.levelDeviationDb) : juce::String("-")) << "</td><td>"
+              << html(shape.isEmpty() ? juce::String("ok") : shape.joinIntoString(", ")) << "</td></tr>";
         }
-        out << "</table></div></section>\n";
+        t << "</table></div>";
+        return t;
+    };
+    if (keyedStems.valid() && mix.stems.valid)
+    {
+        out << "<h2>" << pl("Proporcje jak w referencjach (drop do dropu)") << "</h2><section>";
+        const auto key = trackKey();
+        if (key.valid())
+            out << "<p>" << pl("Tonacja utworu: ") << html(keyText(key)) << pl(". Referencje przesunięte do niej.") << "</p>";
+        out << groupTable(mix.stems) << "</section>\n";
+    }
+    if (keyedBreakStems.valid() && mix.breakStems.valid)
+    {
+        out << "<h2>" << pl("Break jak w referencjach") << "</h2><section><p>" << pl("Break miksu jest ") << juce::String(mix.breakBelowDropDb, 1)
+            << pl(" dB cichszy od dropu");
+        if (keyedBreakStems.breakContrast.valid)
+            out << pl(", w referencjach ") << juce::String(keyedBreakStems.breakContrast.low, 1) << pl("–")
+                << juce::String(keyedBreakStems.breakContrast.high, 1) << " dB";
+        out << pl(". Różnice w breaku poprawia aranż i automatyka głośności, nie EQ.") << "</p>" << groupTable(mix.breakStems) << "</section>\n";
     }
 
     out << "<h2>" << pl("Kanały") << "</h2><section class=\"wrap\"><table><tr><th>" << pl("Kanał") << "</th><th>" << pl("Rola")

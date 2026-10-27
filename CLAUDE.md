@@ -66,6 +66,12 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   of the needed gain plus a moving average of the same length, so no overshoot; release 80 ms) and per-100 ms reduction stats.
   The Brain holds each channel's output peak (`peakHold`, Agents only publish their latest block). `masteringReportHtml` builds the
   "Raport dla Ozone" file from the snapshot.
+  Phase 12 break: `StemProfiler::measureDrums` (after `measureBlock`, same block) lets `chooseDrop` also find the break (drums smoothed
+  over ~1 s at least 15 dB under their drop level, the sum within 20 dB of the drop, outside it, >= 8 s); `StemProfile::breakdown`
+  keeps its groups and `belowDropDb`, `StemTarget::breakContrast` the corridor, `stemBreakTarget` turns a set into its breaks so the
+  usual compare works (`StemComparison::Group::extra` = ours plays where the references are silent). The Brain accumulates our
+  break only once the drop is known (`breakSums`, drums level from the drums-group channels); the break is report/view/HTML only,
+  never planned or solved.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 
