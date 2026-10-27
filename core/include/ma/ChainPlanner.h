@@ -3,6 +3,7 @@
 #include "ChannelChain.h"
 #include "Instrument.h"
 #include "Resonance.h"
+#include "Saturator.h"
 #include "SpectrumAnalyzer.h"
 
 #include <vector>
@@ -11,7 +12,8 @@ namespace ma
 {
 
 // The mix engineer's pass over every channel at once (phase 7): high-pass, mono low end,
-// low-mid mud, compression, peak clipping and bass-note evening, each decided from the
+// low-mid mud, compression, peak clipping, bass-note evening and (phase 13) saturation for
+// parts too thin in overtones, each decided from the
 // channel's own measurements AND its place in the mix. A pad loses its low end because
 // the kick and bass own it there, a vocal is compressed harder when its quiet words sink
 // under the rest, the low-mid cut goes to whoever crowds that region least importantly.
@@ -64,6 +66,19 @@ struct ChainPlan
     double crestDb = 0.0;           // true peak over the loud parts' RMS
     double maxCrestDb = 0.0;
     double clipDb = 0.0;
+
+    // Phase 13: saturation where a tonal part is too thin in overtones (a sine-like sub, a
+    // dull pad) to be heard and felt in the mix; the shaper and how hard it works are chosen
+    // with the real saturator, the gentlest setting that gets there, and never so its new
+    // overtones would cover a more important channel.
+    SaturationSettings saturation {}; // off unless planned
+    bool saturationConsidered = false; // a role that may take it, with a measurable fundamental
+    double fundamentalHz = 0.0;
+    bool overtonesAboveSub = false;    // bass: what it has above 150 Hz against its sub, not harmonics of one note
+    double overtonesDb = -200.0;       // 2nd-8th harmonic region against the fundamental, now
+    double overtonesTargetDb = -200.0; // what the role should have
+    double overtonesAfterDb = -200.0;  // predicted with the planned saturation
+    int saturationWouldCover = -1;     // the more important channel that kept it gentler or off (index)
 };
 
 std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& channels, const ChainContext& context = {});

@@ -1830,6 +1830,59 @@ void BrainProcessor::proposeWholeMix()
                         + pl("%): niższe nuty ucho słyszy ciszej, więc dostają więcej, wyższe mniej. Linia gra równo");
             chainItems.push_back(item);
         }
+
+        // What the plan does not need comes off too, when the plan knows enough to say so:
+        // a compressor ticked by hand on percussion is not left squashing the hits.
+        const bool intentional = channel.data.intentionalDrive != 0;
+        if (plan.compressor.on < 0.5f && channel.data.compressor.on > 0.5f && plan.dynamicsKnown && !intentional)
+        {
+            item.tool = Proposal::Item::ChainTool::compressor;
+            item.compressor = channel.data.compressor;
+            item.compressor.on = 0.0f;
+            item.text = name + pl("kompresor wyłączony: ")
+                        + (plan.percussive ? pl("perkusji nie kompresuję, uderzenia mają zostać")
+                           : plan.overCompressed ? pl("już ściśnięty u źródła")
+                                                 : pl("dynamika w normie (") + juce::String(plan.spreadDb, 1) + pl(" dB, cel ")
+                                                       + juce::String(plan.targetSpreadDb, 1) + " dB)");
+            chainItems.push_back(item);
+        }
+        if (plan.clipper.on < 0.5f && channel.data.clipper.on > 0.5f && plan.dynamicsKnown && !intentional)
+        {
+            item.tool = Proposal::Item::ChainTool::clipper;
+            item.clipper = channel.data.clipper;
+            item.clipper.on = 0.0f;
+            item.text = name + pl("clipper wyłączony: szczyty w normie (") + juce::String(plan.crestDb, 1) + pl(" dB nad głośną częścią)");
+            chainItems.push_back(item);
+        }
+        if (plan.evener.on < 0.5f && channel.data.evener.on > 0.5f && channel.data.role != static_cast<int>(ma::Role::bass))
+        {
+            item.tool = Proposal::Item::ChainTool::evener;
+            item.evener = channel.data.evener;
+            item.evener.on = 0.0f;
+            item.text = name + pl("wyrównanie nut wyłączone: jest tylko dla basu");
+            chainItems.push_back(item);
+        }
+
+        // Phase 13: saturation, only on the roles the plan looks after; elsewhere (and with
+        // "Celowy przester") the Agent's own setting stays.
+        if (plan.saturationConsidered && !intentional)
+        {
+            const auto& want = plan.saturation;
+            const auto& have = channel.data.saturation;
+            const bool wantOn = want.on > 0.5f, haveOn = have.on > 0.5f;
+            const bool same = wantOn == haveOn
+                              && (!wantOn
+                                  || (juce::roundToInt(want.mode) == juce::roundToInt(have.mode) && std::abs(want.driveDb - have.driveDb) < 0.5f
+                                      && std::abs(want.mix - have.mix) < 0.03f));
+            if (!same)
+            {
+                item.tool = Proposal::Item::ChainTool::saturation;
+                item.saturation = wantOn ? want : have;
+                item.saturation.on = wantOn ? 1.0f : 0.0f;
+                item.text = name + saturationText(plan);
+                chainItems.push_back(item);
+            }
+        }
     }
     for (size_t c = 0; c < mix.channels.size(); ++c)
     {
@@ -1916,6 +1969,30 @@ void BrainProcessor::proposeWholeMix()
     currentProposal.wholeMix = true;
 }
 
+juce::String BrainProcessor::saturationText(const ma::ChainPlan& plan) const
+{
+    static const char* const modes[] = { "taśma", "lampa", "miękki clip", "twardy clip", "fałdowanie" };
+    const auto& sat = plan.saturation;
+    const auto cover = plan.saturationWouldCover >= 0 && static_cast<size_t>(plan.saturationWouldCover) < mix.channels.size()
+                           ? quoted(mix.channels[static_cast<size_t>(plan.saturationWouldCover)].name)
+                           : juce::String();
+    if (sat.on < 0.5f)
+        return cover.isNotEmpty() ? pl("saturacja wyłączona: jej alikwoty zasłoniłyby ") + cover
+                                  : pl("saturacja wyłączona: alikwotów dość (") + juce::String(plan.overtonesDb, 1)
+                                        + (plan.overtonesAboveSub ? pl(" dB powyżej 150 Hz względem suba, cel ") : pl(" dB pod podstawą, cel "))
+                                        + juce::String(plan.overtonesTargetDb, 0) + " dB)";
+    auto text = pl("saturacja ") + pl(modes[juce::jlimit(0, 4, juce::roundToInt(sat.mode))]) + pl(", drive +")
+                + juce::String(sat.driveDb, 0) + pl(" dB, miks ") + juce::String(juce::roundToInt(sat.mix * 100.0f))
+                + (plan.overtonesAboveSub ? pl("%: treść powyżej 150 Hz ") + juce::String(plan.overtonesDb, 1) + pl(" dB pod subem")
+                                          : pl("%: alikwoty (2.–8. harmoniczna) ") + juce::String(plan.overtonesDb, 1) + pl(" dB pod podstawą ")
+                                                + hzText(plan.fundamentalHz))
+                + pl(", po saturacji ok. ") + juce::String(plan.overtonesAfterDb, 1) + pl(" dB (cel ")
+                + juce::String(plan.overtonesTargetDb, 0) + pl(" dB). Gęstszy i słyszalny na małych głośnikach");
+    if (cover.isNotEmpty())
+        text += pl(". Łagodniej, niż by chciał, żeby nie zasłonić ") + cover;
+    return text;
+}
+
 Proposal::Verdict BrainProcessor::judge(size_t index, const ma::ChainPlan& plan, const ma::StereoPlan& stereoPlan) const
 {
     using Status = MixSnapshot::Status;
@@ -1986,6 +2063,11 @@ Proposal::Verdict BrainProcessor::judge(size_t index, const ma::ChainPlan& plan,
     else
         for (const auto& fix : stereoPlan.fixes)
             verdict.reasons.add(pl("Stereo: ") + stereoFixText(fix) + ".");
+
+    if (plan.saturation.on > 0.5f)
+        verdict.reasons.add(pl("Saturacja: ") + saturationText(plan).fromFirstOccurrenceOf("saturacja ", false, false) + ".");
+    else if (plan.saturationConsidered && channel.data.intentionalDrive == 0)
+        verdict.reasons.add(pl("Saturacja: ") + saturationText(plan).fromFirstOccurrenceOf(": ", false, false) + ".");
 
     if (plan.evener.on > 0.5f)
         verdict.reasons.add(pl("Linia basu wokół ") + noteName(plan.evener.referenceHz) + pl(": niskie nuty wyrównane dla ucha."));
@@ -2908,6 +2990,7 @@ int BrainProcessor::applySelected()
         auto clipper = channel.data.clipper;
         auto evener = channel.data.evener;
         auto stereoEq = channel.data.stereo;
+        auto saturation = channel.data.saturation;
         bool dynamicChanges = false;
         for (const auto& item : currentProposal.items)
         {
@@ -2940,6 +3023,7 @@ int BrainProcessor::applySelected()
                     case Proposal::Item::ChainTool::clipper: clipper = item.clipper; break;
                     case Proposal::Item::ChainTool::evener: evener = item.evener; break;
                     case Proposal::Item::ChainTool::stereo: stereoEq = item.stereo; break;
+                    case Proposal::Item::ChainTool::saturation: saturation = item.saturation; break;
                     case Proposal::Item::ChainTool::none: break;
                 }
                 dynamicChanges = true;
@@ -2977,6 +3061,7 @@ int BrainProcessor::applySelected()
         command.clipper = clipper;
         command.evener = evener;
         command.stereo = stereoEq;
+        command.saturation = saturation;
         sendCommand(channel.owner, command);
         ++sent;
     }

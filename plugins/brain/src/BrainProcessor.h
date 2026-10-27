@@ -115,7 +115,8 @@ struct Proposal
             compressor,
             clipper,
             evener,
-            stereo
+            stereo,
+            saturation // phase 13
         };
         ChainTool tool = ChainTool::none; // with Action::solver unused
         ma::CleanupSettings cleanup {};
@@ -123,6 +124,7 @@ struct Proposal
         ma::ClipperSettings clipper {};
         ma::BassEvenerSettings evener {};
         ma::StereoSettings stereo {};
+        ma::SaturationSettings saturation {};
 
         Action action = Action::solver;
         ma::DuckSettings duck {};
@@ -230,6 +232,7 @@ public:
     };
     IssueHandling issueHandling(const ma::MaskingIssue& issue) const;
     juce::String describeIssue(const ma::MaskingIssue& issue) const;
+    juce::String saturationText(const ma::ChainPlan& plan) const;
 
     // Phase 3: propose, apply, undo, compare.
     const Proposal& proposal() const { return currentProposal; }

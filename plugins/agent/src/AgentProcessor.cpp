@@ -39,9 +39,9 @@ void take(const float*& in, Settings& settings)
     in += sizeof(Settings) / sizeof(float);
 }
 
-std::array<float, 55> packDynamics(const AgentProcessor::DynamicState& s)
+std::array<float, 59> packDynamics(const AgentProcessor::DynamicState& s)
 {
-    std::array<float, 55> v {};
+    std::array<float, 59> v {};
     float* out = v.data();
     put(out, s.duck);
     *out++ = static_cast<float>(s.sync);
@@ -53,11 +53,12 @@ std::array<float, 55> packDynamics(const AgentProcessor::DynamicState& s)
     put(out, s.clipper);
     put(out, s.evener);
     put(out, s.stereo);
+    put(out, s.saturation);
     jassert(out == v.data() + v.size());
     return v;
 }
 
-AgentProcessor::DynamicState unpackDynamics(const std::array<float, 55>& v)
+AgentProcessor::DynamicState unpackDynamics(const std::array<float, 59>& v)
 {
     AgentProcessor::DynamicState s;
     const float* in = v.data();
@@ -71,6 +72,7 @@ AgentProcessor::DynamicState unpackDynamics(const std::array<float, 55>& v)
     take(in, s.clipper);
     take(in, s.evener);
     take(in, s.stereo);
+    take(in, s.saturation);
     return s;
 }
 
@@ -554,7 +556,7 @@ void AgentProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     evenerNote.store(evener.currentNoteHz());
 
     // Saturation sees the gain-staged level, so its drive means the same on every channel.
-    saturator.setSettings(currentSaturation());
+    saturator.setSettings(dynamics.saturation);
     saturator.process(mainBuffer.getArrayOfWritePointers(), numChannels, numSamples);
 
     harmonics.setSettings(dynamics.harmonics);
@@ -758,7 +760,7 @@ void AgentProcessor::handleBrainCommand(ma::bus::Region& region)
         setEqParams(next);
         setParam(eqBypassId, 0.0f);
         setDynamics({ command.duck, command.duckSync, command.polarityInverted != 0, command.harmonics, command.transients,
-                      command.cleanup, command.compressor, command.clipper, command.evener, command.stereo });
+                      command.cleanup, command.compressor, command.clipper, command.evener, command.stereo, command.saturation });
     }
     else if (command.kind == ma::bus::CommandKind::adapt && !eqBypassed())
     {
@@ -851,6 +853,10 @@ void AgentProcessor::setDynamics(const DynamicState& state)
         setParam(sideBellIds[n][1], bell.db);
         setParam(sideBellIds[n][2], bell.q);
     }
+    setParam(satOnId, state.saturation.on);
+    setParam(satModeId, state.saturation.mode);
+    setParam(satDriveId, state.saturation.driveDb);
+    setParam(satMixId, state.saturation.mix * 100.0f);
 }
 
 AgentProcessor::DynamicState AgentProcessor::currentDynamics() const
@@ -905,6 +911,7 @@ AgentProcessor::DynamicState AgentProcessor::currentDynamics() const
         bell.db = value(sideBellIds[n][1]);
         bell.q = value(sideBellIds[n][2]);
     }
+    state.saturation = currentSaturation();
     return state;
 }
 
