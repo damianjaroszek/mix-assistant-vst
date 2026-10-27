@@ -83,6 +83,12 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   `ma/KickTuning.h` `analyseKickTuning` places it in the key (tonic / fifth / in scale / out of scale, natural minor or major),
   against the bass's usual note (clash = 1, 2, 6, 10 or 11 semitones) and picks the nearest tonic or fifth in 35-80 Hz. Advice only:
   the Brain's report item "Stopa a tonacja" and the kick's verdict line; the retuning is done in FL's sampler.
+  Phase 15 bus glue: channels with role `bus` are left out of every mix sum (masking, translation, solver, `planChains` steps
+  1-4, stems), since their sources have Agents of their own. `planChains` step 5 gives a bus with Learn stats a glue compressor
+  by what it carries (`ChainChannel::contentRole` = the Agent's `detectedRole`, else crest >= 14 dB means drums): drums 4:1,
+  30 ms, 1/16 release, 3 dB on P95; vocals 2:1, 10 ms, 1/8, 2 dB; music 2:1, 30 ms, 1/4, 1.5 dB; none when the crest says the
+  sources arrive squashed. On apply a bus keeps its trim; its thresholds move with its sources' gain and `Command::inputShiftDb`
+  shifts its published learned levels (persisted, reset by Learn, restored by undo), so a second plan is idempotent.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

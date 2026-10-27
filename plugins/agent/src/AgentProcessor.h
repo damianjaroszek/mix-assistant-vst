@@ -292,6 +292,9 @@ private:
     std::atomic<double> outputPeak { -INFINITY };
 
     LearnResult result; // message thread only
+    // A bus: how far its sources moved since its Learn pass (the Brain's gain), added to the
+    // learned levels it publishes. Message thread only.
+    double inputShiftDb = 0.0, backupInputShiftDb = 0.0;
 
     // Connection to the Brain (message thread only).
     std::shared_ptr<ma::SharedSession> session = ma::SharedSession::get();

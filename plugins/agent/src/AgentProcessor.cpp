@@ -665,8 +665,8 @@ void AgentProcessor::publishToBrain()
     data.inputRmsDb = toShared(inputRms.load());
     data.inputLufs = toShared(inputLufs.load());
     data.outputPeakDb = toShared(outputPeak.load());
-    data.learnedDb = toShared(result.applied ? result.measuredDb : -INFINITY);
-    data.learnedTruePeakDb = toShared(result.applied ? result.truePeakDb : -INFINITY);
+    data.learnedDb = toShared(result.applied ? result.measuredDb + inputShiftDb : -INFINITY);
+    data.learnedTruePeakDb = toShared(result.applied ? result.truePeakDb + inputShiftDb : -INFINITY);
     data.liveValid = spectrumVisible.load() || brainWantsSpectra.load() ? 1 : 0;
 
     // The profile is stored ear-weighted; the Brain gets raw levels like the live spectrum.
@@ -705,9 +705,9 @@ void AgentProcessor::publishToBrain()
         data.sideDb[b] = liveSide[static_cast<size_t>(b)].load();
     }
     data.statsValid = result.statsValid ? 1 : 0;
-    data.levelP10 = toShared(result.levelP10);
-    data.levelP50 = toShared(result.levelP50);
-    data.levelP95 = toShared(result.levelP95);
+    data.levelP10 = toShared(result.levelP10 + inputShiftDb);
+    data.levelP50 = toShared(result.levelP50 + inputShiftDb);
+    data.levelP95 = toShared(result.levelP95 + inputShiftDb);
     data.lowNoteHz = static_cast<float>(result.lowNoteHz);
     data.tailPitchHz = static_cast<float>(result.tailPitchHz);
     data.compressorReductionDb = static_cast<float>(compShownDb);
@@ -737,6 +737,8 @@ void AgentProcessor::handleBrainCommand(ma::bus::Region& region)
     if (command.kind == ma::bus::CommandKind::apply)
     {
         backupTrimDb = trimParam->load();
+        backupInputShiftDb = inputShiftDb;
+        inputShiftDb += command.inputShiftDb;
         backupEq = currentEq();
         backupBypass = eqBypassed();
         backupDynamics = currentDynamics();
@@ -773,6 +775,7 @@ void AgentProcessor::handleBrainCommand(ma::bus::Region& region)
     else if (command.kind == ma::bus::CommandKind::undo && backupValid)
     {
         setParam(trimId, backupTrimDb);
+        inputShiftDb = backupInputShiftDb;
         setEqParams(backupEq);
         setParam(eqBypassId, backupBypass ? 1.0f : 0.0f);
         setDynamics(backupDynamics);
@@ -999,6 +1002,7 @@ void AgentProcessor::applyLearned()
     const auto plan = ma::planTrim(measured, peak, target, ceiling);
 
     result.serial += 1;
+    inputShiftDb = 0.0; // measured anew
     result.applied = plan.valid;
     result.limitedByPeak = plan.limitedByPeak;
     result.measuredDb = measured;
@@ -1099,7 +1103,7 @@ void AgentProcessor::getStateInformation(juce::MemoryBlock& destData)
     if (result.statsValid)
         state.setProperty(statsProperty, juce::String(result.levelP10, 2) + " " + juce::String(result.levelP50, 2) + " "
                                              + juce::String(result.levelP95, 2) + " " + juce::String(result.lowNoteHz, 1) + " "
-                                             + juce::String(result.tailPitchHz, 2), nullptr);
+                                             + juce::String(result.tailPitchHz, 2) + " " + juce::String(inputShiftDb, 2), nullptr);
     else
         state.removeProperty(statsProperty, nullptr);
     juce::StringArray resonances;
@@ -1129,7 +1133,7 @@ void AgentProcessor::setStateInformation(const void* data, int sizeInBytes)
         profileValid.store(true);
     }
     const auto stats = juce::StringArray::fromTokens(state.getProperty(statsProperty).toString(), " ", {});
-    if (stats.size() == 4 || stats.size() == 5) // the tail pitch since phase 14
+    if (stats.size() >= 4 && stats.size() <= 6) // the tail pitch since phase 14, a bus's input shift since 15
     {
         result.statsValid = true;
         result.levelP10 = stats[0].getDoubleValue();
@@ -1137,6 +1141,7 @@ void AgentProcessor::setStateInformation(const void* data, int sizeInBytes)
         result.levelP95 = stats[2].getDoubleValue();
         result.lowNoteHz = stats[3].getDoubleValue();
         result.tailPitchHz = stats.size() > 4 ? stats[4].getDoubleValue() : 0.0;
+        inputShiftDb = stats.size() > 5 ? stats[5].getDoubleValue() : 0.0;
     }
     const auto found = juce::StringArray::fromTokens(state.getProperty(resonancesProperty).toString(), " ", {});
     result.resonances = {};

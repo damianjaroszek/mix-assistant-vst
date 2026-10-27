@@ -33,6 +33,10 @@ struct ChainChannel
     double lowNoteHz = 0.0;
     bool intentionalDrive = false; // meant to distort: no clipper, no "over-compressed" verdict
     Resonances resonances {};      // from the Learn pass
+    // A bus: what the Learn pass recognised on it, i.e. what its sources are (drums, vocals...).
+    // Buses are left out of every sum over the mix, since their sources are channels of their own.
+    Role contentRole = Role::other;
+    double contentConfidence = 0.0;
 };
 
 struct ChainContext
@@ -79,6 +83,15 @@ struct ChainPlan
     double overtonesTargetDb = -200.0; // what the role should have
     double overtonesAfterDb = -200.0;  // predicted with the planned saturation
     int saturationWouldCover = -1;     // the more important channel that kept it gentler or off (index)
+
+    // Phase 15: glue compression on a bus. A gentle ratio and a slow attack that lets the hits
+    // through, the release on the groove, a couple of dB on the loud parts: the sources move as
+    // one part. How hard depends on what the bus carries.
+    enum class BusContent { drums, vocals, music };
+    bool glue = false;
+    BusContent busContent = BusContent::music;
+    double glueReductionDb = 0.0; // planned on the loud parts
+    double glueTargetDb = 0.0;
 };
 
 std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& channels, const ChainContext& context = {});

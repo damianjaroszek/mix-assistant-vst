@@ -27,7 +27,7 @@ namespace ma::bus
 {
 
 constexpr std::uint32_t kMagic = 0x4D414255; // "MABU"
-constexpr std::uint32_t kVersion = 11;
+constexpr std::uint32_t kVersion = 12;
 constexpr int kMaxSlots = 128;
 constexpr int kNameLength = 48;
 constexpr int kBands = 40;            // ERB bands, as SpectrumAnalyzer with BandScale::erb
@@ -129,6 +129,9 @@ struct Command
     BassEvenerSettings evener;
     StereoSettings stereo;
     SaturationSettings saturation; // phase 13
+    // Phase 15: how far a bus's sources moved (dB) with this command; its learned levels follow,
+    // so a second plan sees what now reaches it. 0 for every other channel.
+    float inputShiftDb;
 };
 
 struct Slot

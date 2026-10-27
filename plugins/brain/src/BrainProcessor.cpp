@@ -82,6 +82,13 @@ juce::String regionText(int region)
     return pl(kRegionNames[region]) + " (" + hzText(ma::stemRegionEdgeHz(region)) + pl("–") + hzText(ma::stemRegionEdgeHz(region + 1)) + ")";
 }
 
+// A bus carries channels that have Agents of their own: in collisions, translation and the
+// solver it would be counted twice and collide with its own sources.
+bool inMixSums(const MixSnapshot::Channel& channel)
+{
+    return channel.data.role != static_cast<std::int32_t>(ma::Role::bus);
+}
+
 int groupOfChannel(const MixSnapshot::Channel& channel)
 {
     return ma::stemGroupForRole(static_cast<ma::Role>(juce::jlimit(0, static_cast<int>(ma::Role::send), static_cast<int>(channel.data.role))));
@@ -487,7 +494,7 @@ void BrainProcessor::timerCallback()
     for (size_t c = 0; c < mix.channels.size(); ++c)
     {
         const auto& channel = mix.channels[c];
-        masking[c].valid = channel.spectrumValid;
+        masking[c].valid = channel.spectrumValid && inMixSums(channel);
         masking[c].priority = channel.data.priority;
         for (int b = 0; b < ma::bus::kBands; ++b)
             masking[c].rawDb[static_cast<size_t>(b)] = channel.heardDb[static_cast<size_t>(b)];
@@ -501,7 +508,7 @@ void BrainProcessor::timerCallback()
     for (size_t c = 0; c < mix.channels.size(); ++c)
     {
         const auto& channel = mix.channels[c];
-        translation[c].valid = channel.outputValid || channel.spectrumValid;
+        translation[c].valid = (channel.outputValid || channel.spectrumValid) && inMixSums(channel);
         for (int b = 0; b < ma::bus::kBands; ++b)
             translation[c].rawDb[static_cast<size_t>(b)] = channel.outputValid ? channel.outputDb[static_cast<size_t>(b)]
                                                                                : channel.heardDb[static_cast<size_t>(b)];
@@ -549,7 +556,7 @@ ma::SolverResult BrainProcessor::solveNow(double headroomGainDb, const ma::StemS
     std::vector<ma::SolverChannel> channels(mix.channels.size());
     for (size_t c = 0; c < mix.channels.size(); ++c)
     {
-        channels[c].valid = mix.channels[c].spectrumValid;
+        channels[c].valid = mix.channels[c].spectrumValid && inMixSums(mix.channels[c]);
         channels[c].priority = mix.channels[c].data.priority;
         for (int b = 0; b < ma::bus::kBands; ++b)
             channels[c].rawDb[static_cast<size_t>(b)] = mix.channels[c].bandsDb[static_cast<size_t>(b)];
@@ -1750,6 +1757,8 @@ void BrainProcessor::proposeWholeMix()
         in.truePeakDb = channel.data.learnedTruePeakDb + channel.data.trimDb;
         in.lowNoteHz = channel.data.lowNoteHz;
         in.intentionalDrive = channel.data.intentionalDrive != 0;
+        in.contentRole = static_cast<ma::Role>(juce::jlimit(0, static_cast<int>(ma::Role::send), static_cast<int>(channel.data.detectedRole)));
+        in.contentConfidence = channel.data.detectedConfidence;
         for (int r = 0; r < ma::kMaxResonances; ++r)
             in.resonances[static_cast<size_t>(r)] = channel.data.resonances[r];
     }
@@ -1787,7 +1796,7 @@ void BrainProcessor::proposeWholeMix()
     std::vector<ma::MaskingChannel> masking(mix.channels.size());
     for (size_t c = 0; c < mix.channels.size(); ++c)
     {
-        masking[c].valid = mix.channels[c].spectrumValid;
+        masking[c].valid = mix.channels[c].spectrumValid && inMixSums(mix.channels[c]);
         masking[c].priority = mix.channels[c].data.priority;
         for (int b = 0; b < ma::bus::kBands; ++b)
             masking[c].rawDb[static_cast<size_t>(b)] = mix.channels[c].heardDb[static_cast<size_t>(b)];
@@ -1818,7 +1827,14 @@ void BrainProcessor::proposeWholeMix()
             item.text = name + (text.isEmpty() ? pl("porządki wyłączone, nie są potrzebne") : text);
             chainItems.push_back(item);
         }
-        if (plan.compressor.on > 0.5f && !sameCompressor(plan.compressor, channel.data.compressor))
+        if (plan.glue && !sameCompressor(plan.compressor, channel.data.compressor))
+        {
+            item.tool = Proposal::Item::ChainTool::compressor;
+            item.compressor = plan.compressor;
+            item.text = name + glueText(plan, bpm);
+            chainItems.push_back(item);
+        }
+        else if (plan.compressor.on > 0.5f && !sameCompressor(plan.compressor, channel.data.compressor))
         {
             const auto& comp = plan.compressor;
             item.tool = Proposal::Item::ChainTool::compressor;
@@ -2071,6 +2087,19 @@ juce::String BrainProcessor::kickTuningText(const ma::KickTuning& t) const
     return text;
 }
 
+juce::String BrainProcessor::glueText(const ma::ChainPlan& plan, double bpm)
+{
+    using Content = ma::ChainPlan::BusContent;
+    const auto& comp = plan.compressor;
+    const auto content = plan.busContent == Content::drums ? pl("perkusji") : plan.busContent == Content::vocals ? pl("wokali") : pl("muzyki");
+    return pl("klej busa ") + content + ": " + juce::String(comp.ratio, 1) + pl(":1 od ") + juce::String(comp.thresholdDb, 1)
+           + pl(" dB, atak ") + juce::String(juce::roundToInt(comp.attackMs)) + pl(" ms (przepuszcza początek uderzeń), powrót ")
+           + juce::String(juce::roundToInt(comp.releaseMs)) + " ms" + (bpm > 0.0 ? pl(" pod tempo") : juce::String())
+           + pl(", ok. ") + juce::String(plan.glueReductionDb, 1) + pl(" dB redukcji w głośnych miejscach (cel ")
+           + juce::String(plan.glueTargetDb, 1) + pl(" dB), makeup +") + juce::String(comp.makeupDb, 1)
+           + pl(" dB. Źródła grają razem jak jedna partia");
+}
+
 juce::String BrainProcessor::saturationText(const ma::ChainPlan& plan) const
 {
     static const char* const modes[] = { "taśma", "lampa", "miękki clip", "twardy clip", "fałdowanie" };
@@ -2107,6 +2136,10 @@ Proposal::Verdict BrainProcessor::judge(size_t index, const ma::ChainPlan& plan,
     verdict.status = Status::good;
     juce::StringArray attention;
 
+    if (!inMixSums(channel))
+        verdict.reasons.add(pl("Bus nie liczy się w kolizjach, translacji ani korekcjach EQ: jego źródła mają własnych Agentów "
+                               "i tam Mózg je ustawia. Tu dostaje tylko klej."));
+
     // Low end and mud.
     const auto cleanup = cleanupText(plan.cleanup, plan.highPassReason, plan.mudCrowd, &plan);
     verdict.reasons.add(cleanup.isEmpty() ? pl("Dół i środek: nic do sprzątania.") : pl("Porządki: ") + cleanup + ".");
@@ -2129,6 +2162,10 @@ Proposal::Verdict BrainProcessor::judge(size_t index, const ma::ChainPlan& plan,
         verdict.reasons.add(pl("Już mocno ściśnięty przed Agentem (szczyt tylko ") + juce::String(plan.crestDb, 1)
                             + pl(" dB nad głośną częścią). Nie dokładam kompresji; jeśli brzmi płasko, zdejmij kompresję u źródła."));
         attention.add(pl("przekompresowany u źródła"));
+    }
+    else if (plan.glue)
+    {
+        verdict.reasons.add(pl("Dynamika: ") + glueText(plan, tempoBpm()) + ".");
     }
     else if (plan.percussive)
     {
@@ -2238,7 +2275,7 @@ void BrainProcessor::proposeHarmonics()
     std::vector<ma::TranslationChannel> base(mix.channels.size());
     for (size_t c = 0; c < mix.channels.size(); ++c)
     {
-        base[c].valid = mix.channels[c].outputValid || mix.channels[c].spectrumValid;
+        base[c].valid = (mix.channels[c].outputValid || mix.channels[c].spectrumValid) && inMixSums(mix.channels[c]);
         for (int b = 0; b < ma::bus::kBands; ++b)
             base[c].rawDb[static_cast<size_t>(b)] = mix.channels[c].outputValid ? mix.channels[c].outputDb[static_cast<size_t>(b)]
                                                                                 : mix.channels[c].heardDb[static_cast<size_t>(b)];
@@ -3068,7 +3105,16 @@ int BrainProcessor::applySelected()
     for (const auto& channel : mix.channels)
     {
         const int group = groupOfChannel(channel);
-        const double gain = globalGain + (group >= 0 ? groupGain[static_cast<size_t>(group)] : 0.0);
+        double gain = globalGain + (group >= 0 ? groupGain[static_cast<size_t>(group)] : 0.0);
+        // A bus is fed by channels that take the gain themselves: its trim stays, and what reaches
+        // its compressor and clipper moves with its sources (the group it was recognised as).
+        double levelGain = gain;
+        if (!inMixSums(channel))
+        {
+            const int sources = ma::stemGroupForRole(static_cast<ma::Role>(juce::jlimit(0, static_cast<int>(ma::Role::send), static_cast<int>(channel.data.detectedRole))));
+            levelGain = globalGain + (sources >= 0 ? groupGain[static_cast<size_t>(sources)] : 0.0);
+            gain = 0.0;
+        }
         // A duck listens to the kick: its threshold follows the drums.
         const double kickGain = globalGain + groupGain[static_cast<size_t>(ma::StemGroup::drums)];
         const auto proposed = std::find_if(currentProposal.eq.begin(), currentProposal.eq.end(),
@@ -3148,7 +3194,7 @@ int BrainProcessor::applySelected()
             }
         }
 
-        if (!eqChanges && !dynamicChanges && std::abs(gain) < 0.05 && std::abs(kickGain - globalGain) < 0.05)
+        if (!eqChanges && !dynamicChanges && std::abs(gain) < 0.05 && std::abs(levelGain) < 0.05 && std::abs(kickGain - globalGain) < 0.05)
             continue;
         if (!eqChanges)
             for (int b = 0; b < ma::kEqBands; ++b)
@@ -3167,14 +3213,15 @@ int BrainProcessor::applySelected()
         command.harmonics = harmonics;
         command.transients = transients;
         // The trim moves with the gain, and the compressor and clipper levels with it.
-        compressor.thresholdDb = static_cast<float>(juce::jlimit(-60.0, 0.0, compressor.thresholdDb + gain));
-        clipper.ceilingDb = static_cast<float>(juce::jlimit(-30.0, 0.0, clipper.ceilingDb + gain));
+        compressor.thresholdDb = static_cast<float>(juce::jlimit(-60.0, 0.0, compressor.thresholdDb + levelGain));
+        clipper.ceilingDb = static_cast<float>(juce::jlimit(-30.0, 0.0, clipper.ceilingDb + levelGain));
         command.cleanup = cleanup;
         command.compressor = compressor;
         command.clipper = clipper;
         command.evener = evener;
         command.stereo = stereoEq;
         command.saturation = saturation;
+        command.inputShiftDb = inMixSums(channel) ? 0.0f : static_cast<float>(levelGain);
         sendCommand(channel.owner, command);
         ++sent;
     }
