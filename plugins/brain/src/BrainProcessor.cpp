@@ -21,7 +21,7 @@ constexpr double kSmoothingSeconds = 3.0;
 constexpr std::uint64_t kSpectraRequestMs = 3000;
 constexpr std::uint64_t kAgentSwitchMs = 400; // Agents poll the bus at 10 Hz
 constexpr double kCancellingCorrelation = -0.2;  // low-band correlation with the sidechain that loses low end
-constexpr double kDuckMaxHz = 300.0;             // collisions below this are timing problems (kick vs bass)
+constexpr double kDuckMaxHz = 300.0;             // collisions below this are timing problems (kick vs bass); a masked kick ducks at any height
 constexpr int kDuckSync = 2;                     // release in a sixteenth: back before the next off-beat
 constexpr double kPhoneGoalDb = -12.0;           // a channel this much quieter (vs the mix) on a phone ...
 constexpr double kLaptopGoalDb = -8.0;           // ... or a laptop counts as lost there
@@ -1472,21 +1472,77 @@ void BrainProcessor::buildReport()
         }
         else
         {
-            const auto count = static_cast<int>(mix.masking.issues.size());
-            item.status = mix.masking.issues.front().score >= 0.5 ? Status::problem : Status::warning;
-            item.detail = juce::String(count) + (count == 1 ? pl(" kolizja") : count < 5 ? pl(" kolizje") : pl(" kolizji"))
-                          + pl(". Szczegóły w liście poniżej mapy.");
+            int open = 0, ducked = 0, atLimit = 0;
+            bool strong = false;
+            for (const auto& issue : mix.masking.issues)
+                switch (issueHandling(issue))
+                {
+                    case IssueHandling::open:
+                        ++open;
+                        strong = strong || issue.score >= 0.5;
+                        break;
+                    case IssueHandling::ducked: ++ducked; break;
+                    case IssueHandling::cutAtLimit: ++atLimit; break;
+                }
+            auto collisions = [](int count) {
+                return juce::String(count) + (count == 1 ? pl(" kolizja") : count < 5 ? pl(" kolizje") : pl(" kolizji"));
+            };
+            juce::StringArray parts;
+            if (open > 0)
+                parts.add(collisions(open) + pl(" do poprawienia"));
+            if (ducked > 0)
+                parts.add(collisions(ducked) + pl(" obsługuje ustępowanie na stopę"));
+            if (atLimit > 0)
+                parts.add(collisions(atLimit) + pl(" zostaje mimo cięcia do limitu: to sprawa poziomów (fader) albo aranżu"));
+            item.status = open > 0 ? (strong ? Status::problem : Status::warning) : atLimit > 0 ? Status::warning : Status::good;
+            item.detail = parts.joinIntoString(", ") + pl(". Szczegóły w liście poniżej mapy.");
         }
         report.push_back(item);
     }
+}
+
+namespace
+{
+// The duck's bell reaches about 0.7 octave / Q to each side of its centre.
+bool duckCovers(const ma::DuckSettings& duck, double lowHz, double highHz)
+{
+    if (duck.wholeSignal > 0.5f)
+        return true;
+    const double reach = std::pow(2.0, 0.7 / std::max(0.3, static_cast<double>(duck.q)));
+    return duck.hz / reach < highHz && duck.hz * reach > lowHz;
+}
+} // namespace
+
+BrainProcessor::IssueHandling BrainProcessor::issueHandling(const ma::MaskingIssue& issue) const
+{
+    const auto& masker = mix.channels[static_cast<size_t>(issue.masker)].data;
+    const auto& masked = mix.channels[static_cast<size_t>(issue.masked)].data;
+    // The sidechain is the kick (that is how the duck proposals set it up).
+    if (masked.role == 1 && masker.duck.on > 0.5f && masker.sidechainConnected != 0 && duckCovers(masker.duck, issue.lowHz, issue.highHz))
+        return IssueHandling::ducked;
+    if (masker.eqBypass == 0)
+    {
+        const double limit = ma::SolverOptions {}.maxCutDb - 0.5;
+        for (const auto& band : masker.eq)
+            if (band.gainDb <= -limit && band.hz >= issue.lowHz && band.hz <= issue.highHz)
+                return IssueHandling::cutAtLimit;
+    }
+    return IssueHandling::open;
 }
 
 juce::String BrainProcessor::describeIssue(const ma::MaskingIssue& issue) const
 {
     const auto& masker = mix.channels[static_cast<size_t>(issue.masker)];
     const auto& masked = mix.channels[static_cast<size_t>(issue.masked)];
-    return quoted(masker.name) + pl(" zasłania ") + quoted(masked.name) + pl(" w ") + hzText(issue.lowHz) + pl("–")
-           + hzText(issue.highHz) + " (" + juce::String(juce::roundToInt(issue.score * 100.0)) + "%)";
+    auto text = quoted(masker.name) + pl(" zasłania ") + quoted(masked.name) + pl(" w ") + hzText(issue.lowHz) + pl("–")
+                + hzText(issue.highHz) + " (" + juce::String(juce::roundToInt(issue.score * 100.0)) + "%)";
+    switch (issueHandling(issue))
+    {
+        case IssueHandling::ducked: text += pl(": ustępuje na każde uderzenie stopy, w średniej tego nie widać"); break;
+        case IssueHandling::cutAtLimit: text += pl(": cięcie już na limicie, reszta to poziom ") + quoted(masker.name); break;
+        case IssueHandling::open: break;
+    }
+    return text;
 }
 
 void BrainProcessor::propose()
@@ -1943,11 +1999,14 @@ Proposal::Verdict BrainProcessor::judge(size_t index, const ma::ChainPlan& plan,
         const bool fixed = std::any_of(currentProposal.items.begin(), currentProposal.items.end(), [&](const auto& item) {
             return item.maskedOwner == channel.owner && item.owner == masker.owner && !item.advisory;
         });
+        const auto handling = issueHandling(issue);
         verdict.reasons.add(pl("Zasłania go ") + quoted(masker.name) + pl(" w ") + hzText(issue.lowHz) + pl("–") + hzText(issue.highHz)
                             + " (" + juce::String(juce::roundToInt(issue.score * 100.0)) + "%)"
-                            + (fixed ? pl(": poprawka jest w propozycji.") : pl(": zostaje, bo ") + quoted(masker.name)
-                                                                                  + pl(" jest tam ważniejszy.")));
-        if (!fixed && issue.score >= 0.5)
+                            + (fixed ? pl(": poprawka jest w propozycji.")
+                               : handling == IssueHandling::ducked ? pl(": ustępuje mu na każde uderzenie.")
+                               : handling == IssueHandling::cutAtLimit ? pl(": cięcie już na limicie, reszta to poziom ") + quoted(masker.name) + "."
+                                                                      : pl(": zostaje, solver nie znalazł cięcia, które by pomogło.")));
+        if (!fixed && handling != IssueHandling::ducked && issue.score >= 0.5)
             attention.add(pl("ginie pod ") + quoted(masker.name));
     }
     if (index < mix.translation.shareChangeDb.size() && mix.translation.valid)
@@ -2406,10 +2465,12 @@ void BrainProcessor::proposeDynamics()
     std::vector<Candidate> candidates;
     for (const auto& issue : mix.masking.issues)
     {
-        if (issue.score < 0.3 || issue.highHz > kDuckMaxHz)
-            continue;
         const auto& masker = mix.channels[static_cast<size_t>(issue.masker)];
         const auto& masked = mix.channels[static_cast<size_t>(issue.masked)];
+        // The kick plays for a moment only, so whatever covers it (its click too) gives way then.
+        const bool kickMasked = masked.data.role == 1 && masker.data.role != 1;
+        if (issue.score < 0.3 || (issue.highHz > kDuckMaxHz && !kickMasked))
+            continue;
         if (masker.data.role != 1 && (masked.data.role == 1 || masker.data.role == 2))
             candidates.push_back({ issue.masker, issue.masked, issue.lowHz, issue.highHz, issue.score });
     }
@@ -2449,7 +2510,8 @@ void BrainProcessor::proposeDynamics()
         const ma::MaskingIssue issue { candidate.masker, candidate.masked, candidate.strength, candidate.lowHz, candidate.highHz, 0, 0 };
 
         const bool connected = masker.data.sidechainConnected != 0;
-        const bool alreadyOn = masker.data.duck.on > 0.5f && connected;
+        const bool wasOn = masker.data.duck.on > 0.5f && connected;
+        const bool alreadyOn = wasOn && duckCovers(masker.data.duck, issue.lowHz, issue.highHz);
 
         // The static cut for the same pair is the weaker fix; leave it for the user to pick.
         for (auto& item : currentProposal.items)
@@ -2474,14 +2536,29 @@ void BrainProcessor::proposeDynamics()
         duck.hz = static_cast<float>(std::round(centre));
         duck.q = static_cast<float>(juce::jlimit(0.5, 3.0, centre / std::max(1.0, issue.highHz - issue.lowHz)));
         duck.depthDb = static_cast<float>(std::round((6.0 + 4.0 * issue.score) * 2.0) / 2.0);
-        // Full depth on the kick's peaks: the detector reaches it 6 dB over the threshold.
-        duck.thresholdDb = connected ? static_cast<float>(juce::jlimit(-50.0, -6.0, std::round(masker.data.sidechainDb - 18.0)))
+        // Full depth on the kick's peaks: the detector reaches it 6 dB over the threshold. The
+        // sidechain level is the kick's peak; in a band away from its body (the click) the
+        // detector hears less. The averaged spectrum overstates the drop there (the click is
+        // shorter than the body), so only part of it counts.
+        double bandBelowPeakDb = 0.0;
+        if (masked.spectrumValid)
+        {
+            const auto& kick = masked.heardDb;
+            const auto loudest = *std::max_element(kick.begin(), kick.end());
+            int nearest = 0;
+            for (int b = 1; b < ma::bus::kBands; ++b)
+                if (std::abs(std::log(ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b) / centre))
+                    < std::abs(std::log(ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, nearest) / centre)))
+                    nearest = b;
+            bandBelowPeakDb = juce::jlimit(-20.0, 0.0, 0.6 * static_cast<double>(kick[static_cast<size_t>(nearest)] - loudest));
+        }
+        duck.thresholdDb = connected ? static_cast<float>(juce::jlimit(-60.0, -6.0, std::round(masker.data.sidechainDb - 18.0 + bandBelowPeakDb)))
                                      : -30.0f;
         duck.attackMs = 3.0f;
         duck.releaseMs = static_cast<float>(std::round(releaseMs));
         item.duckSync = bpm > 0.0 ? kDuckSync : 0;
 
-        item.text = quoted(masker.name) + pl(": ustępuje ") + quoted(masked.name) + pl(" dynamicznie, do -")
+        item.text = quoted(masker.name) + (wasOn ? pl(": przenosi ustępowanie, ustępuje ") : pl(": ustępuje ")) + quoted(masked.name) + pl(" dynamicznie, do -")
                     + juce::String(duck.depthDb, 1) + pl(" dB przy ") + hzText(duck.hz) + pl(", tylko gdy stopa gra (powrót ")
                     + (bpm > 0.0 ? syncName + " = " : juce::String()) + juce::String(juce::roundToInt(duck.releaseMs)) + " ms)";
         if (connected)

@@ -220,6 +220,15 @@ public:
     void setUseLearnedProfiles(bool shouldUse);
     // While an editor is open the Agents are asked to keep their live spectra running.
     void setEditorOpen(bool open) { editorOpen = open; }
+    // A collision the Agents already deal with still shows in the averaged spectra: the duck
+    // works only while the kick hits, and the solver's cut stops at its limit.
+    enum class IssueHandling
+    {
+        open,
+        ducked,    // the masker gives way to the kick in that band, on every hit
+        cutAtLimit // the masker already carries the deepest cut the solver sets there
+    };
+    IssueHandling issueHandling(const ma::MaskingIssue& issue) const;
     juce::String describeIssue(const ma::MaskingIssue& issue) const;
 
     // Phase 3: propose, apply, undo, compare.

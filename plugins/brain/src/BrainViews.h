@@ -426,6 +426,8 @@ public:
         float score = 0.0f;
         std::uint64_t masker = 0;
         bool involvesSelected = false;
+        bool ducked = false;     // dealt with on every kick hit
+        bool cutAtLimit = false; // what is left after the deepest cut
     };
 
     void setLines(std::vector<Line> newLines)
@@ -460,7 +462,7 @@ public:
                 g.setColour(colours::accent.withAlpha(0.18f));
                 g.fillRect(row);
             }
-            g.setColour(line.score >= 0.5f ? colours::critical : colours::warning);
+            g.setColour(line.ducked ? colours::good : line.cutAtLimit || line.score < 0.5f ? colours::warning : colours::critical);
             g.fillEllipse(row.getX(), row.getCentreY() - 4.0f, 8.0f, 8.0f);
             g.setColour(colours::text);
             g.drawText(line.text, row.withTrimmedLeft(16.0f), juce::Justification::centredLeft, true);
