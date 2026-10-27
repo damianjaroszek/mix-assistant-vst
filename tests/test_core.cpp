@@ -1875,7 +1875,7 @@ ma::ChainChannel toneChannel(ma::Role role, int priority, double hz, int harmoni
     {
         double v = 0.0;
         for (int k = 1; k <= harmonics; ++k)
-            v += std::sin(2.0 * M_PI * hz * k * static_cast<double>(i) / sr) / k;
+            v += std::sin(2.0 * kPi * hz * k * static_cast<double>(i) / sr) / k;
         x[i] = static_cast<float>(amplitude * v);
     }
     ma::SpectrumAnalyzer analyser;
