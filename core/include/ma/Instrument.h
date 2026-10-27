@@ -47,6 +47,9 @@ public:
         // Dynamics for the mix engineer: 100 ms RMS levels while playing (dBFS, as fed in).
         double levelP10 = -200.0, levelP50 = -200.0, levelP95 = -200.0;
         double lowNoteHz = 0.0;      // the bass line's usual note (median), 0 = no clear low notes
+        // Phase 14: the pitch a hit's low tail settles on (150-300 ms after onsets, 30-130 Hz,
+        // median in 10-cent steps): a kick's tuning. 0 = no hits with a pitched tail.
+        double tailPitchHz = 0.0;
         bool valid = false;
     };
     Summary summary() const;
@@ -76,6 +79,8 @@ private:
     LowPitchTracker pitchTracker;
     std::array<long long, 161> noteHistogram {}; // hops per detected note, 1 Hz steps
     long long noteHops = 0;
+    std::array<long long, 253> tailHistogram {}; // hops per tail pitch, 10 cents from 30 Hz (to ~130 Hz)
+    long long tailHops = 0;
 };
 
 struct RoleGuess

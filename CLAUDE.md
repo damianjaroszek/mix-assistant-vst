@@ -78,6 +78,11 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   while its predicted overtones raise masking of a more important channel (`analyseMasking`, +0.05 to >= 0.2). Never on kick,
   percussion, effects, bus, send or `intentionalDrive` channels (the Brain then keeps the Agent's own setting). `proposeWholeMix` also
   turns off a compressor / clipper / evener the plan does not want, when the plan knows the dynamics.
+  Phase 14 kick tuning: the Learn pass also measures the pitch a hit's tail settles on (`Summary::tailPitchHz`, 150-300 ms after
+  onsets, 30-130 Hz, 10-cent histogram median, >= 4 onsets), published as `AgentData::tailPitchHz` and persisted with the stats.
+  `ma/KickTuning.h` `analyseKickTuning` places it in the key (tonic / fifth / in scale / out of scale, natural minor or major),
+  against the bass's usual note (clash = 1, 2, 6, 10 or 11 semitones) and picks the nearest tonic or fifth in 35-80 Hz. Advice only:
+  the Brain's report item "Stopa a tonacja" and the kick's verdict line; the retuning is done in FL's sampler.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

@@ -18,6 +18,7 @@
 #include "ma/StereoPlanner.h"
 #include "ma/StemReference.h"
 #include "ma/Key.h"
+#include "ma/KickTuning.h"
 #include "ma/MasterPreview.h"
 #include "ma/EqualLoudness.h"
 #include "ma/GainStaging.h"
@@ -1955,6 +1956,61 @@ void testSaturationPlan()
     check(ma::planChains(intentional)[1].saturation.on < 0.5f, "a part meant to distort keeps its own saturation");
 }
 
+void testKickTuning()
+{
+    constexpr double sr = 48000.0;
+    // A kick with a pitch sweep settling on 46.25 Hz (F#1), four on the floor at 124 BPM.
+    for (double tail : { 46.25, 55.0 })
+    {
+        const double beat = 60.0 / 124.0;
+        std::vector<float> x(static_cast<size_t>(8.0 * sr));
+        double phase = 0.0;
+        for (size_t i = 0; i < x.size(); ++i)
+        {
+            const double t = std::fmod(static_cast<double>(i) / sr, beat);
+            const double hz = tail + 90.0 * std::exp(-t * 40.0);
+            phase = t < 1.0 / sr ? 0.0 : phase + 2.0 * kPi * hz / sr;
+            x[i] = static_cast<float>(0.8 * std::exp(-t * 8.0) * std::sin(phase));
+        }
+        ma::InstrumentFeatures f;
+        f.prepare(sr);
+        const float* ch[] = { x.data(), x.data() };
+        f.process(ch, 2, static_cast<int>(x.size()));
+        const double got = f.summary().tailPitchHz;
+        const double cents = 1200.0 * std::log2(got / tail);
+        std::printf("      kick tail %.2f Hz: measured %.2f Hz (%+.0f cents)\n", tail, got, cents);
+        check(std::abs(cents) < 20.0, "a kick's tail pitch is measured within 20 cents");
+    }
+    {
+        // A pad has no hits: no tail pitch.
+        std::vector<float> x(static_cast<size_t>(4.0 * sr));
+        for (size_t i = 0; i < x.size(); ++i)
+            x[i] = static_cast<float>(0.3 * std::sin(2.0 * kPi * 55.0 * static_cast<double>(i) / sr));
+        ma::InstrumentFeatures f;
+        f.prepare(sr);
+        const float* ch[] = { x.data(), x.data() };
+        f.process(ch, 2, static_cast<int>(x.size()));
+        check(f.summary().tailPitchHz == 0.0, "a held note has no tail pitch");
+    }
+
+    const ma::MusicalKey fMinor { 5, true }, aMinor { 9, true };
+    const auto outOfKey = ma::analyseKickTuning(46.25, fMinor, 43.65);
+    check(outOfKey.valid && outOfKey.fit == ma::KickTuning::Fit::outOfScale && outOfKey.needsTuning && outOfKey.clashesWithBass
+              && outOfKey.shiftSemitones == -1 && ma::noteNameOf(outOfKey.targetMidiNote) == "F1",
+          "F#1 in F minor over an F bass: down a semitone to F1");
+    const auto onTonic = ma::analyseKickTuning(55.3, aMinor, 55.0);
+    check(onTonic.fit == ma::KickTuning::Fit::tonic && !onTonic.needsTuning && !onTonic.couldBeBetter, "A1 in A minor is right");
+    const auto detuned = ma::analyseKickTuning(56.3, aMinor);
+    check(detuned.fit == ma::KickTuning::Fit::tonic && detuned.needsTuning && detuned.shiftSemitones == 0 && detuned.shiftCents < -30.0,
+          "a tonic 40 cents sharp is tuned down by the cents");
+    const auto inKey = ma::analyseKickTuning(49.0, aMinor);
+    check(inKey.fit == ma::KickTuning::Fit::inScale && inKey.couldBeBetter && !inKey.needsTuning && inKey.shiftSemitones == 2,
+          "G1 in A minor is in the key; the tonic A1 is two semitones up");
+    const auto fifth = ma::analyseKickTuning(41.2, aMinor, 55.0);
+    check(fifth.fit == ma::KickTuning::Fit::fifth && !fifth.needsTuning && !fifth.clashesWithBass, "E1 (the fifth) under an A bass is fine");
+    check(!ma::analyseKickTuning(50.0, ma::MusicalKey {}).valid, "no key, no verdict");
+}
+
 void testStemBreak()
 {
     constexpr double sr = 48000.0, pi = 3.14159265358979323846;
@@ -2083,6 +2139,7 @@ int main()
     testKey();
     testStemBreak();
     testSaturationPlan();
+    testKickTuning();
     testMasterPreview();
     testWavRoundTrip();
 

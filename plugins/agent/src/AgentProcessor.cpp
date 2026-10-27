@@ -709,6 +709,7 @@ void AgentProcessor::publishToBrain()
     data.levelP50 = toShared(result.levelP50);
     data.levelP95 = toShared(result.levelP95);
     data.lowNoteHz = static_cast<float>(result.lowNoteHz);
+    data.tailPitchHz = static_cast<float>(result.tailPitchHz);
     data.compressorReductionDb = static_cast<float>(compShownDb);
     data.clipperDb = static_cast<float>(clipShownDb);
     data.evenerGainDb = static_cast<float>(evenerGain.load());
@@ -1031,6 +1032,7 @@ void AgentProcessor::recogniseRole()
         result.levelP50 = summary.levelP50;
         result.levelP95 = summary.levelP95;
         result.lowNoteHz = summary.lowNoteHz;
+        result.tailPitchHz = summary.tailPitchHz;
     }
     result.resonances = ma::findResonances(learnAnalyzer.spectrumAnalyzer());
     result.roleSet = result.prioritySet = false;
@@ -1096,7 +1098,8 @@ void AgentProcessor::getStateInformation(juce::MemoryBlock& destData)
     // The learned dynamics too, so the Brain can plan the chain after reopening the project.
     if (result.statsValid)
         state.setProperty(statsProperty, juce::String(result.levelP10, 2) + " " + juce::String(result.levelP50, 2) + " "
-                                             + juce::String(result.levelP95, 2) + " " + juce::String(result.lowNoteHz, 1), nullptr);
+                                             + juce::String(result.levelP95, 2) + " " + juce::String(result.lowNoteHz, 1) + " "
+                                             + juce::String(result.tailPitchHz, 2), nullptr);
     else
         state.removeProperty(statsProperty, nullptr);
     juce::StringArray resonances;
@@ -1126,13 +1129,14 @@ void AgentProcessor::setStateInformation(const void* data, int sizeInBytes)
         profileValid.store(true);
     }
     const auto stats = juce::StringArray::fromTokens(state.getProperty(statsProperty).toString(), " ", {});
-    if (stats.size() == 4)
+    if (stats.size() == 4 || stats.size() == 5) // the tail pitch since phase 14
     {
         result.statsValid = true;
         result.levelP10 = stats[0].getDoubleValue();
         result.levelP50 = stats[1].getDoubleValue();
         result.levelP95 = stats[2].getDoubleValue();
         result.lowNoteHz = stats[3].getDoubleValue();
+        result.tailPitchHz = stats.size() > 4 ? stats[4].getDoubleValue() : 0.0;
     }
     const auto found = juce::StringArray::fromTokens(state.getProperty(resonancesProperty).toString(), " ", {});
     result.resonances = {};

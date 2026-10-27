@@ -83,7 +83,7 @@ public:
         bool roleSet = false, prioritySet = false;
         // Dynamics of the passage for the Brain's engineer pass (pre-trim).
         bool statsValid = false;
-        double levelP10 = -200.0, levelP50 = -200.0, levelP95 = -200.0, lowNoteHz = 0.0;
+        double levelP10 = -200.0, levelP50 = -200.0, levelP95 = -200.0, lowNoteHz = 0.0, tailPitchHz = 0.0;
         ma::Resonances resonances {}; // narrow peaks that stood out through the passage
     };
     LearnResult lastResult() const;
