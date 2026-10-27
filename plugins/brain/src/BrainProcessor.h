@@ -75,6 +75,12 @@ struct MixSnapshot
     ma::StemMeasure stemMeasure;
     ma::StemComparison stems;
     double dropSeconds = 0.0; // how much of the loudest part has been heard since the last reset
+    // Phase 12: the break (the drums gone, the rest playing) against the references' breaks, and
+    // how much quieter it is than the drop (NaN until both are heard).
+    ma::StemMeasure breakMeasure;
+    ma::StemComparison breakStems;
+    double breakSeconds = 0.0;
+    double breakBelowDropDb = NAN;
 };
 
 // The solver's proposal, waiting for the user to pick what to apply.
@@ -250,6 +256,7 @@ public:
     juce::StringArray stemTargetNames() const;
     // The set as compared: moved to the track's key (phase 10) where the key is known.
     const ma::StemTarget& stemTarget() const { return keyedStems; }
+    const ma::StemTarget& stemBreakTarget() const { return keyedBreakStems; } // phase 12: the same set's breaks
     bool selectStemTarget(const juce::String& name);
     bool createStemTarget(const juce::String& name);
     void removeLastStemProfile();
@@ -327,7 +334,7 @@ private:
     // `withEq`); `eqs` (per channel) replaces the Agents' EQ, e.g. with a proposal's.
     std::array<ma::SpectrumAnalyzer::Bands, ma::kStemGroups> stemGroupDb(bool withEq, std::array<bool, ma::kStemGroups>& present,
                                                                          std::array<ma::SpectrumAnalyzer::Bands, ma::kStemGroups>* side,
-                                                                         const std::vector<ma::EqSettings>* eqs) const;
+                                                                         const std::vector<ma::EqSettings>* eqs, bool fromBreak = false) const;
     // A group short in a region its channels' cleanup or the Brain's cuts take out on purpose
     // (more than 3 dB of it): the report does not ask for it back.
     bool cutOnPurpose(int group, int region) const;
@@ -409,6 +416,12 @@ private:
     int dropHoldUpdates = 0;
     ma::StemTarget currentStems; // as saved
     ma::StemTarget keyedStems;   // moved to keyedTo
+    ma::StemTarget keyedBreakStems;
+    // Phase 12: each channel over the break, and the levels that tell drop and break apart.
+    std::map<std::uint64_t, DropSum> breakSums;
+    long breakUpdates = 0;
+    double dropDrumsSum = 0.0, dropLevelSum = 0.0, breakLevelSum = 0.0;
+    bool breakReady() const;
     ma::MusicalKey keyedTo;
     // Key heard before this session (from the project) plus what the master plays now.
     std::array<double, 12> savedChroma {}, savedBass {};

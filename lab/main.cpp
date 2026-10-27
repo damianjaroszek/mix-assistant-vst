@@ -306,12 +306,14 @@ int addStems(const std::string& name, const std::string& out, const std::vector<
         const bool tonal = has[static_cast<size_t>(ma::StemGroup::bass)] || has[static_cast<size_t>(ma::StemGroup::vocals)]
                            || has[static_cast<size_t>(ma::StemGroup::music)];
         profiler.measureBlock(sumL.data(), sumR.data(), len, tonal ? keyL.data() : nullptr, tonal ? keyR.data() : nullptr);
+        if (has[static_cast<size_t>(ma::StemGroup::drums)])
+            profiler.measureDrums(left[0].data(), right[0].data(), len);
     }
     profiler.chooseDrop();
     int block = 0;
     for (int start = 0; start < length; start += n, ++block)
     {
-        if (!profiler.inDrop(block))
+        if (!profiler.needed(block))
             continue;
         const int len = std::min(n, length - start);
         fill(start, len);
@@ -379,6 +381,10 @@ int addStems(const std::string& name, const std::string& out, const std::vector<
                 std::printf("     -");
         std::printf("\n");
     }
+    if (profile.breakdown.valid)
+        std::printf("  break %.0f s, %.1f dB under the drop\n", profile.breakdown.seconds, profile.breakdown.belowDropDb);
+    else
+        std::printf("  no break found (needs a drums stem and 8 s without drums)\n");
     std::printf("set \"%s\" with %zu references written to %s\n", name.c_str(), target.profiles.size(), out.c_str());
     return 0;
 }

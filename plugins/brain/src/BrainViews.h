@@ -864,8 +864,8 @@ public:
             }
             else
             {
-                g.setColour(colours::quiet);
-                g.drawText(c.missing ? pl("brak") : "-", level.removeFromRight(36.0f), juce::Justification::centredRight);
+                g.setColour(c.extra ? colours::warning : colours::quiet);
+                g.drawText(c.missing ? pl("brak") : c.extra ? pl("gra") : juce::String("-"), level.removeFromRight(36.0f), juce::Justification::centredRight);
             }
             row.removeFromLeft(6.0f);
 

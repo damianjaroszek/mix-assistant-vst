@@ -213,6 +213,20 @@ BrainEditor::BrainEditor(BrainProcessor& p)
         processor.setKeyOverride(-1);
     };
     addChildComponent(redetectKeyButton);
+    for (auto* button : { &dropSectionButton, &breakSectionButton })
+    {
+        button->setClickingTogglesState(true);
+        button->setRadioGroupId(4712);
+        button->setColour(juce::TextButton::buttonColourId, colours::panel);
+        button->setColour(juce::TextButton::buttonOnColourId, colours::accent.withAlpha(0.6f));
+        addChildComponent(button);
+    }
+    dropSectionButton.setButtonText("Drop");
+    breakSectionButton.setButtonText("Break");
+    breakSectionButton.setTooltip(pl("Break: część bez stopy. Porównuje proporcje w breaku i to, o ile jest cichszy od dropu."));
+    dropSectionButton.setToggleState(true, juce::dontSendNotification);
+    dropSectionButton.onClick = [this] { showBreak = false; };
+    breakSectionButton.onClick = [this] { showBreak = true; };
     verdictViewButton.setButtonText(pl("Werdykt"));
     verdictViewButton.onClick = [this] { showView(View::verdict); };
     verdictView.onSelect = [this](std::uint64_t owner) { select(owner == selected ? 0 : owner); };
@@ -283,7 +297,7 @@ void BrainEditor::showView(View view)
     verdictViewport.setVisible(view == View::verdict);
     stereoView.setVisible(view == View::stereo);
     for (auto* c : std::initializer_list<juce::Component*> { &stemView, &stemBox, &newStemsButton, &loadStemsButton, &removeStemsButton,
-                                                             &keyBox, &redetectKeyButton })
+                                                             &keyBox, &redetectKeyButton, &dropSectionButton, &breakSectionButton })
         c->setVisible(view == View::stems);
     overlayLabel.setVisible(false);
     for (auto* c : std::initializer_list<juce::Component*> { &tonalView, &targetBox, &newTargetButton, &captureButton, &removeReferenceButton })
@@ -450,7 +464,32 @@ void BrainEditor::timerCallback()
     juce::String keyStatus;
     bool keyWarning = false;
     updateKeyControls(keyStatus, keyWarning);
-    stemView.setData(stems, mix.stems, stemStatus, stemWarning, keyStatus, keyWarning);
+    if (showBreak)
+    {
+        const auto& breaks = processor.stemBreakTarget();
+        if (!stems.valid())
+        {
+            // the drop's status already says what is missing
+        }
+        else if (!breaks.valid())
+            stemStatus = pl("Żadna referencja w zestawie nie ma breaku (części bez perkusji, co najmniej 8 s).");
+        else if (!mix.breakStems.valid)
+            stemStatus = pl("Break: puść część bez stopy po dropie: ") + juce::String(juce::roundToInt(mix.breakSeconds)) + " / "
+                         + juce::String(juce::roundToInt(BrainProcessor::kMinimumDropSeconds)) + " s";
+        else
+        {
+            const auto& contrast = breaks.breakContrast;
+            stemStatus = pl("Break miksu: ") + juce::String(juce::roundToInt(mix.breakSeconds)) + pl(" s, ") + juce::String(mix.breakBelowDropDb, 1)
+                         + pl(" dB ciszej niż drop") + (contrast.valid ? pl(" (referencje ") + juce::String(contrast.low, 1) + pl("–")
+                                                                              + juce::String(contrast.high, 1) + " dB)"
+                                                                        : juce::String())
+                         + ".";
+            stemWarning = contrast.valid && std::abs(contrast.outside(mix.breakBelowDropDb)) >= 1.0;
+        }
+        stemView.setData(breaks, mix.breakStems, stemStatus, stemWarning, keyStatus, keyWarning);
+    }
+    else
+        stemView.setData(stems, mix.stems, stemStatus, stemWarning, keyStatus, keyWarning);
     loadStemsButton.setEnabled(stemsName.isNotEmpty() && !processor.isAnalysingStems());
     removeStemsButton.setEnabled(stems.valid() && !processor.isAnalysingStems());
     translationView.setData(mix);
@@ -626,6 +665,8 @@ void BrainEditor::resized()
         keyBox.setBounds(keyRow.removeFromLeft(220));
         keyRow.removeFromLeft(6);
         redetectKeyButton.setBounds(keyRow.removeFromLeft(130));
+        breakSectionButton.setBounds(keyRow.removeFromRight(70));
+        dropSectionButton.setBounds(keyRow.removeFromRight(70));
         viewArea.removeFromTop(4);
         stemView.setBounds(viewArea);
     }

@@ -1862,6 +1862,104 @@ void testMasterPreview()
     check(loud.typicalReductionDb > 6.0 && loud.heavyShare >= 0.15, "a peaky kick pushed loud shows as heavy limiting");
 }
 
+// Phase 12: the break, found from the drums stem, measured beside the drop.
+void testStemBreak()
+{
+    constexpr double sr = 48000.0, pi = 3.14159265358979323846;
+    const int total = static_cast<int>(34.0 * sr);
+    std::array<std::vector<float>, 4> stems;
+    for (auto& v : stems)
+        v.assign(static_cast<size_t>(total), 0.0f);
+    for (int i = 0; i < total; ++i)
+    {
+        const double t = i / sr;
+        const bool breakdown = t >= 10.0 && t < 22.0;
+        const double beat = std::fmod(t, 0.5);
+        const auto at = static_cast<size_t>(i);
+        if (!breakdown)
+        {
+            stems[0][at] = static_cast<float>(beat < 0.15 ? 0.6 * std::exp(-beat * 25.0) * std::sin(2 * pi * 55.0 * beat) : 0.0);
+            stems[1][at] = static_cast<float>(0.25 * std::sin(2 * pi * 55.0 * t));
+        }
+        stems[2][at] = static_cast<float>(0.08 * std::sin(2 * pi * 440.0 * t) + 0.04 * std::sin(2 * pi * 2600.0 * t));
+        stems[3][at] = static_cast<float>((breakdown ? 0.06 : 0.1) * (std::sin(2 * pi * 330.0 * t) + std::sin(2 * pi * 1800.0 * t)));
+    }
+    ma::StemProfiler profiler;
+    profiler.prepare(sr, false);
+    const int n = profiler.blockLength();
+    std::vector<float> sum(static_cast<size_t>(n));
+    for (int start = 0; start < total; start += n)
+    {
+        const int len = std::min(n, total - start);
+        for (int i = 0; i < len; ++i)
+        {
+            const auto at = static_cast<size_t>(start + i);
+            sum[static_cast<size_t>(i)] = stems[0][at] + stems[1][at] + stems[2][at] + stems[3][at];
+        }
+        profiler.measureBlock(sum.data(), sum.data(), len);
+        profiler.measureDrums(stems[0].data() + start, stems[0].data() + start, len);
+    }
+    profiler.chooseDrop();
+    int index = 0;
+    for (int start = 0; start < total; start += n, ++index)
+    {
+        if (!profiler.needed(index))
+            continue;
+        std::array<const float*, 4> l {};
+        for (size_t g = 0; g < 4; ++g)
+            l[g] = stems[g].data() + start;
+        profiler.analyseBlock(index, l, l, nullptr, nullptr, std::min(n, total - start));
+    }
+    const auto profile = profiler.finish("with a break");
+    const auto& b = profile.breakdown;
+    std::printf("  break %.1f s, %.1f dB under the drop, vocal %.1f dB in the break vs %.1f dB in the drop\n", b.seconds, b.belowDropDb,
+                b.measure.groups[2].levelDb, profile.measure.groups[2].levelDb);
+    check(b.valid && b.seconds > 8.0 && b.seconds < 12.5, "the part without drums is the break");
+    check(!b.measure.groups[0].present && !b.measure.groups[1].present && b.measure.groups[2].present && b.measure.groups[3].present,
+          "in the break: no drums, no bass, vocal and the rest");
+    check(b.belowDropDb > 2.0 && b.measure.groups[2].levelDb > profile.measure.groups[2].levelDb + 2.0,
+          "the break is quieter than the drop and the vocal carries more of it");
+
+    ma::StemTarget set;
+    set.name = "breaks";
+    set.profiles.push_back(profile);
+    set.rebuild();
+    check(set.breakContrast.valid && std::abs(set.breakContrast.centre - b.belowDropDb) < 0.01, "the set knows how much quieter its breaks are");
+    const auto breaks = ma::stemBreakTarget(set);
+    check(breaks.profiles.size() == 1 && breaks.level[2].valid && !breaks.level[0].valid, "the breaks compare as a set of their own");
+    ma::StemTarget reread;
+    check(ma::parseStemTarget(ma::serialiseStemTarget(set), reread) && reread.profiles[0].breakdown.valid
+              && std::abs(reread.profiles[0].breakdown.belowDropDb - b.belowDropDb) < 0.01
+              && std::abs(ma::stemBreakTarget(reread).level[2].centre - breaks.level[2].centre) < 0.01,
+          "the break is saved with the set");
+    // A break that keeps the bass playing is told apart from the references' breaks without it.
+    {
+        ma::StemMeasure ours = b.measure;
+        auto& bass = ours.groups[1];
+        bass.present = true;
+        bass.levelDb = -6.0;
+        const auto compared = ma::compareStems(ours, breaks);
+        check(compared.groups[1].extra && !compared.groups[1].compared && !compared.groups[0].extra,
+              "a bass left playing in the break is named");
+        bass.levelDb = -30.0;
+        check(!ma::compareStems(ours, breaks).groups[1].extra, "a tail of the bass is not");
+    }
+
+    // Without a drums stem there is no telling the break.
+    ma::StemProfiler blind;
+    blind.prepare(sr, false);
+    for (int start = 0; start < total; start += n)
+    {
+        const int len = std::min(n, total - start);
+        blind.measureBlock(stems[3].data() + start, stems[3].data() + start, len);
+    }
+    blind.chooseDrop();
+    bool anyBreak = false;
+    for (int i = 0; i < total / n; ++i)
+        anyBreak = anyBreak || blind.inBreak(i);
+    check(!anyBreak, "no drums stem, no break");
+}
+
 int main()
 {
     testLoudness();
@@ -1891,6 +1989,7 @@ int main()
     testStereo();
     testStems();
     testKey();
+    testStemBreak();
     testMasterPreview();
     testWavRoundTrip();
 

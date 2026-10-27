@@ -23,6 +23,11 @@ constexpr double kLevelToleranceDb = 1.5;
 constexpr double kShapeToleranceDb = 2.0;
 constexpr double kWidthTolerance = 0.06;
 constexpr double kMaxLevelStepDb = 3.0;
+constexpr double kBreakDrumsBelowDb = 15.0; // drums this far under their drop level: a break
+constexpr double kBreakRangeDb = 20.0;      // the rest still plays: within this of the drop
+constexpr int kDrumsSmoothBlocks = 10;      // +-1 s, so the gaps between kicks do not count
+constexpr double kExtraGroupDb = -25.0; // a group the references lack must be at least this loud to be named
+constexpr double kContrastToleranceDb = 1.5;
 
 constexpr std::array<double, kStemRegions + 1> kRegionEdges { 30.0, 90.0, 250.0, 700.0, 2000.0, 5500.0, 16000.0 };
 
@@ -150,12 +155,76 @@ bool bandsPresent(const SpectrumAnalyzer::Bands& db)
     return *std::max_element(db.begin(), db.begin() + numBands()) > -120.0;
 }
 
-StemMeasure measureProfile(const StemProfile& profile)
+StemMeasure measureBands(const std::array<SpectrumAnalyzer::Bands, kStemGroups>& groupDb,
+                         const std::array<SpectrumAnalyzer::Bands, kStemGroups>& sideDb)
 {
     std::array<bool, kStemGroups> present {};
     for (int g = 0; g < kStemGroups; ++g)
-        present[static_cast<size_t>(g)] = bandsPresent(profile.groupDb[static_cast<size_t>(g)]);
-    return measureStemGroups(profile.groupDb, profile.sideDb, present);
+        present[static_cast<size_t>(g)] = bandsPresent(groupDb[static_cast<size_t>(g)]);
+    return measureStemGroups(groupDb, sideDb, present);
+}
+
+// Each group's mid and side as the analysers averaged them (-200 for a group not heard).
+void readAnalysers(const std::array<StereoAnalyzer, kStemGroups>& analysers, const std::array<bool, kStemGroups>& seen,
+                   std::array<SpectrumAnalyzer::Bands, kStemGroups>& groupDb, std::array<SpectrumAnalyzer::Bands, kStemGroups>& sideDb)
+{
+    for (int g = 0; g < kStemGroups; ++g)
+    {
+        const auto& analyser = analysers[static_cast<size_t>(g)];
+        groupDb[static_cast<size_t>(g)].fill(kAbsentDb);
+        sideDb[static_cast<size_t>(g)].fill(kAbsentDb);
+        if (!seen[static_cast<size_t>(g)] || analyser.framesAnalysed() == 0)
+            continue;
+        const auto midDb = analyser.averageMidDb();
+        const auto sDb = analyser.averageSideDb();
+        for (int b = 0; b < numBands(); ++b)
+        {
+            groupDb[static_cast<size_t>(g)][static_cast<size_t>(b)] = std::max(kAbsentDb, midDb[static_cast<size_t>(b)]);
+            sideDb[static_cast<size_t>(g)][static_cast<size_t>(b)] = std::max(kAbsentDb, sDb[static_cast<size_t>(b)]);
+        }
+    }
+}
+
+void writeGroupLine(std::ostream& out, const char* kind, int g, const StemGroupMeasure& m);
+bool readGroupLine(std::istringstream& words, StemMeasure& measure);
+void writeGroupLine(std::ostream& out, const char* kind, int g, const StemGroupMeasure& m)
+{
+    out << kind << " " << stemGroupKey(static_cast<StemGroup>(g)) << " " << (m.present ? 1 : 0) << " " << number(m.levelDb) << " "
+        << (m.widthValid ? number(m.width) : std::string("-"));
+    for (int r = 0; r < kStemRegions; ++r)
+        out << " " << (m.shapeValid[static_cast<size_t>(r)] ? number(m.shapeDb[static_cast<size_t>(r)]) : std::string("-"));
+    out << "\n";
+}
+
+bool readGroupLine(std::istringstream& words, StemMeasure& measure)
+{
+    std::string key, widthText;
+    int present = 0;
+    double levelDb = 0.0;
+    words >> key >> present >> levelDb >> widthText;
+    if (words.fail())
+        return false;
+    int g = -1;
+    for (int k = 0; k < kStemGroups; ++k)
+        if (key == stemGroupKey(static_cast<StemGroup>(k)))
+            g = k;
+    if (g < 0)
+        return false;
+    auto& m = measure.groups[static_cast<size_t>(g)];
+    m.present = present != 0;
+    m.levelDb = levelDb;
+    m.widthValid = widthText != "-";
+    m.width = m.widthValid ? std::strtod(widthText.c_str(), nullptr) : 0.0;
+    for (int r = 0; r < kStemRegions; ++r)
+    {
+        std::string value;
+        words >> value;
+        if (words.fail())
+            return false;
+        m.shapeValid[static_cast<size_t>(r)] = value != "-";
+        m.shapeDb[static_cast<size_t>(r)] = m.shapeValid[static_cast<size_t>(r)] ? std::strtod(value.c_str(), nullptr) : 0.0;
+    }
+    return true;
 }
 } // namespace
 
@@ -343,13 +412,18 @@ void StemProfiler::prepare(double rate, bool haveFullMix)
     meter.reset();
     keys.prepare(rate);
     loudness.clear();
+    drums.clear();
     drop.clear();
-    for (auto& g : groups)
-    {
-        g.prepare(rate);
-        g.reset();
-    }
+    breakdown.clear();
+    for (auto* set : { &groups, &breakGroups })
+        for (auto& g : *set)
+        {
+            g.prepare(rate);
+            g.reset();
+        }
     seen = {};
+    breakSeen = {};
+    breakBlocks = 0;
     sum.prepare(rate, BandScale::erb);
     sum.reset();
     mix.prepare(rate, BandScale::erb);
@@ -393,6 +467,62 @@ void StemProfiler::chooseDrop()
         if (dropBlocks * blockSeconds >= kMinimumDropSeconds)
             break;
     }
+
+    // The break: the drums gone (smoothed over two seconds, so the gaps between kicks do not
+    // count), the rest still playing.
+    breakdown.assign(loudness.size(), 0);
+    breakBlocks = 0;
+    if (drums.empty() || dropBlocks == 0)
+        return;
+    drums.resize(loudness.size(), 0.0);
+    std::vector<double> smooth(drums.size(), 0.0);
+    for (size_t i = 0; i < drums.size(); ++i)
+    {
+        const size_t from = i >= static_cast<size_t>(kDrumsSmoothBlocks) ? i - kDrumsSmoothBlocks : 0;
+        const size_t to = std::min(drums.size() - 1, i + kDrumsSmoothBlocks);
+        double sum = 0.0;
+        for (size_t j = from; j <= to; ++j)
+            sum += drums[j];
+        smooth[i] = sum / static_cast<double>(to - from + 1);
+    }
+    double dropDrums = 0.0, dropLoudness = 0.0;
+    for (size_t i = 0; i < drop.size(); ++i)
+        if (drop[i] != 0)
+        {
+            dropDrums += smooth[i];
+            dropLoudness += loudness[i];
+        }
+    dropDrums /= dropBlocks;
+    dropLoudness /= dropBlocks;
+    if (dropDrums <= 0.0)
+        return;
+    const double quietDrums = dropDrums * std::pow(10.0, -kBreakDrumsBelowDb / 10.0);
+    for (size_t i = 0; i < loudness.size(); ++i)
+    {
+        breakdown[i] = drop[i] == 0 && std::isfinite(loudness[i]) && loudness[i] >= dropLoudness - kBreakRangeDb && smooth[i] <= quietDrums ? 1 : 0;
+        breakBlocks += breakdown[i];
+    }
+    if (breakBlocks * blockSeconds < kMinimumDropSeconds)
+    {
+        std::fill(breakdown.begin(), breakdown.end(), 0);
+        breakBlocks = 0;
+    }
+}
+
+void StemProfiler::measureDrums(const float* left, const float* right, int numSamples)
+{
+    double power = 0.0;
+    for (int i = 0; i < numSamples; ++i)
+        power += 0.5 * (static_cast<double>(left[i]) * left[i] + static_cast<double>(right[i]) * right[i]);
+    // One value per block, in step with measureBlock.
+    drums.resize(loudness.size(), 0.0);
+    if (!drums.empty())
+        drums.back() = numSamples > 0 ? power / numSamples : 0.0;
+}
+
+bool StemProfiler::inBreak(int blockIndex) const
+{
+    return blockIndex >= 0 && blockIndex < static_cast<int>(breakdown.size()) && breakdown[static_cast<size_t>(blockIndex)] != 0;
 }
 
 bool StemProfiler::inDrop(int blockIndex) const
@@ -404,6 +534,20 @@ void StemProfiler::analyseBlock(int blockIndex, const std::array<const float*, k
                                 const std::array<const float*, kStemGroups>& right, const float* mixLeft,
                                 const float* mixRight, int numSamples)
 {
+    if (inBreak(blockIndex))
+    {
+        numSamples = std::min(numSamples, block);
+        for (int g = 0; g < kStemGroups; ++g)
+        {
+            const float* l = left[static_cast<size_t>(g)];
+            if (l == nullptr)
+                continue;
+            const float* r = right[static_cast<size_t>(g)] != nullptr ? right[static_cast<size_t>(g)] : l;
+            breakGroups[static_cast<size_t>(g)].process(l, r, numSamples);
+            breakSeen[static_cast<size_t>(g)] = true;
+        }
+        return;
+    }
     if (!inDrop(blockIndex))
         return;
     numSamples = std::min(numSamples, block);
@@ -438,29 +582,25 @@ StemProfile StemProfiler::finish(const std::string& name) const
     profile.name = name;
     profile.dropSeconds = dropBlocks * static_cast<double>(block) / sampleRate;
 
-    std::array<SpectrumAnalyzer::Bands, kStemGroups> groupDb {}, sideDb {};
-    std::array<bool, kStemGroups> present {};
-    for (int g = 0; g < kStemGroups; ++g)
-    {
-        const auto& analyser = groups[static_cast<size_t>(g)];
-        groupDb[static_cast<size_t>(g)].fill(kAbsentDb);
-        sideDb[static_cast<size_t>(g)].fill(kAbsentDb);
-        if (!seen[static_cast<size_t>(g)] || analyser.framesAnalysed() == 0)
-            continue;
-        const auto midDb = analyser.averageMidDb();
-        const auto sDb = analyser.averageSideDb();
-        for (int b = 0; b < numBands(); ++b)
-        {
-            groupDb[static_cast<size_t>(g)][static_cast<size_t>(b)] = std::max(kAbsentDb, midDb[static_cast<size_t>(b)]);
-            sideDb[static_cast<size_t>(g)][static_cast<size_t>(b)] = std::max(kAbsentDb, sDb[static_cast<size_t>(b)]);
-        }
-        present[static_cast<size_t>(g)] = *std::max_element(groupDb[static_cast<size_t>(g)].begin(),
-                                                            groupDb[static_cast<size_t>(g)].begin() + numBands()) > -120.0;
-    }
-    profile.measure = measureStemGroups(groupDb, sideDb, present);
-    profile.groupDb = groupDb;
-    profile.sideDb = sideDb;
+    readAnalysers(groups, seen, profile.groupDb, profile.sideDb);
+    profile.measure = measureBands(profile.groupDb, profile.sideDb);
     profile.hasBands = true;
+
+    if (breakBlocks > 0)
+    {
+        auto& b = profile.breakdown;
+        readAnalysers(breakGroups, breakSeen, b.groupDb, b.sideDb);
+        b.measure = measureBands(b.groupDb, b.sideDb);
+        b.valid = b.measure.valid;
+        b.seconds = breakBlocks * static_cast<double>(block) / sampleRate;
+        double dropLoudness = 0.0, breakLoudness = 0.0;
+        for (size_t i = 0; i < loudness.size(); ++i)
+        {
+            dropLoudness += drop[i] != 0 ? loudness[i] : 0.0;
+            breakLoudness += breakdown[i] != 0 ? loudness[i] : 0.0;
+        }
+        b.belowDropDb = dropLoudness / std::max(1, dropBlocks) - breakLoudness / breakBlocks;
+    }
     const auto key = keys.estimate();
     if (key.confident)
     {
@@ -517,6 +657,11 @@ void StemTarget::rebuild()
         for (int r = 0; r < kStemRegions; ++r)
             shape[static_cast<size_t>(g)][static_cast<size_t>(r)] = corridorOf(shapes[static_cast<size_t>(r)], shapeTolerance(r));
     }
+    std::vector<double> contrasts;
+    for (const auto& p : profiles)
+        if (p.breakdown.valid)
+            contrasts.push_back(p.breakdown.belowDropDb);
+    breakContrast = corridorOf(contrasts, kContrastToleranceDb);
 }
 
 std::string serialiseStemTarget(const StemTarget& target)
@@ -539,13 +684,21 @@ std::string serialiseStemTarget(const StemTarget& target)
                     out << "\n";
                 }
         for (int g = 0; g < kStemGroups; ++g)
+            writeGroupLine(out, "group", g, p.measure.groups[static_cast<size_t>(g)]);
+        if (p.breakdown.valid)
         {
-            const auto& m = p.measure.groups[static_cast<size_t>(g)];
-            out << "group " << stemGroupKey(static_cast<StemGroup>(g)) << " " << (m.present ? 1 : 0) << " " << number(m.levelDb)
-                << " " << (m.widthValid ? number(m.width) : std::string("-"));
-            for (int r = 0; r < kStemRegions; ++r)
-                out << " " << (m.shapeValid[static_cast<size_t>(r)] ? number(m.shapeDb[static_cast<size_t>(r)]) : std::string("-"));
-            out << "\n";
+            out << "break " << number(p.breakdown.seconds) << " " << number(p.breakdown.belowDropDb) << "\n";
+            for (int g = 0; g < kStemGroups; ++g)
+                writeGroupLine(out, "bgroup", g, p.breakdown.measure.groups[static_cast<size_t>(g)]);
+            for (int g = 0; g < kStemGroups; ++g)
+                for (int which = 0; which < 2; ++which)
+                {
+                    const auto& db = (which == 0 ? p.breakdown.groupDb : p.breakdown.sideDb)[static_cast<size_t>(g)];
+                    out << (which == 0 ? "bmid " : "bside ") << stemGroupKey(static_cast<StemGroup>(g));
+                    for (int b = 0; b < numBands(); ++b)
+                        out << " " << number(std::max(kAbsentDb, db[static_cast<size_t>(b)]), 2);
+                    out << "\n";
+                }
         }
     }
     return out.str();
@@ -591,7 +744,7 @@ bool parseStemTarget(const std::string& text, StemTarget& target)
             parsed.profiles.back().key = { tonic, minor != 0 };
             parsed.profiles.back().keyCorrelation = correlation;
         }
-        else if (kind == "mid" || kind == "side")
+        else if (kind == "mid" || kind == "side" || kind == "bmid" || kind == "bside")
         {
             if (parsed.profiles.empty())
                 return false;
@@ -604,45 +757,41 @@ bool parseStemTarget(const std::string& text, StemTarget& target)
             if (g < 0)
                 return false;
             auto& p = parsed.profiles.back();
-            auto& db = (kind == "mid" ? p.groupDb : p.sideDb)[static_cast<size_t>(g)];
+            const bool inBreak = kind[0] == 'b';
+            if (inBreak && !p.breakdown.valid)
+                return false;
+            auto& set = kind == "mid" ? p.groupDb : kind == "side" ? p.sideDb : kind == "bmid" ? p.breakdown.groupDb : p.breakdown.sideDb;
+            auto& db = set[static_cast<size_t>(g)];
             for (int b = 0; b < numBands(); ++b)
             {
                 words >> db[static_cast<size_t>(b)];
                 if (words.fail())
                     return false;
             }
-            p.hasBands = true;
+            if (!inBreak)
+                p.hasBands = true;
         }
-        else if (kind == "group")
+        else if (kind == "group" || kind == "bgroup")
         {
             if (parsed.profiles.empty())
                 return false;
-            std::string key, widthText;
-            int present = 0;
-            double levelDb = 0.0;
-            words >> key >> present >> levelDb >> widthText;
+            auto& p = parsed.profiles.back();
+            if (!readGroupLine(words, kind == "group" ? p.measure : p.breakdown.measure))
+                return false;
+        }
+        else if (kind == "break")
+        {
+            if (parsed.profiles.empty())
+                return false;
+            auto& b = parsed.profiles.back().breakdown;
+            words >> b.seconds >> b.belowDropDb;
             if (words.fail())
                 return false;
-            int g = -1;
-            for (int k = 0; k < kStemGroups; ++k)
-                if (key == stemGroupKey(static_cast<StemGroup>(k)))
-                    g = k;
-            if (g < 0)
-                return false;
-            auto& m = parsed.profiles.back().measure.groups[static_cast<size_t>(g)];
-            m.present = present != 0;
-            m.levelDb = levelDb;
-            m.widthValid = widthText != "-";
-            m.width = m.widthValid ? std::strtod(widthText.c_str(), nullptr) : 0.0;
-            for (int r = 0; r < kStemRegions; ++r)
-            {
-                std::string value;
-                words >> value;
-                if (words.fail())
-                    return false;
-                m.shapeValid[static_cast<size_t>(r)] = value != "-";
-                m.shapeDb[static_cast<size_t>(r)] = m.shapeValid[static_cast<size_t>(r)] ? std::strtod(value.c_str(), nullptr) : 0.0;
-            }
+            b.valid = true;
+            b.measure.valid = true;
+            for (auto* set : { &b.groupDb, &b.sideDb })
+                for (auto& db : *set)
+                    db.fill(kAbsentDb);
         }
         else if (!kind.empty())
         {
@@ -668,16 +817,35 @@ StemTarget keyedStemTarget(const StemTarget& target, MusicalKey trackKey)
             continue;
         for (int g = 0; g < kStemGroups; ++g)
             if (stemGroupHasKey(g))
-            {
-                p.groupDb[static_cast<size_t>(g)] = shiftErbSpectrum(p.groupDb[static_cast<size_t>(g)], shift);
-                p.sideDb[static_cast<size_t>(g)] = shiftErbSpectrum(p.sideDb[static_cast<size_t>(g)], shift);
-            }
-        p.measure = measureProfile(p);
+                for (auto* set : { &p.groupDb, &p.sideDb, &p.breakdown.groupDb, &p.breakdown.sideDb })
+                    (*set)[static_cast<size_t>(g)] = shiftErbSpectrum((*set)[static_cast<size_t>(g)], shift);
+        p.measure = measureBands(p.groupDb, p.sideDb);
+        if (p.breakdown.valid)
+            p.breakdown.measure = measureBands(p.breakdown.groupDb, p.breakdown.sideDb);
         p.shiftSemitones = shift;
         moved = true;
     }
     if (moved)
         out.rebuild();
+    return out;
+}
+
+StemTarget stemBreakTarget(const StemTarget& target)
+{
+    StemTarget out;
+    out.name = target.name;
+    for (const auto& p : target.profiles)
+    {
+        if (!p.breakdown.valid)
+            continue;
+        StemProfile b = p;
+        b.measure = p.breakdown.measure;
+        b.groupDb = p.breakdown.groupDb;
+        b.sideDb = p.breakdown.sideDb;
+        b.dropSeconds = p.breakdown.seconds;
+        out.profiles.push_back(b);
+    }
+    out.rebuild();
     return out;
 }
 
@@ -693,7 +861,12 @@ StemComparison compareStems(const StemMeasure& mix, const StemTarget& target)
         auto& c = out.groups[static_cast<size_t>(g)];
         const auto& lc = target.level[static_cast<size_t>(g)];
         if (!lc.valid)
+        {
+            // Tails of what just stopped and quiet leftovers do not count.
+            c.extra = ours.present && ours.levelDb > kExtraGroupDb;
+            c.levelDb = c.extra ? ours.levelDb : 0.0;
             continue;
+        }
         if (!ours.present)
         {
             c.missing = true;
