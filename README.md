@@ -91,6 +91,15 @@ w paśmie stopy tylko na czas uderzenia. Żeby Agent basu słyszał stopę:
 Status w sekcji „Ustępowanie” pokaże poziom sidechaina, ile kanał ustępuje i fazę w basie.
 Potem „Zaproponuj” w Mózgu dobierze pasmo, głębokość, próg i czas powrotu.
 
+### Stopa a tonacja
+
+Przy „Naucz poziom” Agent stopy mierzy, na jakiej nucie ustala się ogon uderzenia (150–300 ms po
+ataku). Raport „Stopa a tonacja” w Mózgu porównuje tę nutę z tonacją utworu (rozpoznaną albo ustawioną
+ręcznie w widoku „Referencje”) i z typową nutą basu: najlepiej, gdy stopa siedzi na tonice albo kwincie,
+źle, gdy jest poza skalą albo o sekundę, trytom lub septymę od basu (wtedy dół dudni na każdym uderzeniu).
+Mózg podaje, o ile półtonów i centów przestroić sampel; przestrajasz go sam w FL („Pitch” albo
+„Fine tune” w kanale samplera stopy) i uczysz Agenta stopy ponownie.
+
 ## Pobranie gotowych wtyczek
 
 Każdy push i pull request buduje wtyczki na Windows w GitHub Actions.

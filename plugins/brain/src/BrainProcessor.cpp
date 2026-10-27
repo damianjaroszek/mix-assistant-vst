@@ -3,6 +3,7 @@
 #include "BrainEditor.h"
 #include "MaUi.h"
 #include "ma/Instrument.h"
+#include "ma/KickTuning.h"
 
 #include <juce_audio_formats/juce_audio_formats.h>
 
@@ -1309,6 +1310,32 @@ void BrainProcessor::buildReport()
             report.push_back(item);
     }
 
+    // Phase 14: the kick's tuning against the key and the bass.
+    if (const auto* kick = kickChannel())
+    {
+        MixSnapshot::ReportItem item;
+        item.title = pl("Stopa a tonacja");
+        const auto tuning = kickTuning();
+        if (kick->data.statsValid == 0)
+            item.detail = pl("Kliknij „Naucz poziom” na stopie: nauka mierzy, na jakiej nucie brzmi jej ogon.");
+        else if (kick->data.tailPitchHz <= 0.0f)
+        {
+            item.status = Status::good;
+            item.detail = pl("Ogon stopy nie ma wyraźnej nuty, strojenie nie gra roli.");
+        }
+        else if (!tuning.valid)
+            item.detail = pl("Stopa brzmi na ") + kickNoteText(kick->data.tailPitchHz)
+                          + pl(". Tonacja jeszcze nieznana: Mózg ją rozpozna po ok. 20 s muzyki albo ustaw ją ręcznie w widoku „Referencje”.");
+        else
+        {
+            item.status = tuning.needsTuning ? (tuning.fit == ma::KickTuning::Fit::outOfScale || tuning.clashesWithBass ? Status::problem
+                                                                                                                   : Status::warning)
+                                             : Status::good;
+            item.detail = kickTuningText(tuning);
+        }
+        report.push_back(item);
+    }
+
     // Translation to small speakers, cars and clubs.
     {
         MixSnapshot::ReportItem item;
@@ -1969,6 +1996,81 @@ void BrainProcessor::proposeWholeMix()
     currentProposal.wholeMix = true;
 }
 
+const MixSnapshot::Channel* BrainProcessor::kickChannel() const
+{
+    // The kick with the clearest tail, if there are several kick channels.
+    const MixSnapshot::Channel* found = nullptr;
+    for (const auto& channel : mix.channels)
+        if (channel.data.role == static_cast<int>(ma::Role::kick)
+            && (found == nullptr || (found->data.tailPitchHz <= 0.0f && channel.data.tailPitchHz > 0.0f)))
+            found = &channel;
+    return found;
+}
+
+ma::KickTuning BrainProcessor::kickTuning() const
+{
+    const auto* kick = kickChannel();
+    if (kick == nullptr || kick->data.tailPitchHz <= 0.0f)
+        return {};
+    double bassHz = 0.0;
+    for (const auto& channel : mix.channels)
+        if (channel.data.role == static_cast<int>(ma::Role::bass) && channel.data.lowNoteHz > 0.0f)
+        {
+            bassHz = channel.data.lowNoteHz;
+            break;
+        }
+    return ma::analyseKickTuning(kick->data.tailPitchHz, trackKey(), bassHz);
+}
+
+juce::String BrainProcessor::kickNoteText(double hz)
+{
+    const double exact = 69.0 + 12.0 * std::log2(hz / 440.0);
+    const int note = static_cast<int>(std::lround(exact));
+    const int cents = static_cast<int>(std::lround((exact - note) * 100.0));
+    return juce::String(ma::noteNameOf(note)) + " (" + juce::String(hz, 1) + " Hz"
+           + (std::abs(cents) >= 5 ? (cents > 0 ? ", +" : ", ") + juce::String(cents) + pl(" centów") : juce::String()) + ")";
+}
+
+juce::String BrainProcessor::kickTuningText(const ma::KickTuning& t) const
+{
+    static const char* const intervals[] = { "pryma (oktawa)", "mała sekunda", "wielka sekunda", "tercja mała", "tercja wielka", "kwarta",
+                                             "tryton", "kwinta", "seksta mała", "seksta wielka", "septyma mała", "septyma wielka" };
+    const auto key = juce::String(ma::keyName(t.key));
+    auto text = pl("Stopa brzmi na ") + kickNoteText(t.kickHz) + pl(", tonacja ") + key + ": ";
+    switch (t.fit)
+    {
+        case ma::KickTuning::Fit::tonic: text += pl("to tonika"); break;
+        case ma::KickTuning::Fit::fifth: text += pl("to kwinta"); break;
+        case ma::KickTuning::Fit::inScale: text += pl("w skali, ale nie na tonice ani kwincie"); break;
+        case ma::KickTuning::Fit::outOfScale: text += pl("ta nuta nie należy do skali"); break;
+    }
+    if (t.bassKnown)
+    {
+        const auto bassNote = juce::String(ma::noteNameOf(static_cast<int>(std::lround(69.0 + 12.0 * std::log2(t.bassHz / 440.0)))));
+        text += pl(". Z basem (zwykle ") + bassNote + pl(") to ") + pl(intervals[t.bassInterval])
+                + (t.clashesWithBass ? pl(", więc na każdym uderzeniu dół dudni") : juce::String());
+    }
+    if (!t.needsTuning && !t.couldBeBetter)
+        return text + pl(". Strój w porządku.");
+
+    auto plural = [](int n) {
+        n = std::abs(n);
+        return n == 1 ? pl(" półton") : (n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20)) ? pl(" półtony") : pl(" półtonów");
+    };
+    const int fine = static_cast<int>(std::lround(t.shiftCents - 100.0 * t.shiftSemitones));
+    juce::StringArray move;
+    if (t.shiftSemitones != 0)
+        move.add((t.shiftSemitones > 0 ? "+" : "") + juce::String(t.shiftSemitones) + plural(t.shiftSemitones));
+    if (std::abs(fine) >= 5)
+        move.add((fine > 0 ? "+" : "") + juce::String(fine) + pl(" centów"));
+    text += (t.needsTuning ? pl(". Przestrój sampel stopy o ") : pl(". Można lepiej: przestrojenie o "))
+            + move.joinIntoString(pl(" i ")) + pl(" da ") + juce::String(ma::noteNameOf(t.targetMidiNote)) + " ("
+            + juce::String(t.targetHz, 1) + " Hz, "
+            + ((((t.targetMidiNote % 12) + 12) % 12 - t.key.tonic + 12) % 12 == 0 ? pl("tonika") : pl("kwinta"))
+            + pl("). W FL: „Pitch” albo „Fine tune” w kanale samplera stopy");
+    return text;
+}
+
 juce::String BrainProcessor::saturationText(const ma::ChainPlan& plan) const
 {
     static const char* const modes[] = { "taśma", "lampa", "miękki clip", "twardy clip", "fałdowanie" };
@@ -2068,6 +2170,17 @@ Proposal::Verdict BrainProcessor::judge(size_t index, const ma::ChainPlan& plan,
         verdict.reasons.add(pl("Saturacja: ") + saturationText(plan).fromFirstOccurrenceOf("saturacja ", false, false) + ".");
     else if (plan.saturationConsidered && channel.data.intentionalDrive == 0)
         verdict.reasons.add(pl("Saturacja: ") + saturationText(plan).fromFirstOccurrenceOf(": ", false, false) + ".");
+
+    if (kickChannel() == &channel)
+    {
+        const auto tuning = kickTuning();
+        if (tuning.valid)
+        {
+            verdict.reasons.add(pl("Strój: ") + kickTuningText(tuning) + ".");
+            if (tuning.needsTuning)
+                attention.add(pl("rozstrojona względem tonacji"));
+        }
+    }
 
     if (plan.evener.on > 0.5f)
         verdict.reasons.add(pl("Linia basu wokół ") + noteName(plan.evener.referenceHz) + pl(": niskie nuty wyrównane dla ucha."));

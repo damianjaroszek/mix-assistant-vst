@@ -12,6 +12,9 @@ constexpr double kOnsetRiseDb = 6.0;   // hop over the slow envelope that counts
 constexpr int kMinOnsetGapHops = 12;   // 60 ms
 constexpr int kDecayHops = 30;         // level measured 150 ms after the onset
 constexpr int kErbBands = 40;
+constexpr int kTailStartHops = 30, kTailEndHops = 60; // 150-300 ms after an onset: past a kick's pitch sweep
+constexpr double kTailLowHz = 30.0, kTailHighHz = 130.0;
+constexpr long long kMinTailHops = 40;              // about two seconds of hits
 
 double powerToDb(double p)
 {
@@ -67,6 +70,8 @@ void InstrumentFeatures::reset()
     pitchTracker.reset();
     noteHistogram.fill(0);
     noteHops = 0;
+    tailHistogram.fill(0);
+    tailHops = 0;
 }
 
 void InstrumentFeatures::addSpectrumFrame(const SpectrumAnalyzer::Bands& power, int numBands)
@@ -165,6 +170,16 @@ void InstrumentFeatures::endHop()
         onsetPeakDb = std::max(onsetPeakDb, db); // the hit's peak, within 20 ms
     else if (sinceOnset > 4 && sinceOnset <= kDecayHops)
         onsetLowDb = std::min(onsetLowDb, db);
+    if (active && sinceOnset >= kTailStartHops && sinceOnset <= kTailEndHops)
+    {
+        const double tail = pitchTracker.pitchHz();
+        if (tail >= kTailLowHz && tail <= kTailHighHz)
+        {
+            const auto bin = std::lround(120.0 * std::log2(tail / kTailLowHz));
+            ++tailHistogram[static_cast<size_t>(std::clamp(bin, 0L, static_cast<long>(tailHistogram.size()) - 1))];
+            ++tailHops;
+        }
+    }
     if (sinceOnset == kDecayHops)
     {
         decaySum += std::min(onsetPeakDb - onsetLowDb, 40.0);
@@ -220,6 +235,19 @@ InstrumentFeatures::Summary InstrumentFeatures::summary() const
             if (2 * seen >= noteHops)
             {
                 s.lowNoteHz = static_cast<double>(hz);
+                break;
+            }
+        }
+    }
+    if (tailHops >= kMinTailHops && onsets >= 4)
+    {
+        long long seen = 0;
+        for (size_t b = 0; b < tailHistogram.size(); ++b)
+        {
+            seen += tailHistogram[b];
+            if (2 * seen >= tailHops)
+            {
+                s.tailPitchHz = kTailLowHz * std::pow(2.0, static_cast<double>(b) / 120.0);
                 break;
             }
         }

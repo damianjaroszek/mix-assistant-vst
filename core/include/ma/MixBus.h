@@ -27,7 +27,7 @@ namespace ma::bus
 {
 
 constexpr std::uint32_t kMagic = 0x4D414255; // "MABU"
-constexpr std::uint32_t kVersion = 10;
+constexpr std::uint32_t kVersion = 11;
 constexpr int kMaxSlots = 128;
 constexpr int kNameLength = 48;
 constexpr int kBands = 40;            // ERB bands, as SpectrumAnalyzer with BandScale::erb
@@ -83,6 +83,7 @@ struct AgentData
     std::int32_t statsValid;
     float levelP10, levelP50, levelP95; // 100 ms RMS while playing, pre-trim (dBFS)
     float lowNoteHz;                    // usual bass note, 0 = none
+    float tailPitchHz;                  // phase 14: the pitch hits settle on (a kick's tuning), 0 = none
     float compressorReductionDb;        // meters, about the last second
     float clipperDb;
     float evenerGainDb;

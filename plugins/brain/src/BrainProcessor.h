@@ -7,6 +7,7 @@
 #include "ma/CorrelationMeter.h"
 #include "ma/LoudnessMeter.h"
 #include "ma/MasterPreview.h"
+#include "ma/KickTuning.h"
 #include "ma/Masking.h"
 #include "ma/Solver.h"
 #include "ma/TonalBalance.h"
@@ -233,6 +234,11 @@ public:
     IssueHandling issueHandling(const ma::MaskingIssue& issue) const;
     juce::String describeIssue(const ma::MaskingIssue& issue) const;
     juce::String saturationText(const ma::ChainPlan& plan) const;
+    // Phase 14: the kick's tuning against the key (and the bass's usual note).
+    const MixSnapshot::Channel* kickChannel() const;
+    ma::KickTuning kickTuning() const;
+    juce::String kickTuningText(const ma::KickTuning& tuning) const;
+    static juce::String kickNoteText(double hz);
 
     // Phase 3: propose, apply, undo, compare.
     const Proposal& proposal() const { return currentProposal; }
