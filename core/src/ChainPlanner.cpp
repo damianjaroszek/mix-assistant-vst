@@ -1,6 +1,7 @@
 #include "ma/ChainPlanner.h"
 
 #include "ma/Ducker.h"
+#include "ma/Masking.h"
 
 #include <algorithm>
 #include <cmath>
@@ -21,6 +22,39 @@ constexpr double kMaxNotchDb = 6.0;      // drums, effects: a ringing shell can 
 constexpr double kMaxTonalNotchDb = 4.0; // ... a tonal part loses its character sooner
 constexpr double kMaxTonalResonanceQ = 8.0;
 constexpr double kBuriedResonanceDb = -15.0; // this far under the rest in its band, nobody hears it ring
+constexpr double kThinMarginDb = 3.0;         // overtones this far under the role's target ask for saturation
+constexpr double kMaxOvertonesDb = -6.0;      // the saturator adds no more than this: past it, it is audible distortion
+constexpr double kMaskingStep = 0.05;         // a rise in masking of a more important channel this big counts ...
+constexpr double kMaskingFloor = 0.2;
+constexpr double kBassSubHz = 120.0, kBassAudibleHz = 150.0; // a bass's sub, and where small speakers begin         // ... once it reaches this (a little under where the collision list starts)
+
+struct SaturationProfile
+{
+    bool allowed;
+    SaturationMode mode;
+    double targetDb; // 2nd-8th harmonics against the fundamental
+};
+
+// Kick and percussion are left to the clipper and the attack tools, effects and buses are
+// someone's sound design. Bass gets the tube's even harmonics (an octave up, the sub on small
+// speakers), vocals and pads tape (round, warm), leads the tube's bite.
+SaturationProfile saturationFor(Role role)
+{
+    switch (role)
+    {
+    case Role::bass: return { true, SaturationMode::tube, -24.0 }; // above 150 Hz against the sub
+    case Role::vocal: return { true, SaturationMode::tape, -12.0 };
+    case Role::lead: return { true, SaturationMode::tube, -10.0 };
+    case Role::pad: return { true, SaturationMode::tape, -14.0 };
+    case Role::other: return { true, SaturationMode::tape, -14.0 };
+    case Role::kick:
+    case Role::percussion:
+    case Role::effects:
+    case Role::bus:
+    case Role::send: break;
+    }
+    return { false, SaturationMode::tape, -200.0 };
+}
 
 struct RoleProfile
 {
@@ -42,7 +76,8 @@ RoleProfile profileFor(Role role)
     switch (role)
     {
     case Role::kick: return { 30.0, false, 0.0, 25.0, 1.0 / 16.0, 3.0, 10.0, 3.0, 0.3, 6.0, 0.0 };
-    case Role::bass: return { 30.0, true, 4.0, 10.0, 1.0 / 16.0, 4.0, 10.0, 2.0, 0.6, 4.0, 6.0 };
+    // A sine sub has a 3 dB crest by nature, so a low crest says nothing about a bass's compression.
+    case Role::bass: return { 30.0, true, 4.0, 10.0, 1.0 / 16.0, 4.0, 10.0, 2.0, 0.6, 0.0, 6.0 };
     case Role::percussion: return { 500.0, false, 0.0, 15.0, 1.0 / 16.0, 3.0, 13.0, 4.0, 0.3, 7.0, 0.0 };
     case Role::vocal: return { 150.0, true, 5.0, 5.0, 1.0 / 8.0, 4.0, 14.0, 2.0, 0.8, 6.0, 8.0 };
     case Role::lead: return { 250.0, true, 5.0, 10.0, 1.0 / 16.0, 4.0, 13.0, 2.0, 0.8, 5.0, 6.0 };
@@ -368,6 +403,154 @@ std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& channels, con
             plan.evener.amount = 0.6f;
             plan.evener.referenceHz = static_cast<float>(c.lowNoteHz);
         }
+    }
+
+    // 4. Saturation: overtones for parts too thin in them, never at the cost of a more
+    // important channel. Judged on the spectra after the planned cleanup, like the mix hears.
+    std::vector<MaskingChannel> masking(count);
+    for (size_t j = 0; j < count; ++j)
+    {
+        masking[j].valid = channels[j].valid;
+        masking[j].priority = channels[j].priority;
+        for (int b = 0; b < kBands; ++b)
+            masking[j].rawDb[static_cast<size_t>(b)] = channels[j].bandsDb[static_cast<size_t>(b)] + cleanupResponseDb(plans[j].cleanup, centre(b));
+    }
+    const auto maskingBefore = analyseMasking(masking);
+    auto bandOf = [](double hz) {
+        int best = 0;
+        for (int b = 1; b < kBands; ++b)
+            if (std::abs(std::log(centre(b) / hz)) < std::abs(std::log(centre(best) / hz)))
+                best = b;
+        return best;
+    };
+    for (size_t i = 0; i < count; ++i)
+    {
+        const auto& c = channels[i];
+        auto& plan = plans[i];
+        const auto profile = saturationFor(c.role);
+        if (!c.valid || !profile.allowed || c.intentionalDrive)
+            continue;
+        const auto& heard = masking[i].rawDb;
+
+        // The fundamental: the usual bass note, else the strongest band above 40 Hz.
+        double f0 = c.role == Role::bass && c.lowNoteHz > 0.0 ? c.lowNoteHz : 0.0;
+        if (f0 <= 0.0)
+        {
+            int peak = -1;
+            for (int b = 0; b < kBands; ++b)
+                if (centre(b) >= 40.0 && (peak < 0 || heard[static_cast<size_t>(b)] > heard[static_cast<size_t>(peak)]))
+                    peak = b;
+            if (peak < 0 || heard[static_cast<size_t>(peak)] < -150.0)
+                continue;
+            f0 = centre(peak);
+        }
+        if (f0 * 2.0 > 16000.0)
+            continue;
+        // A bass line spans an octave or so, and what matters is how much of it reaches where
+        // small speakers start: the sub against what it has above 150 Hz. Elsewhere the region
+        // around the fundamental against its 2nd to 8th harmonics.
+        const bool bass = c.role == Role::bass;
+        const double fundamentalLow = bass ? 20.0 : f0 / 1.25, fundamentalHigh = bass ? kBassSubHz : f0 * 1.25;
+        const double overtoneLow = bass ? kBassAudibleHz : f0 * 1.7, overtoneHigh = bass ? 1200.0 : f0 * 8.5;
+        double fundamental = 0.0, overtones = 0.0;
+        for (int b = 0; b < kBands; ++b)
+        {
+            const double hz = centre(b);
+            const double p = power(heard[static_cast<size_t>(b)]);
+            if (hz >= fundamentalLow && hz <= fundamentalHigh)
+                fundamental += p;
+            else if (hz >= overtoneLow && hz <= overtoneHigh)
+                overtones += p;
+        }
+        if (fundamental <= 0.0)
+            fundamental = power(heard[static_cast<size_t>(bandOf(f0))]);
+        if (fundamental <= 1e-25)
+            continue;
+
+        plan.saturationConsidered = true;
+        plan.fundamentalHz = f0;
+        plan.overtonesAboveSub = bass;
+        plan.overtonesDb = toDb(overtones) - toDb(fundamental);
+        plan.overtonesAfterDb = plan.overtonesDb;
+        plan.overtonesTargetDb = profile.targetDb;
+        if (plan.overtonesDb >= profile.targetDb - kThinMarginDb)
+            continue;
+
+        // Candidates from the gentlest up, as the real saturator measures them at the part's
+        // loud level (after gain staging, which is where the drive is defined).
+        const double level = c.hasStats && c.levelP95 > -100.0 ? c.levelP95 : -18.0;
+        struct Candidate
+        {
+            SaturationSettings settings;
+            SaturationPrediction prediction;
+        };
+        std::vector<Candidate> candidates;
+        for (float mix : { 0.25f, 0.4f, 0.55f })
+            for (float drive : { 0.0f, 3.0f, 6.0f, 9.0f, 12.0f })
+            {
+                SaturationSettings s;
+                s.on = 1.0f;
+                s.mode = static_cast<float>(profile.mode);
+                s.driveDb = drive;
+                s.mix = mix;
+                const auto p = predictSaturation(s, f0, level);
+                if (p.overtonesDb <= kMaxOvertonesDb)
+                    candidates.push_back({ s, p });
+            }
+        std::sort(candidates.begin(), candidates.end(),
+                  [](const Candidate& a, const Candidate& b) { return a.prediction.overtonesDb < b.prediction.overtonesDb; });
+
+        auto withSaturation = [&](const SaturationPrediction& p) {
+            auto bands = heard;
+            for (int k = 2; k <= 8; ++k)
+            {
+                const double h = p.harmonicDb[static_cast<size_t>(k - 2)];
+                if (h < -150.0 || k * f0 > 20000.0)
+                    continue;
+                auto& band = bands[static_cast<size_t>(bandOf(k * f0))];
+                band = toDb(power(band) + fundamental * power(h));
+            }
+            return bands;
+        };
+        auto after = [&](const SaturationPrediction& p) {
+            double added = 0.0;
+            for (int k = 2; k <= 8; ++k)
+                if (k * f0 >= overtoneLow && k * f0 <= overtoneHigh)
+                    added += power(p.harmonicDb[static_cast<size_t>(k - 2)]);
+            return toDb(overtones + fundamental * added) - toDb(fundamental);
+        };
+
+        // The gentlest that reaches the target, else the strongest allowed; then step down
+        // while its overtones would cover a more important channel.
+        int pick = -1;
+        for (size_t k = 0; k < candidates.size() && pick < 0; ++k)
+            if (after(candidates[k].prediction) >= profile.targetDb)
+                pick = static_cast<int>(k);
+        if (pick < 0)
+            pick = static_cast<int>(candidates.size()) - 1;
+        for (; pick >= 0; --pick)
+        {
+            auto trial = masking;
+            trial[i].rawDb = withSaturation(candidates[static_cast<size_t>(pick)].prediction);
+            const auto result = analyseMasking(trial);
+            int covers = -1;
+            for (size_t j = 0; j < count && covers < 0; ++j)
+            {
+                if (j == i || !channels[j].valid || channels[j].priority >= c.priority)
+                    continue;
+                const double was = maskingBefore.amount[i][j], will = result.amount[i][j];
+                if (will - was >= kMaskingStep && will >= kMaskingFloor)
+                    covers = static_cast<int>(j);
+            }
+            if (covers < 0)
+                break;
+            plan.saturationWouldCover = covers;
+        }
+        if (pick < 0)
+            continue;
+        const auto& chosen = candidates[static_cast<size_t>(pick)];
+        plan.saturation = chosen.settings;
+        plan.overtonesAfterDb = after(chosen.prediction);
     }
     return plans;
 }

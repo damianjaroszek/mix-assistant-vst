@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace ma
 {
@@ -115,6 +116,58 @@ void Saturator::process(float* const* channels, int numChannels, int numSamples)
             data[i] = static_cast<float>(out);
         }
     }
+}
+
+SaturationPrediction predictSaturation(const SaturationSettings& settings, double hz, double levelDb, double sampleRate)
+{
+    SaturationPrediction out;
+    out.harmonicDb.fill(-200.0);
+    if (settings.on < 0.5f || hz <= 0.0 || settings.mix <= 0.0f)
+        return out;
+
+    Saturator saturator;
+    saturator.prepare(sampleRate);
+    saturator.setSettings(settings);
+    const int total = static_cast<int>(0.25 * sampleRate);
+    const int settle = total / 2; // the DC blocker and the oversampling filters settle first
+    std::vector<float> signal(static_cast<size_t>(total));
+    const double amplitude = std::sqrt(2.0) * std::pow(10.0, levelDb / 20.0);
+    for (int i = 0; i < total; ++i)
+        signal[static_cast<size_t>(i)] = static_cast<float>(amplitude * std::sin(2.0 * kPi * hz * i / sampleRate));
+    constexpr int kBlock = 512;
+    for (int start = 0; start < total; start += kBlock)
+    {
+        float* channels[] = { signal.data() + start };
+        saturator.process(channels, 1, std::min(kBlock, total - start));
+    }
+
+    // Goertzel on the settled half, Hann windowed.
+    const int length = total - settle;
+    auto powerAt = [&](double f) {
+        const double w = 2.0 * kPi * f / sampleRate;
+        const double coeff = 2.0 * std::cos(w);
+        double s1 = 0.0, s2 = 0.0;
+        for (int i = 0; i < length; ++i)
+        {
+            const double window = 0.5 - 0.5 * std::cos(2.0 * kPi * i / (length - 1));
+            const double s0 = window * signal[static_cast<size_t>(settle + i)] + coeff * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+        return s1 * s1 + s2 * s2 - coeff * s1 * s2;
+    };
+    const double fundamental = std::max(powerAt(hz), 1e-30);
+    double overtones = 0.0;
+    for (int k = 2; k <= 8; ++k)
+    {
+        if (k * hz >= 0.45 * sampleRate)
+            break;
+        const double p = powerAt(k * hz);
+        out.harmonicDb[static_cast<size_t>(k - 2)] = 10.0 * std::log10(std::max(p / fundamental, 1e-20));
+        overtones += p;
+    }
+    out.overtonesDb = 10.0 * std::log10(std::max(overtones / fundamental, 1e-20));
+    return out;
 }
 
 } // namespace ma

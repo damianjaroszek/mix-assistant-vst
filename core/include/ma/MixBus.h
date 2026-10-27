@@ -27,7 +27,7 @@ namespace ma::bus
 {
 
 constexpr std::uint32_t kMagic = 0x4D414255; // "MABU"
-constexpr std::uint32_t kVersion = 9;
+constexpr std::uint32_t kVersion = 10;
 constexpr int kMaxSlots = 128;
 constexpr int kNameLength = 48;
 constexpr int kBands = 40;            // ERB bands, as SpectrumAnalyzer with BandScale::erb
@@ -127,6 +127,7 @@ struct Command
     ClipperSettings clipper;
     BassEvenerSettings evener;
     StereoSettings stereo;
+    SaturationSettings saturation; // phase 13
 };
 
 struct Slot

@@ -69,4 +69,14 @@ private:
     bool prepared = false;
 };
 
+// What the saturator makes of a steady tone at `hz` with `levelDb` RMS (dBFS): the power of
+// its 2nd to 8th harmonics, each and together, against the tone's own. Runs the real shaper
+// for a quarter second, so it allocates: for planning, never on the audio thread.
+struct SaturationPrediction
+{
+    std::array<double, 7> harmonicDb {}; // 2nd .. 8th, dB against the fundamental
+    double overtonesDb = -200.0;         // all of them together
+};
+SaturationPrediction predictSaturation(const SaturationSettings& settings, double hz, double levelDb, double sampleRate = 48000.0);
+
 } // namespace ma

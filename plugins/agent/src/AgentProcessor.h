@@ -202,6 +202,7 @@ public:
         ma::ClipperSettings clipper {};
         ma::BassEvenerSettings evener {};
         ma::StereoSettings stereo {};
+        ma::SaturationSettings saturation {};
     };
     DynamicState currentDynamics() const;
     bool sidechainConnected() const { return sidechainSeen; }
@@ -311,7 +312,8 @@ private:
     std::atomic<float> backupTrimAudio { 0.0f };
     std::array<std::array<std::atomic<float>, 3>, ma::kEqBands> backupEqAudio {};
     // DuckSettings (8), sync, polarity, harmonics (3), transients (3), cleanup (5), compressor (7), clipper (3), evener (3)
-    static constexpr int kDynamicValues = 55;
+    // stereo (12), saturation (4)
+    static constexpr int kDynamicValues = 59;
     std::array<std::atomic<float>, kDynamicValues> backupDynamicsAudio {};
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(AgentProcessor)

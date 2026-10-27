@@ -26,7 +26,7 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   `predictHarmonics` / `predictTransients` (`ma/Transient.h`, attack emphasis) let the Brain size a proposal
   before applying it; the translation steps are chosen most important channel first on a running trial mix.
 - Phase 6: `ma/Saturator.h` (4x oversampled shaper, polyphase IIR half-bands, mix inside the oversampled domain so
-  dry and wet stay in phase) sits after the Agent's EQ; it is not part of `Command` or the A/B backup. The Agent's
+  dry and wet stay in phase) sits after the Agent's EQ; since phase 13 it is part of `Command` and the A/B backup. The Agent's
   `intentionalDrive` lifts the peak limit on Learn and the Brain's clipping warning. `ma/Instrument.h` guesses a role
   from the Learn pass (rule-based on temporal features plus the ERB spectrum, tested on synthetic parts only) and sets
   it with `defaultPriority` only while the role is still "Inny". Adaptive mode is `CommandKind::adapt` (EQ only, the
@@ -72,6 +72,12 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   usual compare works (`StemComparison::Group::extra` = ours plays where the references are silent). The Brain accumulates our
   break only once the drop is known (`breakSums`, drums level from the drums-group channels); the break is report/view/HTML only,
   never planned or solved.
+  Phase 13 saturation: `planChains` step 4 picks saturation for tonal roles thin in overtones (bass: power above 150 Hz vs below
+  120 Hz; others: 2nd-8th harmonic region vs the fundamental region) using `predictSaturation` (runs the real `Saturator` on a tone
+  at the part's loud level, Goertzel per harmonic): the gentlest of a drive/mix ladder that reaches the role's target, stepped down
+  while its predicted overtones raise masking of a more important channel (`analyseMasking`, +0.05 to >= 0.2). Never on kick,
+  percussion, effects, bus, send or `intentionalDrive` channels (the Brain then keeps the Agent's own setting). `proposeWholeMix` also
+  turns off a compressor / clipper / evener the plan does not want, when the plan knows the dynamics.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

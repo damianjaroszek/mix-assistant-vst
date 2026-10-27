@@ -1863,6 +1863,98 @@ void testMasterPreview()
 }
 
 // Phase 12: the break, found from the drums stem, measured beside the drop.
+// A steady tone measured like an Agent would: its ERB spectrum, after gain staging at -18 dBFS RMS.
+ma::ChainChannel toneChannel(ma::Role role, int priority, double hz, int harmonics, double sr)
+{
+    std::vector<float> x(static_cast<size_t>(4.0 * sr));
+    double norm = 0.0;
+    for (int k = 1; k <= harmonics; ++k)
+        norm += 1.0 / (k * k);
+    const double amplitude = std::sqrt(2.0) * std::pow(10.0, -18.0 / 20.0) / std::sqrt(norm);
+    for (size_t i = 0; i < x.size(); ++i)
+    {
+        double v = 0.0;
+        for (int k = 1; k <= harmonics; ++k)
+            v += std::sin(2.0 * kPi * hz * k * static_cast<double>(i) / sr) / k;
+        x[i] = static_cast<float>(amplitude * v);
+    }
+    ma::SpectrumAnalyzer analyser;
+    analyser.prepare(sr, ma::BandScale::erb);
+    const float* ch[] = { x.data(), x.data() };
+    analyser.process(ch, 2, static_cast<int>(x.size()));
+    ma::ChainChannel c;
+    c.role = role;
+    c.priority = priority;
+    c.bandsDb = analyser.averageDb();
+    c.valid = true;
+    c.hasStats = true;
+    c.levelP10 = c.levelP50 = c.levelP95 = -18.0;
+    c.truePeakDb = -12.0;
+    c.lowNoteHz = role == ma::Role::bass ? hz : 0.0;
+    return c;
+}
+
+void testSaturationPlan()
+{
+    constexpr double sr = 48000.0;
+    ma::SaturationSettings tube;
+    tube.on = 1.0f;
+    tube.mode = static_cast<float>(ma::SaturationMode::tube);
+    tube.driveDb = 6.0f;
+    tube.mix = 0.5f;
+    auto tape = tube;
+    tape.mode = static_cast<float>(ma::SaturationMode::tape);
+    const auto pTube = ma::predictSaturation(tube, 110.0, -18.0, sr);
+    const auto pTape = ma::predictSaturation(tape, 110.0, -18.0, sr);
+    std::printf("      tube: 2nd %.1f 3rd %.1f all %.1f dB; tape: 2nd %.1f 3rd %.1f all %.1f dB\n", pTube.harmonicDb[0], pTube.harmonicDb[1],
+                pTube.overtonesDb, pTape.harmonicDb[0], pTape.harmonicDb[1], pTape.overtonesDb);
+    check(pTube.harmonicDb[0] > pTape.harmonicDb[0] + 10.0, "the tube makes even harmonics, the tape hardly any");
+    check(pTape.harmonicDb[1] > -60.0, "the tape makes odd ones");
+    auto louder = tube;
+    louder.driveDb = 12.0f;
+    check(ma::predictSaturation(louder, 110.0, -18.0, sr).overtonesDb > pTube.overtonesDb + 3.0, "more drive, more overtones");
+    auto off = tube;
+    off.on = 0.0f;
+    check(ma::predictSaturation(off, 110.0, -18.0, sr).overtonesDb < -150.0, "off adds nothing");
+
+    // A sine sub bass, a saw lead, a kick: only the thin bass gets saturated.
+    std::vector<ma::ChainChannel> mix = {
+        measuredChannel(ma::Role::kick, 1, 0.0, sr),
+        toneChannel(ma::Role::bass, 2, 55.0, 1, sr),
+        toneChannel(ma::Role::lead, 3, 330.0, 12, sr),
+        toneChannel(ma::Role::pad, 6, 220.0, 1, sr),
+    };
+    const auto plans = ma::planChains(mix, { 124.0, 0.0 });
+    for (size_t i = 0; i < plans.size(); ++i)
+        std::printf("      %zu: f0 %.0f Hz overtones %.1f -> %.1f (target %.1f), saturation %d mode %d drive %.0f mix %.0f%%, covers %d\n", i,
+                    plans[i].fundamentalHz, plans[i].overtonesDb, plans[i].overtonesAfterDb, plans[i].overtonesTargetDb,
+                    int(plans[i].saturation.on), int(plans[i].saturation.mode), plans[i].saturation.driveDb,
+                    plans[i].saturation.mix * 100.0f, plans[i].saturationWouldCover);
+    check(plans[0].saturation.on < 0.5f && !plans[0].saturationConsidered, "the kick is left to the clipper");
+    check(plans[1].saturation.on > 0.5f && static_cast<int>(plans[1].saturation.mode) == static_cast<int>(ma::SaturationMode::tube)
+              && plans[1].overtonesAfterDb > plans[1].overtonesDb + 10.0,
+          "a sine sub gets the tube's overtones");
+    check(plans[2].saturationConsidered && plans[2].saturation.on < 0.5f, "a saw lead is rich enough already");
+    check(plans[3].saturation.on > 0.5f && plans[3].saturation.mix <= 0.55f, "a dull pad gets some tape");
+    check(plans[1].overtonesAfterDb <= plans[1].overtonesTargetDb + 6.0, "no more than the role needs");
+
+    // The same pad under a quiet, more important vocal right where its overtones land: gentler or none.
+    auto crowded = mix;
+    crowded.push_back(toneChannel(ma::Role::vocal, 1, 660.0, 4, sr));
+    for (auto& v : crowded.back().bandsDb)
+        v -= 30.0;
+    const auto crowdedPlans = ma::planChains(crowded, { 124.0, 0.0 });
+    std::printf("      crowded pad: overtones %.1f -> %.1f, mix %.0f%% drive %.0f, covers %d\n", crowdedPlans[3].overtonesDb,
+                crowdedPlans[3].overtonesAfterDb, crowdedPlans[3].saturation.mix * 100.0f, crowdedPlans[3].saturation.driveDb,
+                crowdedPlans[3].saturationWouldCover);
+    check(crowdedPlans[3].saturationWouldCover == 4 && crowdedPlans[3].overtonesAfterDb < plans[3].overtonesAfterDb,
+          "its overtones never cover the vocal");
+
+    auto intentional = mix;
+    intentional[1].intentionalDrive = true;
+    check(ma::planChains(intentional)[1].saturation.on < 0.5f, "a part meant to distort keeps its own saturation");
+}
+
 void testStemBreak()
 {
     constexpr double sr = 48000.0, pi = 3.14159265358979323846;
@@ -1990,6 +2082,7 @@ int main()
     testStems();
     testKey();
     testStemBreak();
+    testSaturationPlan();
     testMasterPreview();
     testWavRoundTrip();
 
