@@ -65,6 +65,14 @@ jest tak samo cichszy od dropu jak w referencjach (za mała różnica: drop się
 aranżu i automatyki głośności: „Ustaw cały miks” niczego w breaku nie zmienia. Zestawy zapisane przed
 fazą 12 nie mają breaku: wczytaj ich stemy jeszcze raz.
 
+Intro i build (faza 16): w referencjach intro to to, co gra przed pierwszym dropem, a build to
+ostatnie 8 s przed każdym dropem. Przyciski „Intro” i „Build” w widoku „Referencje” porównują je tak
+samo jak break: proporcje grup (np. w intrach referencji grają same bębny, a u Ciebie już pady)
+i o ile sekcja jest cichsza od dropu (intro albo build za głośne: drop nie robi wrażenia). Swoje intro
+i build Mózg zna z pozycji w utworze, więc puść utwór w FL w trybie utworu (Song) od początku przez
+pierwszy drop. Break może zawierać build (koniec breaku, który narasta do dropu). Zestawy zapisane
+przed fazą 16 nie mają intro ani buildu: wczytaj ich stemy jeszcze raz.
+
 ### Przed masteringiem (Ozone)
 
 „Cel mastera” w Mózgu to głośność, do której Ozone podciągnie master (domyślnie -8 LUFS). Mózg w tle robi

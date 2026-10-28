@@ -76,12 +76,17 @@ struct MixSnapshot
     ma::StemMeasure stemMeasure;
     ma::StemComparison stems;
     double dropSeconds = 0.0; // how much of the loudest part has been heard since the last reset
-    // Phase 12: the break (the drums gone, the rest playing) against the references' breaks, and
-    // how much quieter it is than the drop (NaN until both are heard).
-    ma::StemMeasure breakMeasure;
-    ma::StemComparison breakStems;
-    double breakSeconds = 0.0;
-    double breakBelowDropDb = NAN;
+    // Phase 12 and 16: the intro, the build and the break (indexed by ma::StemSection) against
+    // the references' own, and how much quieter each is than the drop (NaN until both are heard).
+    struct Section
+    {
+        ma::StemMeasure measure;
+        ma::StemComparison stems;
+        double seconds = 0.0;
+        double belowDropDb = NAN;
+    };
+    std::array<Section, ma::kStemSections> sections {};
+    const Section& section(ma::StemSection s) const { return sections[static_cast<size_t>(s)]; }
 };
 
 // The solver's proposal, waiting for the user to pick what to apply.
@@ -276,7 +281,14 @@ public:
     juce::StringArray stemTargetNames() const;
     // The set as compared: moved to the track's key (phase 10) where the key is known.
     const ma::StemTarget& stemTarget() const { return keyedStems; }
-    const ma::StemTarget& stemBreakTarget() const { return keyedBreakStems; } // phase 12: the same set's breaks
+    // Phase 12 and 16: how the report and the editor speak of each section.
+    struct SectionText
+    {
+        juce::String title, name, inReferences, waiting, fine, tooLoud, tooQuiet;
+    };
+    static SectionText sectionText(ma::StemSection section);
+    // Phase 12 and 16: the same set's intros, builds and breaks.
+    const ma::StemTarget& stemSectionTarget(ma::StemSection s) const { return keyedSectionStems[static_cast<size_t>(s)]; }
     bool selectStemTarget(const juce::String& name);
     bool createStemTarget(const juce::String& name);
     void removeLastStemProfile();
@@ -350,11 +362,27 @@ private:
     void updateKey();
     void accumulateDrop();
     void finishStemJob();
-    // Per stem group, what the drop sounds like through each channel's cleanup (and EQ when
-    // `withEq`); `eqs` (per channel) replaces the Agents' EQ, e.g. with a proposal's.
+    // Phase 9: each channel over the loudest part heard since the last reset (raw, after the
+    // trim, as power sums over the drop's updates; a channel silent in one counts as zero).
+    struct DropSum
+    {
+        ma::SpectrumAnalyzer::Bands power {}, side {};
+    };
+    // Phase 12 and 16: the same over a section, with its loudness for the contrast to the drop.
+    struct SectionSums
+    {
+        std::map<std::uint64_t, DropSum> sums;
+        long updates = 0;
+        double levelSum = 0.0;
+        void clear() { *this = {}; }
+    };
+    // Per stem group, what the drop (or `section`) sounds like through each channel's cleanup (and
+    // EQ when `withEq`); `eqs` (per channel) replaces the Agents' EQ, e.g. with a proposal's.
     std::array<ma::SpectrumAnalyzer::Bands, ma::kStemGroups> stemGroupDb(bool withEq, std::array<bool, ma::kStemGroups>& present,
                                                                          std::array<ma::SpectrumAnalyzer::Bands, ma::kStemGroups>* side,
-                                                                         const std::vector<ma::EqSettings>* eqs, bool fromBreak = false) const;
+                                                                         const std::vector<ma::EqSettings>* eqs,
+                                                                         const SectionSums* section = nullptr) const;
+    void updateSongSections();
     // A group short in a region its channels' cleanup or the Brain's cuts take out on purpose
     // (more than 3 dB of it): the report does not ask for it back.
     bool cutOnPurpose(int group, int region) const;
@@ -423,12 +451,6 @@ private:
     };
     std::map<std::uint64_t, AdaptVotes> adaptVotes;
 
-    // Phase 9: each channel over the loudest part heard since the last reset (raw, after the
-    // trim, as power sums over the drop's updates; a channel silent in one counts as zero).
-    struct DropSum
-    {
-        ma::SpectrumAnalyzer::Bands power {}, side {};
-    };
     std::map<std::uint64_t, DropSum> drop;
     long dropUpdates = 0;
     double dropLevel = -INFINITY; // short-term loudness of the loudest part so far
@@ -436,12 +458,21 @@ private:
     int dropHoldUpdates = 0;
     ma::StemTarget currentStems; // as saved
     ma::StemTarget keyedStems;   // moved to keyedTo
-    ma::StemTarget keyedBreakStems;
+    std::array<ma::StemTarget, ma::kStemSections> keyedSectionStems;
     // Phase 12: each channel over the break, and the levels that tell drop and break apart.
-    std::map<std::uint64_t, DropSum> breakSums;
-    long breakUpdates = 0;
-    double dropDrumsSum = 0.0, dropLevelSum = 0.0, breakLevelSum = 0.0;
-    bool breakReady() const;
+    SectionSums breakSums;
+    double dropDrumsSum = 0.0, dropLevelSum = 0.0;
+    // Phase 16: everything heard, per second of the song (the host's position), so the intro
+    // (before the first drop) and its build (the 8 s before it) are known once the drop is.
+    std::map<int, SectionSums> songBins;
+    double firstDropSecond = INFINITY; // where the drop came in, in the song
+    std::atomic<double> songSeconds { -1.0 }; // the host's position while playing, else -1
+    SectionSums introSums, buildSums;
+    bool sectionReady(ma::StemSection s) const;
+    const SectionSums& sectionSums(ma::StemSection s) const
+    {
+        return s == ma::StemSection::intro ? introSums : s == ma::StemSection::build ? buildSums : breakSums;
+    }
     ma::MusicalKey keyedTo;
     // Key heard before this session (from the project) plus what the master plays now.
     std::array<double, 12> savedChroma {}, savedBass {};
