@@ -234,6 +234,7 @@ public:
     };
     IssueHandling issueHandling(const ma::MaskingIssue& issue) const;
     juce::String describeIssue(const ma::MaskingIssue& issue) const;
+    static juce::String glueText(const ma::ChainPlan& plan, double bpm);
     juce::String saturationText(const ma::ChainPlan& plan) const;
     // Phase 14: the kick's tuning against the key (and the bass's usual note).
     const MixSnapshot::Channel* kickChannel() const;

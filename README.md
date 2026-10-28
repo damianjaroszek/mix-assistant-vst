@@ -100,6 +100,23 @@ ręcznie w widoku „Referencje”) i z typową nutą basu: najlepiej, gdy stopa
 Mózg podaje, o ile półtonów i centów przestroić sampel; przestrajasz go sam w FL („Pitch” albo
 „Fine tune” w kanale samplera stopy) i uczysz Agenta stopy ponownie.
 
+### Bus: klej
+
+Agent na kanale busa (np. bus perkusji w mikserze FL) ma rolę „Bus”. Ustaw ją ręcznie przed „Naucz poziom”,
+bo bus perkusji brzmi jak stopa i rozpoznawanie roli by go tak nazwało. Źródła busa też powinny mieć
+własnych Agentów: Mózg ustawia je tam, a busa nie liczy w kolizjach, translacji ani korekcjach EQ
+(inaczej zderzałby się z własnymi źródłami). Bus dostaje od „Ustaw cały miks” tylko kompresor sklejający,
+dobrany do tego, co Agent na nim rozpoznał:
+
+| Treść busa | Ratio | Atak | Powrót | Redukcja w głośnych miejscach |
+| --- | --- | --- | --- | --- |
+| perkusja | 4:1 | 30 ms (przepuszcza uderzenia) | 1/16 z tempa | ok. 3 dB |
+| wokale | 2:1 | 10 ms | 1/8 | ok. 2 dB |
+| muzyka (pady, synthy) | 2:1 | 30 ms | 1/4 | ok. 1,5 dB |
+
+Gdy źródła przychodzą już mocno ściśnięte (limiter na kanałach), klej się nie dokłada. Ściszenie całego
+miksu przez Mózg zmienia trim źródeł, a bus zostaje: jego próg idzie za tym, co do niego dociera.
+
 ## Pobranie gotowych wtyczek
 
 Każdy push i pull request buduje wtyczki na Windows w GitHub Actions.

@@ -90,6 +90,43 @@ RoleProfile profileFor(Role role)
     return { 100.0, true, 6.0, 10.0, 1.0 / 8.0, 4.0, 14.0, 2.0, 0.7, 5.0, 6.0 };
 }
 
+struct GlueProfile
+{
+    double ratio;
+    double attackMs;    // slow enough for the hits' first milliseconds to pass
+    double releaseNote; // on the groove: back before the next hit
+    double reductionDb; // on the loud parts
+    double minCrestDb;  // under this the sources arrive squashed
+};
+
+// The usual bus glue (an SSL-style bus compressor): drums 4:1 with a 30 ms attack and a 1/16
+// release so they pump with the groove, vocals and music 2:1, music slower and lighter.
+GlueProfile glueFor(ChainPlan::BusContent content)
+{
+    switch (content)
+    {
+    case ChainPlan::BusContent::drums: return { 4.0, 30.0, 1.0 / 16.0, 3.0, 8.0 };
+    case ChainPlan::BusContent::vocals: return { 2.0, 10.0, 1.0 / 8.0, 2.0, 6.0 };
+    case ChainPlan::BusContent::music: break;
+    }
+    return { 2.0, 30.0, 1.0 / 4.0, 1.5, 5.0 };
+}
+
+// What a bus carries, from the role the Learn pass recognised on it; a drum bus usually
+// sounds like a kick or percussion. Unsure: hits standing far over the loud parts are drums.
+ChainPlan::BusContent busContentOf(const ChainChannel& c)
+{
+    if (c.contentConfidence >= 0.5)
+    {
+        if (c.contentRole == Role::kick || c.contentRole == Role::percussion)
+            return ChainPlan::BusContent::drums;
+        if (c.contentRole == Role::vocal)
+            return ChainPlan::BusContent::vocals;
+        return ChainPlan::BusContent::music;
+    }
+    return c.truePeakDb - c.levelP95 >= 14.0 ? ChainPlan::BusContent::drums : ChainPlan::BusContent::music;
+}
+
 double power(double db)
 {
     return std::pow(10.0, db / 10.0);
@@ -117,8 +154,14 @@ double belowContent(double hz)
 }
 } // namespace
 
-std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& channels, const ChainContext& context)
+std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& input, const ChainContext& context)
 {
+    // A bus carries channels that are in the mix on their own: counting it too would make it
+    // collide with its own sources. The steps below see it as absent; it only gets its glue.
+    auto channels = input;
+    for (auto& c : channels)
+        if (c.role == Role::bus)
+            c.valid = false;
     const size_t count = channels.size();
     std::vector<ChainPlan> plans(count);
     const double bpm = context.bpm > 0.0 ? context.bpm : 124.0;
@@ -551,6 +594,39 @@ std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& channels, con
         const auto& chosen = candidates[static_cast<size_t>(pick)];
         plan.saturation = chosen.settings;
         plan.overtonesAfterDb = after(chosen.prediction);
+    }
+
+    // 5. Glue on buses.
+    for (size_t i = 0; i < count; ++i)
+    {
+        const auto& c = input[i];
+        auto& plan = plans[i];
+        if (!c.valid || c.role != Role::bus || !c.hasStats || c.levelP95 < -100.0)
+            continue;
+        plan.dynamicsKnown = true;
+        plan.spreadDb = c.levelP95 - c.levelP10;
+        plan.spreadAfterDb = plan.spreadDb;
+        plan.crestDb = c.truePeakDb - c.levelP95;
+        plan.busContent = busContentOf(c);
+        const auto glue = glueFor(plan.busContent);
+        plan.glueTargetDb = glue.reductionDb;
+        // Already squashed before the bus (a limiter on the sources): glue would only flatten it.
+        plan.overCompressed = !c.intentionalDrive && plan.crestDb < glue.minCrestDb;
+        if (plan.overCompressed || c.intentionalDrive)
+            continue;
+        auto& comp = plan.compressor;
+        comp.on = 1.0f;
+        comp.ratio = static_cast<float>(glue.ratio);
+        comp.kneeDb = 6.0f;
+        comp.attackMs = static_cast<float>(glue.attackMs);
+        comp.releaseMs = static_cast<float>(std::clamp(syncedReleaseMs(bpm, glue.releaseNote), 50.0, 600.0));
+        comp.thresholdDb = static_cast<float>(std::round(c.levelP95 * 2.0) / 2.0);
+        while (compressorReductionDb(comp, c.levelP95) < glue.reductionDb && comp.thresholdDb > std::max(c.levelP95 - 30.0, -60.0))
+            comp.thresholdDb -= 0.5f;
+        comp.makeupDb = static_cast<float>(std::round(compressorReductionDb(comp, c.levelP50) * 10.0) / 10.0);
+        plan.glue = true;
+        plan.glueReductionDb = compressorReductionDb(comp, c.levelP95);
+        plan.spreadAfterDb = c.levelP95 - plan.glueReductionDb - (c.levelP10 - compressorReductionDb(comp, c.levelP10));
     }
     return plans;
 }

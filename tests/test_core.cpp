@@ -1956,6 +1956,71 @@ void testSaturationPlan()
     check(ma::planChains(intentional)[1].saturation.on < 0.5f, "a part meant to distort keeps its own saturation");
 }
 
+void testBusGlue()
+{
+    constexpr double sr = 48000.0;
+    std::vector<ma::ChainChannel> mix = {
+        measuredChannel(ma::Role::kick, 1, 0.0, sr),
+        measuredChannel(ma::Role::bass, 2, 0.0, sr),
+        measuredChannel(ma::Role::pad, 5, 0.0, sr),
+        measuredChannel(ma::Role::percussion, 4, 0.0, sr),
+    };
+    const auto alone = ma::planChains(mix, { 124.0, 0.0 });
+
+    // A drum bus carrying the kick and the hats, a music bus, a squashed drum bus.
+    auto drums = mix[0];
+    drums.role = ma::Role::bus;
+    drums.priority = 5;
+    for (int b = 0; b < static_cast<int>(drums.bandsDb.size()); ++b)
+        drums.bandsDb[static_cast<size_t>(b)] = 10.0 * std::log10(std::pow(10.0, mix[0].bandsDb[static_cast<size_t>(b)] / 10.0)
+                                                                   + std::pow(10.0, mix[3].bandsDb[static_cast<size_t>(b)] / 10.0));
+    drums.levelP10 = -30.0;
+    drums.levelP50 = -20.0;
+    drums.levelP95 = -14.0;
+    drums.truePeakDb = -1.0;
+    drums.contentRole = ma::Role::kick;
+    drums.contentConfidence = 0.8;
+    auto music = drums;
+    music.bandsDb = mix[2].bandsDb;
+    music.truePeakDb = -8.0;
+    music.contentRole = ma::Role::pad;
+    auto squashed = drums;
+    squashed.truePeakDb = -10.0;
+    auto unsure = drums;
+    unsure.contentConfidence = 0.2;
+    unsure.truePeakDb = 2.0;
+    auto withBuses = mix;
+    for (const auto& bus : { drums, music, squashed, unsure })
+        withBuses.push_back(bus);
+    const auto plans = ma::planChains(withBuses, { 124.0, 0.0 });
+    for (size_t i = 4; i < plans.size(); ++i)
+        std::printf("      bus %zu: glue %d content %d ratio %.1f thr %.1f attack %.0f release %.0f reduction %.1f makeup %.1f\n", i,
+                    int(plans[i].glue), int(plans[i].busContent), plans[i].compressor.ratio, plans[i].compressor.thresholdDb,
+                    plans[i].compressor.attackMs, plans[i].compressor.releaseMs, plans[i].glueReductionDb, plans[i].compressor.makeupDb);
+
+    bool same = true;
+    for (size_t i = 0; i < mix.size(); ++i)
+        same = same && plans[i].cleanup.hpfHz == alone[i].cleanup.hpfHz && plans[i].cleanup.mudDb == alone[i].cleanup.mudDb
+               && plans[i].compressor.on == alone[i].compressor.on && plans[i].compressor.thresholdDb == alone[i].compressor.thresholdDb
+               && plans[i].lostInQuietParts == alone[i].lostInQuietParts && plans[i].saturation.on == alone[i].saturation.on;
+    check(same, "buses do not change how their sources are planned (they are not counted twice)");
+    const auto& d = plans[4];
+    check(d.glue && d.busContent == ma::ChainPlan::BusContent::drums && d.compressor.ratio == 4.0f && d.compressor.attackMs >= 25.0f,
+          "a drum bus gets 4:1 glue with a slow attack");
+    check(std::abs(d.compressor.releaseMs - 121.0f) < 2.0f, "its release is a 1/16 note at 124 BPM");
+    check(std::abs(d.glueReductionDb - 3.0) < 0.6, "about 3 dB on its loud parts");
+    check(d.cleanup.hpfHz == 0.0f && d.cleanup.mudDb == 0.0f && d.saturation.on < 0.5f, "a bus gets nothing but its glue");
+    const auto& m = plans[5];
+    check(m.glue && m.busContent == ma::ChainPlan::BusContent::music && m.compressor.ratio == 2.0f && m.glueReductionDb < 2.1,
+          "a music bus gets lighter 2:1 glue");
+    check(m.compressor.releaseMs > d.compressor.releaseMs, "and a slower release");
+    check(!plans[6].glue && plans[6].overCompressed && plans[6].compressor.on < 0.5f, "a bus squashed at the source gets none");
+    check(plans[7].glue && plans[7].busContent == ma::ChainPlan::BusContent::drums, "unsure: hits far over the loud parts mean drums");
+    auto noStats = drums;
+    noStats.hasStats = false;
+    check(!ma::planChains({ noStats })[0].glue && !ma::planChains({ noStats })[0].dynamicsKnown, "without a Learn pass nothing is planned");
+}
+
 void testKickTuning()
 {
     constexpr double sr = 48000.0;
@@ -2140,6 +2205,7 @@ int main()
     testStemBreak();
     testSaturationPlan();
     testKickTuning();
+    testBusGlue();
     testMasterPreview();
     testWavRoundTrip();
 
