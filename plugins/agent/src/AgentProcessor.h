@@ -95,6 +95,7 @@ public:
 
     // The live spectrum is only computed while an editor or the Brain is looking at it.
     void setSpectrumVisible(bool visible) { spectrumVisible.store(visible); }
+    int editorTab = 0; // the editor's last tab, so reopening the window shows it again (message thread only)
     void copyLiveSpectrum(double* levelsDb, double* centresHz) const;
     void copyProfile(double* levelsDb, double* centresHz) const; // learned, ear-weighted
     bool hasProfile() const { return profileValid.load(); }

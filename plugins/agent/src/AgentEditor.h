@@ -14,6 +14,8 @@ public:
     void paint(juce::Graphics&) override;
     void resized() override;
 
+    static constexpr int kWidth = 940, kHeight = 600;
+
 private:
     void timerCallback() override;
     void toggleLearning();
@@ -66,7 +68,7 @@ private:
     juce::Slider satDriveSlider, satMixSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> satOnAttachment, intentionalAttachment;
 
-    // Phase 7: the engineer's chain, right column.
+    // Phase 7: the engineer's chain.
     juce::Label chainTitle, cleanLabel, compLabel, clipLabel, evenLabel;
     juce::Label hpfLabel, monoLabel, mudFreqLabel, mudGainLabel;
     juce::Slider hpfSlider, monoSlider, mudFreqSlider, mudGainSlider;
@@ -81,7 +83,6 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> compOnAttachment, clipOnAttachment, evenOnAttachment;
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>> chainAttachments;
     void updateChainStatus();
-    void layoutChain(juce::Rectangle<int> area);
 
     juce::Label spectrumLabel;
     juce::ToggleButton showProfileButton;
@@ -95,6 +96,15 @@ private:
         duckReleaseAttachment, harmonicsFreqAttachment, harmonicsAmountAttachment,
         attackFreqAttachment, attackAmountAttachment, satDriveAttachment, satMixAttachment;
     void updateDuckStatus();
+
+    // Fixed window: a header plus one tab of controls at a time.
+    ma::ui::Page levelPage, eqPage, tonePage, chainPage, stereoPage;
+    ma::ui::Tabs tabs;
+    void layoutLevel(juce::Rectangle<int> area);
+    void layoutEq(juce::Rectangle<int> area);
+    void layoutTone(juce::Rectangle<int> area);
+    void layoutChain(juce::Rectangle<int> area);
+    void layoutStereo(juce::Rectangle<int> area);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AgentEditor)
 };
