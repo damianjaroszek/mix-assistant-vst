@@ -73,6 +73,18 @@ i build Mózg zna z pozycji w utworze, więc puść utwór w FL w trybie utworu 
 pierwszy drop. Break może zawierać build (koniec breaku, który narasta do dropu). Zestawy zapisane
 przed fazą 16 nie mają intro ani buildu: wczytaj ich stemy jeszcze raz.
 
+Tryb szkicu (faza 17, zakładka „Aranż”, domyślnie włączony): gdy dropowi brakuje partii, które mają
+referencje (albo, bez wczytanych stemów, typowy drop house'u: perkusja, bas i reszta), Mózg wstawia za
+nie partie-duchy. Duch ma widmo i poziom tej grupy z referencji, ustawione względem tego, co już gra.
+Duchem jest cała brakująca grupa (np. wokal) albo pasmo grupy, w którym żaden jej kanał nie gra (np. pad
+pod leadem w 90–250 Hz). Duchy liczą się w balansie tonalnym (przerywana krzywa; szare pasma to dziury
+aranżu, nie EQ), w proporcjach grup i w kolizjach. „Ustaw cały miks” zostawia im miejsce (cięcie do 3 dB
+na kanale, który je zasłoni), nie łata EQ-em dziur, które wypełni aranż, a samym duchom niczego nie
+zmienia. Raport „Aranż” i propozycja podają dla każdej brakującej partii, co dograć: poziom względem całego
+dropu, główne pasmo, szerokość i tonację z referencji oraz sekcje, w których gra w referencjach. O
+kompletności decyduje sam drop, więc rzadkie intro to nie szkic. Gdy po „Ustaw cały miks” dojdzie nowy
+kanał, raport przypomni, żeby uruchomić je jeszcze raz. Wyłączony tryb szkicu ocenia miks tak, jak gra.
+
 ### Przed masteringiem (Ozone)
 
 „Cel mastera” w Mózgu to głośność, do której Ozone podciągnie master (domyślnie -8 LUFS). Mózg w tle robi

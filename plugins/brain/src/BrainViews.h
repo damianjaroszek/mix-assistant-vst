@@ -328,11 +328,16 @@ private:
 class TonalView : public juce::Component
 {
 public:
-    void setData(const ma::TonalTarget& newTarget, const ma::TonalComparison& newComparison, const juce::String& newStatus)
+    // Phase 17: `withGhosts` (a sketch's master with its ghosts in) is drawn dashed, its regions are
+    // the mix's; the plain comparison's regions the arrangement explains are grey.
+    void setData(const ma::TonalTarget& newTarget, const ma::TonalComparison& newComparison, const juce::String& newStatus,
+                 const ma::TonalComparison& newWithGhosts = {}, const std::vector<bool>& newArrangement = {})
     {
         target = newTarget;
         comparison = newComparison;
         status = newStatus;
+        withGhosts = newWithGhosts;
+        arrangement = newArrangement;
         repaint();
     }
 
@@ -376,12 +381,21 @@ public:
         for (double db = top - 6.0; db >= bottom; db -= 6.0)
             g.drawHorizontalLine(juce::roundToInt(yOf(db)), plot.getX(), plot.getRight());
 
-        if (comparison.valid)
+        const auto shade = [&](const ma::TonalRegion& region, juce::Colour colour) {
+            g.setColour(colour);
+            g.fillRect(juce::Rectangle<float>::leftTopRightBottom(xOf(region.lowHz), plot.getY(), xOf(region.highHz), plot.getBottom()));
+        };
+        if (withGhosts.valid)
+        {
+            for (size_t i = 0; i < comparison.regions.size() && i < arrangement.size(); ++i)
+                if (arrangement[i])
+                    shade(comparison.regions[i], colours::quiet.withAlpha(0.18f));
+            for (const auto& region : withGhosts.regions)
+                shade(region, (region.hole() ? colours::critical : colours::warning).withAlpha(0.16f));
+        }
+        else if (comparison.valid)
             for (const auto& region : comparison.regions)
-            {
-                g.setColour((region.hole() ? colours::critical : colours::warning).withAlpha(0.16f));
-                g.fillRect(juce::Rectangle<float>::leftTopRightBottom(xOf(region.lowHz), plot.getY(), xOf(region.highHz), plot.getBottom()));
-            }
+                shade(region, (region.hole() ? colours::critical : colours::warning).withAlpha(0.16f));
 
         if (target.valid())
         {
@@ -403,6 +417,14 @@ public:
         {
             g.setColour(colours::text);
             g.strokePath(line(comparison.mixDb, n, xOf, yOf, hz), juce::PathStrokeType(2.2f));
+        }
+        if (withGhosts.valid)
+        {
+            juce::Path dashed;
+            const float dashes[] { 6.0f, 4.0f };
+            juce::PathStrokeType(1.6f).createDashedStroke(dashed, line(withGhosts.mixDb, n, xOf, yOf, hz), dashes, 2);
+            g.setColour(colours::text.withAlpha(0.7f));
+            g.fillPath(dashed);
         }
 
         g.setColour(colours::quiet);
@@ -441,8 +463,136 @@ private:
     }
 
     ma::TonalTarget target;
-    ma::TonalComparison comparison;
+    ma::TonalComparison comparison, withGhosts;
+    std::vector<bool> arrangement;
     juce::String status;
+};
+
+// Phase 17: the drop's groups as they play (solid) and the ghosts standing in for what the
+// arrangement lacks (dashed), with the brief for each missing part under the plot.
+class ArrangementView : public juce::Component
+{
+public:
+    void setData(const MixSnapshot::Sketch& newSketch, const juce::String& newStatus, const juce::StringArray& newBriefs)
+    {
+        sketch = newSketch;
+        status = newStatus;
+        briefs = newBriefs;
+        repaint();
+    }
+
+    static juce::Colour groupColour(int group)
+    {
+        static const float hues[ma::kStemGroups] { 0.08f, 0.6f, 0.9f, 0.33f };
+        return juce::Colour::fromHSV(hues[group], 0.6f, 0.95f, 1.0f);
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        namespace colours = ma::ui::colours;
+        using ma::ui::pl;
+        auto area = getLocalBounds().toFloat();
+        g.setColour(colours::panel);
+        g.fillRoundedRectangle(area, 4.0f);
+        area.reduce(10.0f, 8.0f);
+
+        g.setColour(colours::text);
+        g.setFont(juce::FontOptions(13.0f));
+        g.drawFittedText(status, area.removeFromTop(34.0f).toNearestInt(), juce::Justification::topLeft, 2);
+
+        juce::AttributedString text;
+        for (const auto& brief : briefs)
+            text.append(brief + "\n", juce::FontOptions(12.5f), colours::text);
+        juce::TextLayout layout;
+        layout.createLayout(text, area.getWidth());
+        const float textHeight = std::min(layout.getHeight() + 6.0f, area.getHeight() * 0.45f);
+        layout.draw(g, area.removeFromBottom(textHeight));
+
+        auto legend = area.removeFromBottom(18.0f);
+        auto plot = area.reduced(0.0f, 4.0f);
+        const auto labels = plot.removeFromBottom(14.0f);
+        const int n = ma::SpectrumAnalyzer::numBandsFor(ma::BandScale::erb);
+        const auto hz = [](int b) { return ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b); };
+
+        double highest = -200.0;
+        for (const auto& group : sketch.groupDb)
+            for (int b = 0; b < n; ++b)
+                highest = std::max(highest, group[static_cast<size_t>(b)]);
+        for (const auto& ghost : sketch.analysis.ghosts)
+            for (int b = 0; b < n; ++b)
+                highest = std::max(highest, ghost.db[static_cast<size_t>(b)]);
+        const double top = std::ceil(highest / 6.0) * 6.0 + 3.0, bottom = top - 54.0;
+        const auto xOf = [&plot](double f) {
+            return plot.getX() + static_cast<float>(plot.getWidth() * std::log(f / 20.0) / std::log(1000.0));
+        };
+        const auto yOf = [&plot, top, bottom](double db) {
+            return plot.getY() + static_cast<float>(plot.getHeight() * (top - juce::jlimit(bottom, top, db)) / (top - bottom));
+        };
+        g.setColour(colours::quiet.withAlpha(0.2f));
+        for (double db = top - 6.0; db >= bottom; db -= 6.0)
+            g.drawHorizontalLine(juce::roundToInt(yOf(db)), plot.getX(), plot.getRight());
+        g.setColour(colours::quiet);
+        g.setFont(juce::FontOptions(10.0f));
+        for (double f : { 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0 })
+        {
+            const auto label = f >= 1000.0 ? juce::String(juce::roundToInt(f / 1000.0)) + "k" : juce::String(juce::roundToInt(f));
+            g.drawText(label, juce::Rectangle<float>(xOf(f) - 16.0f, labels.getY(), 32.0f, 14.0f), juce::Justification::centred);
+        }
+        if (highest <= -199.0)
+            return;
+
+        const auto curve = [&](const ma::SpectrumAnalyzer::Bands& db) {
+            juce::Path p;
+            bool started = false;
+            for (int b = 0; b < n; ++b)
+            {
+                const double v = db[static_cast<size_t>(b)];
+                if (v < bottom - 6.0)
+                {
+                    started = false;
+                    continue;
+                }
+                const juce::Point<float> point { xOf(hz(b)), yOf(v) };
+                if (!started)
+                    p.startNewSubPath(point);
+                else
+                    p.lineTo(point);
+                started = true;
+            }
+            return p;
+        };
+        for (int group = 0; group < ma::kStemGroups; ++group)
+        {
+            g.setColour(groupColour(group));
+            g.strokePath(curve(sketch.groupDb[static_cast<size_t>(group)]), juce::PathStrokeType(2.0f));
+        }
+        const float dashes[] { 6.0f, 4.0f };
+        for (const auto& ghost : sketch.analysis.ghosts)
+        {
+            juce::Path dashed;
+            juce::PathStrokeType(2.0f).createDashedStroke(dashed, curve(ghost.db), dashes, 2);
+            g.setColour(groupColour(ghost.group).withAlpha(0.85f));
+            g.fillPath(dashed);
+        }
+
+        g.setFont(juce::FontOptions(11.5f));
+        for (int group = 0; group < ma::kStemGroups; ++group)
+        {
+            auto cell = legend.removeFromLeft(110.0f);
+            g.setColour(groupColour(group));
+            g.fillRect(cell.removeFromLeft(14.0f).withSizeKeepingCentre(14.0f, 3.0f));
+            cell.removeFromLeft(5.0f);
+            g.setColour(colours::quiet);
+            g.drawText(BrainProcessor::stemGroupName(group), cell, juce::Justification::centredLeft);
+        }
+        g.setColour(colours::quiet);
+        g.drawText(pl("ciągła: gra w dropie, przerywana: partia-duch (czego brakuje)"), legend, juce::Justification::centredLeft);
+    }
+
+private:
+    MixSnapshot::Sketch sketch;
+    juce::String status;
+    juce::StringArray briefs;
 };
 
 // Collisions in plain words, most important first. Clicking one highlights the masker.

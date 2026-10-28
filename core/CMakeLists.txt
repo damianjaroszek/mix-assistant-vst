@@ -28,7 +28,8 @@ add_library(ma_core STATIC
     src/Key.cpp
     src/KickTuning.cpp
     src/MasterPreview.cpp
-    src/StemReference.cpp)
+    src/StemReference.cpp
+    src/Sketch.cpp)
 target_include_directories(ma_core PUBLIC include)
 
 # WAV reading/writing, used by the lab and tests only.

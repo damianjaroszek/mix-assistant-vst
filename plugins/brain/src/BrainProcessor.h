@@ -9,6 +9,7 @@
 #include "ma/MasterPreview.h"
 #include "ma/KickTuning.h"
 #include "ma/Masking.h"
+#include "ma/Sketch.h"
 #include "ma/Solver.h"
 #include "ma/TonalBalance.h"
 #include "ma/Translation.h"
@@ -87,6 +88,27 @@ struct MixSnapshot
     };
     std::array<Section, ma::kStemSections> sections {};
     const Section& section(ma::StemSection s) const { return sections[static_cast<size_t>(s)]; }
+
+    // Phase 17: sketch mode. The parts a finished drop of the style has and this one lacks, stood
+    // in by ghosts (judged over the drop only: a sparse intro is no sketch).
+    struct Sketch
+    {
+        ma::Arrangement arrangement; // what the drop was compared with
+        ma::SketchAnalysis analysis;
+        std::array<ma::SpectrumAnalyzer::Bands, ma::kStemGroups> groupDb {}; // our groups over the drop (the view)
+        ma::TonalComparison tonal;      // the master with the ghosts in, against the tonal target
+        std::vector<bool> arrangementRegion; // per region of MixSnapshot::tonal: the arrangement's, not the mix's
+        // A channel that will cover a ghost: room the solver leaves now.
+        struct Collision
+        {
+            size_t masker = 0;
+            size_t ghost = 0;
+            double lowHz = 0.0, highHz = 0.0, score = 0.0;
+        };
+        std::vector<Collision> collisions;
+        bool active() const { return analysis.sketch; }
+    };
+    Sketch sketch;
 };
 
 // The solver's proposal, waiting for the user to pick what to apply.
@@ -302,6 +324,15 @@ public:
     static juce::String stemGroupName(int group);
     static constexpr double kMinimumDropSeconds = 8.0;
 
+    // Phase 17: sketch mode (on by default, kept with the project). Off, the Brain judges the
+    // mix as it is, as before.
+    bool sketchMode() const { return sketchOn; }
+    void setSketchMode(bool on);
+    // "brakujący wokal", "pad lub akordy w dolnym środku": what a ghost stands for.
+    static juce::String ghostName(const ma::SketchGhost& ghost);
+    // What to add: level, range, width, key and the sections it plays in.
+    juce::String ghostBrief(const ma::SketchGhost& ghost) const;
+
     // Phase 10: the track's key, heard on the master (kept with the project) or set by hand.
     // The stem references are moved to it.
     const ma::KeyEstimate& detectedKey() const { return heardKey; }
@@ -362,6 +393,10 @@ private:
     void updateKey();
     void accumulateDrop();
     void finishStemJob();
+    void updateSketch();
+    // The ghosts' power added to their groups; `ghostOnly` marks the groups only a ghost plays.
+    void addGhostGroups(std::array<ma::SpectrumAnalyzer::Bands, ma::kStemGroups>& groups, std::array<bool, ma::kStemGroups>& present,
+                        std::array<bool, ma::kStemGroups>& ghostOnly) const;
     // Phase 9: each channel over the loudest part heard since the last reset (raw, after the
     // trim, as power sums over the drop's updates; a channel silent in one counts as zero).
     struct DropSum
@@ -473,6 +508,8 @@ private:
     {
         return s == ma::StemSection::intro ? introSums : s == ma::StemSection::build ? buildSums : breakSums;
     }
+    bool sketchOn = true;
+    std::vector<std::uint64_t> plannedOwners; // the channels "Ustaw cały miks" last planned, to notice new ones
     ma::MusicalKey keyedTo;
     // Key heard before this session (from the project) plus what the master plays now.
     std::array<double, 12> savedChroma {}, savedBass {};
