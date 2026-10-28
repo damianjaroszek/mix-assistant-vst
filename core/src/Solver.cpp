@@ -160,7 +160,8 @@ void solveStemShape(const std::vector<SolverChannel>& channels, const SolverOpti
                 const auto& c = comparison.groups[static_cast<size_t>(g)];
                 const double deviation = c.shapeDeviationDb[static_cast<size_t>(r)];
                 const bool done = std::find(tried.begin(), tried.end(), std::make_pair(g, r)) != tried.end();
-                if (c.compared && c.shapeCompared[static_cast<size_t>(r)] && !done && std::abs(deviation) >= kMinimumDeviationDb
+                const bool arrangement = deviation < 0.0 && in.arrangementHole[static_cast<size_t>(g)][static_cast<size_t>(r)];
+                if (c.compared && c.shapeCompared[static_cast<size_t>(r)] && !done && !arrangement && std::abs(deviation) >= kMinimumDeviationDb
                     && std::abs(deviation) > std::abs(candidate.deviationDb))
                     candidate = { g, r, deviation };
             }
@@ -298,7 +299,7 @@ SolverResult solve(const std::vector<SolverChannel>& channels, const SolverOptio
         const MaskingIssue* issue = nullptr;
         for (const auto& candidate : masking.issues)
         {
-            if (candidate.score < options.minimumScore)
+            if (candidate.score < options.minimumScore || channels[static_cast<size_t>(candidate.masker)].ghost)
                 continue;
             if (visits[{ candidate.masker, candidate.masked }] < kMaxVisitsPerPair)
             {
@@ -312,6 +313,9 @@ SolverResult solve(const std::vector<SolverChannel>& channels, const SolverOptio
         const auto key = std::make_pair(issue->masker, issue->masked);
         const int visit = visits[key]++;
         auto& eq = result.eq[static_cast<size_t>(issue->masker)];
+        // Room for a part that is not there yet is kept smaller: the sketch must still sound.
+        const double maxCut = channels[static_cast<size_t>(issue->masked)].ghost ? std::min(options.maxCutDb, options.maxGhostCutDb)
+                                                                                : options.maxCutDb;
 
         // How far the masker sits above the masked channel over the range, as the ear hears it.
         double excess = 0.0;
@@ -347,16 +351,16 @@ SolverResult solve(const std::vector<SolverChannel>& channels, const SolverOptio
         double gain;
         if (previous < 0.0)
         {
-            gain = visit > 0 ? previous - kDeepenStepDb : std::min(previous, -std::clamp(excess + 1.0, kMinimumCutDb, options.maxCutDb));
+            gain = visit > 0 ? previous - kDeepenStepDb : std::min(previous, -std::clamp(excess + 1.0, kMinimumCutDb, maxCut));
             band.q = std::min(band.q, static_cast<float>(q));
         }
         else
         {
-            gain = -std::clamp(excess + 1.0, kMinimumCutDb, options.maxCutDb);
+            gain = -std::clamp(excess + 1.0, kMinimumCutDb, maxCut);
             band.hz = static_cast<float>(centre);
             band.q = static_cast<float>(q);
         }
-        gain = std::max(gain, -options.maxCutDb);
+        gain = std::max(gain, -maxCut);
         if (gain >= previous - 0.05)
         {
             visits[key] = kMaxVisitsPerPair; // already as deep as allowed
@@ -433,9 +437,12 @@ SolverResult solve(const std::vector<SolverChannel>& channels, const SolverOptio
                 total += power[c];
             }
 
+            double ghostShare = 0.0;
+            for (size_t c = 0; c < channels.size(); ++c)
+                ghostShare += channels[c].ghost && total > 0.0 ? power[c] / total : 0.0;
             std::vector<int> order;
             for (size_t c = 0; c < channels.size(); ++c)
-                if (total > 0.0 && power[c] / total >= (region.hole() ? 0.15 : 0.25))
+                if (total > 0.0 && !channels[c].ghost && power[c] / total >= (region.hole() ? 0.15 : 0.25))
                     order.push_back(static_cast<int>(c));
 
             const double centre = std::sqrt(region.lowHz * region.highHz);
@@ -505,7 +512,7 @@ SolverResult solve(const std::vector<SolverChannel>& channels, const SolverOptio
                     double best = 0.0;
                     for (size_t c = 0; c < channels.size(); ++c)
                     {
-                        if (!channels[c].valid)
+                        if (!channels[c].valid || channels[c].ghost)
                             continue;
                         double below = 0.0;
                         for (int b = 0; b < SpectrumAnalyzer::numBandsFor(BandScale::erb); ++b)
@@ -523,9 +530,10 @@ SolverResult solve(const std::vector<SolverChannel>& channels, const SolverOptio
                 }
                 result.changes.push_back(change);
             }
-            else if (!order.empty())
+            else if (!order.empty() && ghostShare < 0.3)
             {
-                // Least important carrier first.
+                // Least important carrier first. (An excess the ghosts carry much of is left alone:
+                // the part that comes may well be played quieter than its stand-in.)
                 std::sort(order.begin(), order.end(), [&](int a, int b) {
                     return channels[static_cast<size_t>(a)].priority != channels[static_cast<size_t>(b)].priority
                                ? channels[static_cast<size_t>(a)].priority > channels[static_cast<size_t>(b)].priority

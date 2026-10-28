@@ -1004,8 +1004,10 @@ StemComparison compareStems(const StemMeasure& mix, const StemTarget& target)
 }
 
 StemLevelPlan planStemLevels(const std::array<SpectrumAnalyzer::Bands, kStemGroups>& groupDb,
-                             const std::array<bool, kStemGroups>& present, const StemTarget& target)
+                             const std::array<bool, kStemGroups>& present, const StemTarget& target,
+                             const std::array<bool, kStemGroups>* fixed)
 {
+    auto isFixed = [fixed](int g) { return fixed != nullptr && (*fixed)[static_cast<size_t>(g)]; };
     StemLevelPlan plan;
     std::array<SpectrumAnalyzer::Bands, kStemGroups> used {};
     for (int g = 0; g < kStemGroups; ++g)
@@ -1017,14 +1019,17 @@ StemLevelPlan planStemLevels(const std::array<SpectrumAnalyzer::Bands, kStemGrou
 
     auto levels = [&](const std::array<double, kStemGroups>& gain, double* total) {
         const auto w = weightedPowers(used, gain);
-        double t = 0.0;
-        for (double p : w)
-            t += p;
+        double t = 0.0, real = 0.0;
+        for (int g = 0; g < kStemGroups; ++g)
+        {
+            t += w[static_cast<size_t>(g)];
+            real += isFixed(g) ? 0.0 : w[static_cast<size_t>(g)];
+        }
         std::array<double, kStemGroups> rel {};
         for (int g = 0; g < kStemGroups; ++g)
             rel[static_cast<size_t>(g)] = t > 0.0 && w[static_cast<size_t>(g)] > 0.0 ? toDb(w[static_cast<size_t>(g)]) - toDb(t) : kAbsentDb;
         if (total != nullptr)
-            *total = t;
+            *total = real;
         return rel;
     };
 
@@ -1038,7 +1043,7 @@ StemLevelPlan planStemLevels(const std::array<SpectrumAnalyzer::Bands, kStemGrou
     for (int g = 0; g < kStemGroups; ++g)
     {
         const auto& c = target.level[static_cast<size_t>(g)];
-        active[static_cast<size_t>(g)] = c.valid && plan.before[static_cast<size_t>(g)] > -40.0;
+        active[static_cast<size_t>(g)] = c.valid && plan.before[static_cast<size_t>(g)] > -40.0 && !isFixed(g);
         // Half a dB of slack outside, so a measurement on the edge does not start a move.
         anyOutside = anyOutside || (active[static_cast<size_t>(g)] && std::abs(c.outside(plan.before[static_cast<size_t>(g)])) >= 0.5);
     }
@@ -1079,7 +1084,7 @@ StemLevelPlan planStemLevels(const std::array<SpectrumAnalyzer::Bands, kStemGrou
     levels(gain, &totalAfter);
     const double shift = totalAfter > 0.0 ? toDb(totalAfter) - toDb(totalBefore) : 0.0;
     for (int g = 0; g < kStemGroups; ++g)
-        if (plan.before[static_cast<size_t>(g)] > kAbsentDb)
+        if (plan.before[static_cast<size_t>(g)] > kAbsentDb && !isFixed(g))
             gain[static_cast<size_t>(g)] = std::clamp(gain[static_cast<size_t>(g)] - shift, -kMaxLevelStepDb, kMaxLevelStepDb);
 
     for (int g = 0; g < kStemGroups; ++g)

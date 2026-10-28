@@ -17,6 +17,7 @@
 #include "ma/Stereo.h"
 #include "ma/StereoPlanner.h"
 #include "ma/StemReference.h"
+#include "ma/Sketch.h"
 #include "ma/Key.h"
 #include "ma/KickTuning.h"
 #include "ma/MasterPreview.h"
@@ -2270,6 +2271,188 @@ void testStemSections()
     check(keyed.profiles[0].build.valid && keyed.profiles[0].intro.valid, "moving to another key keeps the sections");
 }
 
+// Phase 17: sketch mode, on spectra alone.
+ma::SpectrumAnalyzer::Bands slopeBands(std::initializer_list<std::pair<double, double>> points, double offsetDb)
+{
+    const std::vector<std::pair<double, double>> p(points);
+    ma::SpectrumAnalyzer::Bands out {};
+    out.fill(-200.0);
+    for (int b = 0; b < ma::SpectrumAnalyzer::numBandsFor(ma::BandScale::erb); ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        double db = hz <= p.front().first ? p.front().second : p.back().second;
+        for (size_t i = 1; i < p.size(); ++i)
+            if (hz > p[i - 1].first && hz <= p[i].first)
+                db = p[i - 1].second + std::log(hz / p[i - 1].first) / std::log(p[i].first / p[i - 1].first) * (p[i].second - p[i - 1].second);
+        out[static_cast<size_t>(b)] = db + offsetDb;
+    }
+    return out;
+}
+
+void testSketch()
+{
+    using ma::StemGroup;
+    const int bands = ma::SpectrumAnalyzer::numBandsFor(ma::BandScale::erb);
+    const auto typical = ma::typicalArrangement();
+    check(typical.valid() && typical.groups[0].expected && typical.groups[1].expected && typical.groups[3].expected
+              && !typical.groups[2].expected && !typical.fromReferences,
+          "sketch: the typical drop has drums, bass and the rest, a vocal is optional");
+
+    // Reference stems: drums, bass, a vocal and the rest (a pad from 200 Hz and a lead above it).
+    auto drums = [](double o) { return slopeBands({ { 30, -30 }, { 60, 0 }, { 120, -6 }, { 300, -24 }, { 2000, -26 }, { 8000, -16 }, { 16000, -30 } }, o); };
+    auto bass = [](double o) { return slopeBands({ { 30, -12 }, { 55, 0 }, { 110, 0 }, { 250, -14 }, { 1000, -40 }, { 4000, -70 } }, o); };
+    auto vocal = [](double o) { return slopeBands({ { 100, -50 }, { 250, -10 }, { 500, 0 }, { 2500, 0 }, { 5000, -8 }, { 12000, -25 } }, o); };
+    auto pad = [](double o) { return slopeBands({ { 100, -40 }, { 250, -4 }, { 500, 0 }, { 700, -4 }, { 1500, -24 }, { 4000, -50 } }, o); };
+    auto lead = [](double o) { return slopeBands({ { 300, -60 }, { 700, -30 }, { 1200, -6 }, { 2500, 0 }, { 5000, -6 }, { 12000, -30 } }, o); };
+    auto sum = [&](std::initializer_list<ma::SpectrumAnalyzer::Bands> parts) {
+        ma::SpectrumAnalyzer::Bands out {};
+        for (int b = 0; b < bands; ++b)
+        {
+            double p = 0.0;
+            for (const auto& part : parts)
+                p += std::pow(10.0, part[static_cast<size_t>(b)] / 10.0);
+            out[static_cast<size_t>(b)] = p > 1e-20 ? 10.0 * std::log10(p) : -200.0;
+        }
+        return out;
+    };
+    ma::StemTarget target;
+    target.name = "test";
+    ma::TonalTarget tonal;
+    for (int r = 0; r < 3; ++r)
+    {
+        const double v = 0.7 * r - 0.7; // references differ a little
+        ma::StemProfile profile;
+        profile.name = "ref " + std::to_string(r);
+        profile.hasBands = true;
+        profile.groupDb = { drums(-10.0 + v), bass(-12.0 - v), vocal(-16.0 + v), sum({ pad(-17.0), lead(-18.0 + v) }) };
+        for (auto& side : profile.sideDb)
+            side.fill(-200.0);
+        profile.measure = ma::measureStemGroups(profile.groupDb, profile.sideDb, { true, true, true, true });
+        target.profiles.push_back(profile);
+        tonal.references.push_back(ma::normaliseCurve(sum({ profile.groupDb[0], profile.groupDb[1], profile.groupDb[2], profile.groupDb[3] })));
+    }
+    target.rebuild();
+    tonal.rebuild();
+    const auto arrangement = ma::arrangementFromStems(target);
+    check(arrangement.fromReferences && arrangement.groups[2].expected, "sketch: the references' vocal is expected");
+    checkNear(arrangement.groups[2].levelDb, target.level[2].centre, 0.01, "sketch: a group's level is the corridor's centre");
+
+    // Our drop: the references' drums, bass and the rest 6 dB lower, and no vocal yet.
+    const double ours = -6.0;
+    auto input = [&](bool withVocal, bool withPad) {
+        ma::SketchInput in;
+        const auto music = withPad ? sum({ pad(-17.0 + ours), lead(-18.0 + ours) }) : lead(-18.0 + ours);
+        in.groupDb = { drums(-10.0 + ours), bass(-12.0 + ours), withVocal ? vocal(-16.0 + ours) : bass(-400.0), music };
+        in.present = { true, true, withVocal, true };
+        in.channels = { { 0, in.groupDb[0] }, { 1, in.groupDb[1] }, { 3, lead(-18.0 + ours) } };
+        if (withPad)
+            in.channels.push_back({ 3, pad(-17.0 + ours) });
+        if (withVocal)
+            in.channels.push_back({ 2, in.groupDb[2] });
+        return in;
+    };
+
+    const auto complete = ma::analyseSketch(input(true, true), arrangement);
+    check(complete.valid && !complete.sketch, "sketch: a complete drop is not a sketch");
+
+    const auto noVocal = ma::analyseSketch(input(false, true), arrangement);
+    check(noVocal.sketch && noVocal.missing[2] && noVocal.ghosts.size() == 1 && noVocal.ghosts[0].region < 0,
+          "sketch: a missing vocal becomes one ghost");
+    if (noVocal.ghosts.size() == 1)
+    {
+        const auto& ghost = noVocal.ghosts[0];
+        checkNear(ghost.levelDb, target.level[2].centre, 1.0, "sketch: the ghost sits at the references' level against the whole");
+        check(ghost.lowHz >= 200.0 && ghost.lowHz < 700.0 && ghost.highHz > 2000.0 && ghost.highHz < 8000.0,
+              "sketch: the ghost's range is the vocal's (" + std::to_string(ghost.lowHz) + "-" + std::to_string(ghost.highHz) + " Hz)");
+        check(ghost.priority == ma::defaultPriority(ma::Role::vocal), "sketch: a vocal ghost is as important as a vocal");
+        // Its spectrum is the reference vocal, 6 dB lower like the rest of our drop.
+        const int at = 20;
+        checkNear(ghost.db[static_cast<size_t>(at)], vocal(-16.0 + ours)[static_cast<size_t>(at)], 1.0, "sketch: the ghost's spectrum follows the references");
+    }
+
+    // The rest without its pad: the lead plays above 1 kHz only, so 250-700 Hz is the arrangement's.
+    const auto noPad = ma::analyseSketch(input(true, false), arrangement);
+    check(noPad.sketch && noPad.hole[3][2] && !noPad.missing[3], "sketch: the rest without its low mids leaves a hole there");
+    bool padGhost = false;
+    for (const auto& ghost : noPad.ghosts)
+        padGhost = padGhost || (ghost.group == 3 && ghost.region == 2 && ghost.shortDb >= 6.0 && ghost.priority == ma::defaultPriority(ma::Role::pad));
+    check(padGhost, "sketch: the hole is a pad-like ghost");
+    auto cut = input(true, false);
+    cut.cutOnPurpose[3][2] = true;
+    check(!ma::analyseSketch(cut, arrangement).hole[3][2], "sketch: a region cut on purpose is no hole");
+
+    // Tonal balance: without the vocal the mix shows a hole in the mids and looks heavy elsewhere;
+    // with the ghost in, the regions are explained by the arrangement.
+    const auto plainMix = sum({ input(false, true).groupDb[0], input(false, true).groupDb[1], input(false, true).groupDb[3] });
+    const auto plain = ma::compareToTarget(plainMix, tonal);
+    const auto withGhost = ma::compareToTarget(ma::addGhosts(plainMix, noVocal), tonal);
+    check(plain.valid && !plain.regions.empty(), "sketch: the sparse mix is outside the corridor");
+    const auto explained = ma::arrangementRegions(plain, withGhost);
+    check(!explained.empty() && std::all_of(explained.begin(), explained.end(), [](bool b) { return b; }),
+          "sketch: every region is the arrangement's, not the mix's");
+    // A bass 20 dB too quiet stays the mix's own hole, ghost or not.
+    auto quietBass = input(false, true);
+    quietBass.groupDb[1] = bass(-12.0 + ours - 20.0);
+    quietBass.channels[1].db = quietBass.groupDb[1];
+    const auto quietSketch = ma::analyseSketch(quietBass, arrangement);
+    const auto quietMix = sum({ quietBass.groupDb[0], quietBass.groupDb[1], quietBass.groupDb[3] });
+    const auto quietPlain = ma::compareToTarget(quietMix, tonal);
+    const auto quietExplained = ma::arrangementRegions(quietPlain, ma::compareToTarget(ma::addGhosts(quietMix, quietSketch), tonal));
+    bool bassHoleIsMix = false;
+    for (size_t i = 0; i < quietPlain.regions.size(); ++i)
+        bassHoleIsMix = bassHoleIsMix || (quietPlain.regions[i].hole() && quietPlain.regions[i].highHz < 300.0 && !quietExplained[i]);
+    check(bassHoleIsMix, "sketch: a quiet bass is still the mix's hole");
+
+    // The master in another scale (+11 dB) carries the ghost over the same.
+    auto louder = plainMix;
+    for (auto& v : louder)
+        v += 11.0;
+    const auto carried = ma::addGhosts(louder, noVocal);
+    checkNear(carried[20] - 11.0, ma::addGhosts(plainMix, noVocal)[20], 0.01, "sketch: ghosts follow the master's scale");
+
+    // Without references the typical profile: a kick and a bass alone miss the rest.
+    ma::SketchInput sparse;
+    sparse.groupDb = { drums(-16.0), bass(-18.0), bass(-400.0), bass(-400.0) };
+    sparse.present = { true, true, false, false };
+    sparse.channels = { { 0, sparse.groupDb[0] }, { 1, sparse.groupDb[1] } };
+    const auto typicalSketch = ma::analyseSketch(sparse, typical);
+    check(typicalSketch.sketch && typicalSketch.missing[3] && !typicalSketch.missing[2] && !typicalSketch.fromReferences,
+          "sketch: without references the rest is missing, a vocal is not asked for");
+
+    // Solver: a lead over the vocal's ghost gets a cut (at most 3 dB), the ghost never gets one.
+    std::vector<ma::SolverChannel> channels { solverBand(45.0, 90.0, -14.0, 1), solverBand(500.0, 4000.0, -14.0, 3) };
+    auto ghost = solverBand(500.0, 4000.0, -20.0, 2);
+    ghost.ghost = true;
+    channels.push_back(ghost);
+    const auto solved = ma::solve(channels);
+    bool leadCut = false, ghostChanged = false;
+    for (const auto& change : solved.changes)
+    {
+        ghostChanged = ghostChanged || change.channel == 2;
+        if (change.kind == ma::SolverChange::Kind::eqCut && change.channel == 1 && change.maskedChannel == 2)
+        {
+            leadCut = true;
+            check(solved.eq[1][static_cast<size_t>(change.eqSlot)].gainDb >= -3.0f, "sketch: room for a ghost is at most 3 dB");
+        }
+    }
+    check(leadCut && !ghostChanged, "sketch: the lead makes room for the ghost vocal, the ghost is left alone");
+    // A ghost covering a real channel is not cut either.
+    std::vector<ma::SolverChannel> covered { solverBand(500.0, 4000.0, -24.0, 2), solverBand(400.0, 5000.0, -12.0, 6) };
+    covered[1].ghost = true;
+    check(ma::solve(covered).changes.empty(), "sketch: a ghost is never cut");
+
+    // Stem levels: the vocal's ghost counts in the sum, so the other groups are not all too loud.
+    std::array<ma::SpectrumAnalyzer::Bands, ma::kStemGroups> groups = { drums(-10.0 + ours), bass(-12.0 + ours), bass(-400.0),
+                                                                         sum({ pad(-17.0 + ours), lead(-18.0 + ours) }) };
+    const auto without = ma::planStemLevels(groups, { true, true, false, true }, target);
+    const auto& ghostVocal = noVocal.ghosts.front().db;
+    groups[2] = ghostVocal;
+    const std::array<bool, ma::kStemGroups> fixed { false, false, true, false };
+    const auto with = ma::planStemLevels(groups, { true, true, true, true }, target, &fixed);
+    check(!with.any && with.gainDb[2] == 0.0, "sketch: with the ghost in, the groups already stand as in the references");
+    check(without.before[0] > with.before[0] + 0.5, "sketch: without it every group reads louder against the sum");
+}
+
 int main()
 {
     testLoudness();
@@ -2304,6 +2487,7 @@ int main()
     testKickTuning();
     testBusGlue();
     testStemSections();
+    testSketch();
     testMasterPreview();
     testWavRoundTrip();
 
