@@ -10,7 +10,9 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
 - `lab/` `ma-lab` CLI running the core on WAV stems.
 - `tests/` plain-assert unit tests, run through CTest.
 - `plugins/agent` per-channel plugin, `plugins/brain` master plugin. Audio thread publishes
-  measurements through atomics; editors poll them on a timer.
+  measurements through atomics; editors poll them on a timer. Both editors have a fixed size (Agent 940x600,
+  Brain 1120x680) with the controls on tabs (`ma::ui::Tabs` / `ma::ui::Page` in `MaUi.h`); a new feature goes on a
+  tab (or a new one), never into a taller window.
 - Agents talk to the Brain through `ma::bus` (`core/include/ma/MixBus.h`), a seqlock slot table
   in a memory-mapped temp file (`plugins/common/SharedSession.h`), so it works across processes.
   Bump `bus::kVersion` whenever `AgentData`, `Command` or the layout changes. Spectra on the bus are

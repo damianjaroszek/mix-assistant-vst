@@ -57,20 +57,15 @@ AgentEditor::AgentEditor(AgentProcessor& p)
     styleLabel(eqLabel, pl("Korekcja od Mózgu"), colours::quiet);
     styleLabel(eqStatus, {}, colours::quiet, 13.0f);
     eqStatus.setJustificationType(juce::Justification::topLeft);
-    addAndMakeVisible(eqLabel);
-    addAndMakeVisible(eqStatus);
-    addAndMakeVisible(eqCurve);
 
     eqBypassButton.setButtonText(pl("Wyłącz"));
     eqBypassButton.setColour(juce::ToggleButton::textColourId, colours::quiet);
-    addAndMakeVisible(eqBypassButton);
     eqBypassAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         processor.parameters, AgentProcessor::eqBypassId, eqBypassButton);
 
     eqClearButton.setButtonText(pl("Wyzeruj"));
     eqClearButton.setColour(juce::TextButton::buttonColourId, colours::panel);
     eqClearButton.onClick = [this] { processor.clearEq(); };
-    addAndMakeVisible(eqClearButton);
 
     connection.setJustificationType(juce::Justification::centredRight);
     connection.setFont(juce::FontOptions(13.0f));
@@ -81,37 +76,20 @@ AgentEditor::AgentEditor(AgentProcessor& p)
     nameEditor.setColour(juce::TextEditor::textColourId, colours::text);
     nameEditor.setTooltip(pl("Nazwa w Mózgu. Pusta = nazwa ścieżki z FL."));
     nameEditor.onTextChange = [this] { processor.setUserName(nameEditor.getText()); };
-    addAndMakeVisible(nameEditor);
-
-    for (auto* label : { &title, &connection, &roleLabel, &priorityLabel, &inputLabel, &lufsLabel, &outputLabel, &measureLabel,
-                         &trimLabel, &ceilingLabel, &learnTimeLabel, &inputValue, &lufsValue, &outputValue, &status,
-                         &spectrumLabel })
-        addAndMakeVisible(label);
 
     styleCombo(roleBox, AgentProcessor::roleNames());
     styleCombo(measureBox, { "RMS (dBFS)", "LUFS" });
-    addAndMakeVisible(roleBox);
-    addAndMakeVisible(measureBox);
 
     for (auto* slider : { &prioritySlider, &targetSlider, &trimSlider, &ceilingSlider, &learnTimeSlider })
-    {
         styleSlider(*slider);
-        addAndMakeVisible(slider);
-    }
-
-    addAndMakeVisible(inputBar);
-    addAndMakeVisible(outputBar);
 
     learnButton.setButtonText(pl("Naucz poziom"));
     learnButton.setColour(juce::TextButton::buttonColourId, colours::panel);
     learnButton.setColour(juce::TextButton::buttonOnColourId, colours::accent);
     learnButton.onClick = [this] { toggleLearning(); };
-    addAndMakeVisible(learnButton);
 
     showProfileButton.setButtonText(pl("Pokaż nauczony profil"));
     showProfileButton.setColour(juce::ToggleButton::textColourId, colours::quiet);
-    addAndMakeVisible(showProfileButton);
-    addAndMakeVisible(spectrumView);
 
     styleLabel(duckLabel, pl("Ustępowanie (sidechain)"), colours::quiet);
     styleLabel(duckStatus, {}, colours::quiet, 13.0f);
@@ -121,86 +99,62 @@ AgentEditor::AgentEditor(AgentProcessor& p)
     styleLabel(duckThresholdLabel, pl("Próg"), colours::quiet, 13.0f);
     styleLabel(duckAttackLabel, pl("Atak"), colours::quiet, 13.0f);
     styleLabel(duckReleaseLabel, pl("Powrót"), colours::quiet, 13.0f);
-    for (auto* label : { &duckLabel, &duckStatus, &duckFreqLabel, &duckDepthLabel, &duckThresholdLabel, &duckAttackLabel,
-                         &duckReleaseLabel })
-        addAndMakeVisible(label);
     duckOnButton.setButtonText(pl("Włącz"));
     polarityButton.setButtonText(pl("Odwróć polaryzację"));
     polarityButton.setTooltip(pl("Odwraca fazę kanału o 180°. Pomaga, gdy stopa i bas się znoszą."));
     for (auto* button : { &duckOnButton, &polarityButton })
-    {
         button->setColour(juce::ToggleButton::textColourId, colours::quiet);
-        addAndMakeVisible(button);
-    }
     styleCombo(duckModeBox, AgentProcessor::duckModeNames());
     styleCombo(duckSyncBox, AgentProcessor::duckSyncNames());
     duckSyncBox.setTooltip(pl("Czas powrotu dopasowany do tempa utworu."));
-    addAndMakeVisible(duckModeBox);
-    addAndMakeVisible(duckSyncBox);
     for (auto* slider : { &duckFreqSlider, &duckDepthSlider, &duckThresholdSlider, &duckAttackSlider, &duckReleaseSlider })
     {
         styleSlider(*slider);
         slider->setTextBoxStyle(juce::Slider::TextBoxRight, false, 70, 20);
-        addAndMakeVisible(slider);
     }
 
     styleLabel(harmonicsLabel, pl("Harmoniczne"), colours::quiet);
     harmonicsLabel.setTooltip(pl("Dodaje alikwoty treści poniżej podziału, żeby była słyszalna na telefonie i laptopie."));
     styleLabel(harmonicsFreqLabel, pl("Poniżej"), colours::quiet, 13.0f);
     styleLabel(harmonicsAmountLabel, pl("Ilość"), colours::quiet, 13.0f);
-    for (auto* label : { &harmonicsLabel, &harmonicsFreqLabel, &harmonicsAmountLabel })
-        addAndMakeVisible(label);
     harmonicsOnButton.setButtonText(pl("Włącz"));
     harmonicsOnButton.setColour(juce::ToggleButton::textColourId, colours::quiet);
-    addAndMakeVisible(harmonicsOnButton);
     for (auto* slider : { &harmonicsFreqSlider, &harmonicsAmountSlider })
     {
         styleSlider(*slider);
         slider->setTextBoxStyle(juce::Slider::TextBoxRight, false, 70, 20);
-        addAndMakeVisible(slider);
     }
 
     styleLabel(attackLabel, pl("Atak"), colours::quiet);
     attackLabel.setTooltip(pl("Podkreśla tylko początek dźwięku (klik stopy, trzask werbla) w paśmie, które słychać na małych głośnikach."));
     styleLabel(attackFreqLabel, pl("Powyżej"), colours::quiet, 13.0f);
     styleLabel(attackAmountLabel, pl("Ilość"), colours::quiet, 13.0f);
-    for (auto* label : { &attackLabel, &attackFreqLabel, &attackAmountLabel })
-        addAndMakeVisible(label);
     attackOnButton.setButtonText(pl("Włącz"));
     attackOnButton.setColour(juce::ToggleButton::textColourId, colours::quiet);
-    addAndMakeVisible(attackOnButton);
     for (auto* slider : { &attackFreqSlider, &attackAmountSlider })
     {
         styleSlider(*slider);
         slider->setTextBoxStyle(juce::Slider::TextBoxRight, false, 70, 20);
-        addAndMakeVisible(slider);
     }
 
     styleLabel(satLabel, pl("Przester"), colours::quiet);
     satLabel.setTooltip(pl("Saturacja z 4x nadpróbkowaniem. Głośność zostaje, zmienia się barwa."));
     styleLabel(satDriveLabel, "Drive", colours::quiet, 13.0f);
     styleLabel(satMixLabel, pl("Miks"), colours::quiet, 13.0f);
-    for (auto* label : { &satLabel, &satDriveLabel, &satMixLabel })
-        addAndMakeVisible(label);
     satOnButton.setButtonText(pl("Włącz"));
     intentionalButton.setButtonText(pl("Celowy przester"));
     intentionalButton.setTooltip(pl("Kanał ma brzmieć brudno: nauka poziomu nie pilnuje szczytów, a Mózg nie ostrzega o przesterowaniu."));
     for (auto* button : { &satOnButton, &intentionalButton })
-    {
         button->setColour(juce::ToggleButton::textColourId, colours::quiet);
-        addAndMakeVisible(button);
-    }
     styleCombo(satModeBox, AgentProcessor::saturationModeNames());
-    addAndMakeVisible(satModeBox);
     for (auto* slider : { &satDriveSlider, &satMixSlider })
     {
         styleSlider(*slider);
         slider->setTextBoxStyle(juce::Slider::TextBoxRight, false, 70, 20);
-        addAndMakeVisible(slider);
     }
 
-    styleLabel(chainTitle, pl("Inżynier miksu"), colours::text, 16.0f);
-    chainTitle.setTooltip(pl("Ustawia je przycisk „Ustaw cały miks” w Mózgu, patrząc na cały miks. Można też ręcznie."));
+    styleLabel(chainTitle, pl("Ustawia je przycisk „Ustaw cały miks” w Mózgu, patrząc na cały miks. Można też ręcznie."),
+               colours::quiet, 13.0f);
     styleLabel(cleanLabel, pl("Porządki"), colours::quiet);
     styleLabel(compLabel, pl("Kompresor"), colours::quiet);
     styleLabel(clipLabel, "Clipper", colours::quiet);
@@ -225,23 +179,15 @@ AgentEditor::AgentEditor(AgentProcessor& p)
     evenRefLabel.setTooltip(pl("Typowa nuta linii basu: ta zostaje bez zmian."));
     styleLabel(stereoLabel, pl("Faza w pasmach (mid-side)"), colours::quiet);
     stereoLabel.setTooltip(pl("Jak Correlometer: na dole przeciwfaza, która w mono znika. „Ustaw cały miks” zdejmuje tam side."));
-    addAndMakeVisible(stereoLabel);
-    addAndMakeVisible(stereoView);
     for (auto* label : { &cleanStatus, &compStatus, &clipStatus, &evenStatus, &stereoStatus })
     {
         styleLabel(*label, {}, colours::quiet, 13.0f);
         label->setJustificationType(juce::Justification::topLeft);
     }
-    for (auto* label : { &chainTitle, &cleanLabel, &compLabel, &clipLabel, &evenLabel, &hpfLabel, &monoLabel, &mudFreqLabel,
-                         &mudGainLabel, &compThresholdLabel, &compRatioLabel, &compAttackLabel, &compReleaseLabel, &compKneeLabel,
-                         &compMakeupLabel, &clipCeilingLabel, &clipSoftnessLabel, &evenAmountLabel, &evenRefLabel, &cleanStatus,
-                         &compStatus, &clipStatus, &evenStatus, &stereoStatus })
-        addAndMakeVisible(label);
     for (auto* button : { &compOnButton, &clipOnButton, &evenOnButton })
     {
         button->setButtonText(pl("Włącz"));
         button->setColour(juce::ToggleButton::textColourId, colours::quiet);
-        addAndMakeVisible(button);
     }
 
     auto& state = processor.parameters;
@@ -265,7 +211,6 @@ AgentEditor::AgentEditor(AgentProcessor& p)
     {
         styleSlider(*slider);
         slider->setTextBoxStyle(juce::Slider::TextBoxRight, false, 70, 20);
-        addAndMakeVisible(slider);
         chainAttachments.push_back(std::make_unique<SliderAttachment>(state, id, *slider));
     }
     compOnAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(state, AgentProcessor::compOnId, compOnButton);
@@ -303,9 +248,49 @@ AgentEditor::AgentEditor(AgentProcessor& p)
     satDriveAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::satDriveId, satDriveSlider);
     satMixAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::satMixId, satMixSlider);
 
+    // One fixed-size window: the header stays, everything else sits on tabs.
+    for (auto* c : std::initializer_list<juce::Component*> { &title, &connection, &nameEditor, &tabs })
+        addAndMakeVisible(c);
+    const auto page = [this](ma::ui::Page& target, const juce::String& name, std::initializer_list<juce::Component*> children,
+                             std::function<void(juce::Rectangle<int>)> layout) {
+        for (auto* c : children)
+            target.addAndMakeVisible(c);
+        target.layout = std::move(layout);
+        tabs.add(name, target);
+    };
+    page(levelPage, pl("Poziom"),
+         { &roleLabel, &roleBox, &priorityLabel, &prioritySlider, &inputLabel, &inputValue, &inputBar, &lufsLabel, &lufsValue,
+           &outputLabel, &outputValue, &outputBar, &measureLabel, &measureBox, &targetSlider, &trimLabel, &trimSlider,
+           &ceilingLabel, &ceilingSlider, &learnTimeLabel, &learnTimeSlider, &learnButton, &status, &spectrumLabel,
+           &showProfileButton, &spectrumView },
+         [this](auto area) { layoutLevel(area); });
+    page(eqPage, pl("EQ i ustępowanie"),
+         { &eqLabel, &eqStatus, &eqCurve, &eqBypassButton, &eqClearButton, &duckLabel, &duckOnButton, &duckModeBox,
+           &polarityButton, &duckFreqLabel, &duckFreqSlider, &duckDepthLabel, &duckDepthSlider, &duckThresholdLabel,
+           &duckThresholdSlider, &duckAttackLabel, &duckAttackSlider, &duckReleaseLabel, &duckReleaseSlider, &duckSyncBox,
+           &duckStatus },
+         [this](auto area) { layoutEq(area); });
+    page(tonePage, pl("Barwa"),
+         { &harmonicsLabel, &harmonicsOnButton, &harmonicsFreqLabel, &harmonicsFreqSlider, &harmonicsAmountLabel,
+           &harmonicsAmountSlider, &attackLabel, &attackOnButton, &attackFreqLabel, &attackFreqSlider, &attackAmountLabel,
+           &attackAmountSlider, &satLabel, &satOnButton, &satModeBox, &intentionalButton, &satDriveLabel, &satDriveSlider,
+           &satMixLabel, &satMixSlider },
+         [this](auto area) { layoutTone(area); });
+    page(chainPage, pl("Inżynier miksu"),
+         { &chainTitle, &cleanLabel, &hpfLabel, &hpfSlider, &monoLabel, &monoSlider, &mudFreqLabel, &mudFreqSlider,
+           &mudGainLabel, &mudGainSlider, &cleanStatus, &compLabel, &compOnButton, &compThresholdLabel, &compThresholdSlider,
+           &compRatioLabel, &compRatioSlider, &compAttackLabel, &compAttackSlider, &compReleaseLabel, &compReleaseSlider,
+           &compKneeLabel, &compKneeSlider, &compMakeupLabel, &compMakeupSlider, &compStatus, &clipLabel, &clipOnButton,
+           &clipCeilingLabel, &clipCeilingSlider, &clipSoftnessLabel, &clipSoftnessSlider, &clipStatus, &evenLabel,
+           &evenOnButton, &evenAmountLabel, &evenAmountSlider, &evenRefLabel, &evenRefSlider, &evenStatus },
+         [this](auto area) { layoutChain(area); });
+    page(stereoPage, "Stereo", { &stereoLabel, &stereoView, &stereoStatus }, [this](auto area) { layoutStereo(area); });
+    tabs.setCurrentTabIndex(juce::jlimit(0, tabs.getNumTabs() - 1, processor.editorTab), false);
+    tabs.onChange = [this](int index) { processor.editorTab = index; };
+
     shownResultSerial = processor.lastResult().serial;
     processor.setSpectrumVisible(true);
-    setSize(1040, 1000);
+    setSize(kWidth, kHeight);
     startTimerHz(30);
 }
 
@@ -527,34 +512,39 @@ void AgentEditor::updateChainStatus()
 void AgentEditor::paint(juce::Graphics& g)
 {
     g.fillAll(colours::background);
-    g.setColour(colours::panel);
-    g.fillRect(getWidth() / 2, 16, 1, getHeight() - 32);
 }
 
 void AgentEditor::resized()
 {
-    constexpr int labelWidth = 130;
     auto area = getLocalBounds().reduced(16);
-    layoutChain(area.removeFromRight(area.getWidth() / 2 - 8).withTrimmedLeft(16));
-    area.removeFromRight(8);
     auto top = area.removeFromTop(28);
     title.setBounds(top.removeFromLeft(190));
     connection.setBounds(top.removeFromRight(170));
     nameEditor.setBounds(top.reduced(6, 2));
-    area.removeFromTop(6);
+    area.removeFromTop(8);
+    tabs.setBounds(area);
+}
+
+void AgentEditor::layoutLevel(juce::Rectangle<int> area)
+{
+    constexpr int labelWidth = 130;
+    area.reduce(12, 12);
+    auto spectrum = area.removeFromRight(area.getWidth() / 2 - 10);
+    area.removeFromRight(20);
 
     auto row = area.removeFromTop(26);
     roleLabel.setBounds(row.removeFromLeft(labelWidth));
-    roleBox.setBounds(row.removeFromLeft(170));
-    row.removeFromLeft(12);
-    priorityLabel.setBounds(row.removeFromLeft(70));
+    roleBox.setBounds(row);
+    area.removeFromTop(4);
+    row = area.removeFromTop(26);
+    priorityLabel.setBounds(row.removeFromLeft(labelWidth));
     prioritySlider.setBounds(row);
     area.removeFromTop(10);
 
     const auto meterRow = [&](juce::Label& label, juce::Label& value, ma::ui::LevelBar* bar) {
         auto r = area.removeFromTop(24);
         label.setBounds(r.removeFromLeft(labelWidth));
-        value.setBounds(r.removeFromRight(100));
+        value.setBounds(r.removeFromRight(90));
         if (bar != nullptr)
             bar->setBounds(r.reduced(4, 6));
         area.removeFromTop(2);
@@ -584,29 +574,38 @@ void AgentEditor::resized()
     area.removeFromTop(8);
     learnButton.setBounds(area.removeFromTop(32).removeFromLeft(200));
     area.removeFromTop(6);
-    status.setBounds(area.removeFromTop(58));
+    status.setBounds(area);
 
-    area.removeFromTop(6);
-    row = area.removeFromTop(22);
+    row = spectrum.removeFromTop(22);
+    showProfileButton.setBounds(row.removeFromRight(180));
+    spectrumLabel.setBounds(row);
+    spectrum.removeFromTop(4);
+    spectrumView.setBounds(spectrum);
+}
+
+void AgentEditor::layoutEq(juce::Rectangle<int> area)
+{
+    area.reduce(12, 12);
+    auto row = area.removeFromTop(22);
     eqClearButton.setBounds(row.removeFromRight(80));
     row.removeFromRight(6);
     eqBypassButton.setBounds(row.removeFromRight(80));
     eqLabel.setBounds(row);
     area.removeFromTop(4);
-    auto eqRow = area.removeFromTop(80);
-    eqStatus.setBounds(eqRow.removeFromRight(170).withTrimmedLeft(10));
+    auto eqRow = area.removeFromTop(200);
+    eqStatus.setBounds(eqRow.removeFromRight(190).withTrimmedLeft(12));
     eqCurve.setBounds(eqRow);
 
-    area.removeFromTop(10);
+    area.removeFromTop(18);
     row = area.removeFromTop(24);
-    duckLabel.setBounds(row.removeFromLeft(150));
+    duckLabel.setBounds(row.removeFromLeft(180));
     duckOnButton.setBounds(row.removeFromLeft(72));
-    duckModeBox.setBounds(row.removeFromLeft(105).reduced(0, 1));
-    row.removeFromLeft(8);
-    polarityButton.setBounds(row);
-    area.removeFromTop(4);
+    duckModeBox.setBounds(row.removeFromLeft(120).reduced(0, 1));
+    row.removeFromLeft(12);
+    polarityButton.setBounds(row.removeFromLeft(200));
+    area.removeFromTop(6);
     const auto halfRow = [&](juce::Rectangle<int> r, juce::Label& label, juce::Component& control) {
-        label.setBounds(r.removeFromLeft(70));
+        label.setBounds(r.removeFromLeft(80));
         control.setBounds(r);
     };
     for (auto pair : { std::pair { std::pair { &duckFreqLabel, &duckFreqSlider }, std::pair { &duckDepthLabel, &duckDepthSlider } },
@@ -615,110 +614,105 @@ void AgentEditor::resized()
     {
         row = area.removeFromTop(24);
         auto left = row.removeFromLeft(row.getWidth() / 2);
-        halfRow(left.withTrimmedRight(8), *pair.first.first, *pair.first.second);
+        halfRow(left.withTrimmedRight(16), *pair.first.first, *pair.first.second);
         halfRow(row, *pair.second.first, *pair.second.second);
-        area.removeFromTop(2);
+        area.removeFromTop(4);
     }
     row = area.removeFromTop(24);
-    duckSyncBox.setBounds(row.removeFromRight(100).reduced(0, 1));
-    row.removeFromRight(8);
-    halfRow(row, duckReleaseLabel, duckReleaseSlider);
-    area.removeFromTop(4);
-    duckStatus.setBounds(area.removeFromTop(40));
-
-    area.removeFromTop(4);
-    row = area.removeFromTop(24);
-    {
-        auto left = row.removeFromLeft(row.getWidth() / 2);
-        harmonicsLabel.setBounds(left.removeFromLeft(110));
-        harmonicsOnButton.setBounds(left.removeFromLeft(72));
-        attackLabel.setBounds(row.removeFromLeft(110));
-        attackOnButton.setBounds(row.removeFromLeft(72));
-    }
-    area.removeFromTop(2);
-    for (auto group : { std::array<juce::Component*, 4> { &harmonicsFreqLabel, &harmonicsFreqSlider, &harmonicsAmountLabel, &harmonicsAmountSlider },
-                        std::array<juce::Component*, 4> { &attackFreqLabel, &attackFreqSlider, &attackAmountLabel, &attackAmountSlider } })
-    {
-        row = area.removeFromTop(24);
-        auto left = row.removeFromLeft(row.getWidth() / 2).withTrimmedRight(8);
-        group[0]->setBounds(left.removeFromLeft(70));
-        group[1]->setBounds(left);
-        group[2]->setBounds(row.removeFromLeft(70));
-        group[3]->setBounds(row);
-        area.removeFromTop(2);
-    }
-
-    area.removeFromTop(4);
-    row = area.removeFromTop(24);
-    satLabel.setBounds(row.removeFromLeft(110));
-    satOnButton.setBounds(row.removeFromLeft(72));
-    satModeBox.setBounds(row.removeFromLeft(120).reduced(0, 1));
-    row.removeFromLeft(12);
-    intentionalButton.setBounds(row);
-    area.removeFromTop(2);
-    row = area.removeFromTop(24);
-    {
-        auto left = row.removeFromLeft(row.getWidth() / 2).withTrimmedRight(8);
-        satDriveLabel.setBounds(left.removeFromLeft(70));
-        satDriveSlider.setBounds(left);
-        satMixLabel.setBounds(row.removeFromLeft(70));
-        satMixSlider.setBounds(row);
-    }
-
+    halfRow(row.removeFromLeft(row.getWidth() / 2).withTrimmedRight(16), duckReleaseLabel, duckReleaseSlider);
+    duckSyncBox.setBounds(row.removeFromLeft(110).reduced(0, 1));
     area.removeFromTop(8);
-    row = area.removeFromTop(22);
-    showProfileButton.setBounds(row.removeFromRight(190));
-    spectrumLabel.setBounds(row);
-    spectrumView.setBounds(area);
+    duckStatus.setBounds(area);
+}
+
+void AgentEditor::layoutTone(juce::Rectangle<int> area)
+{
+    area.reduce(12, 12);
+    const auto header = [&](juce::Label& label, juce::ToggleButton& button) {
+        auto row = area.removeFromTop(24);
+        label.setBounds(row.removeFromLeft(180));
+        button.setBounds(row.removeFromLeft(72));
+        area.removeFromTop(6);
+        return row;
+    };
+    const auto pairRow = [&](juce::Label& leftLabel, juce::Slider& leftSlider, juce::Label& rightLabel, juce::Slider& rightSlider) {
+        auto row = area.removeFromTop(24);
+        auto left = row.removeFromLeft(row.getWidth() / 2).withTrimmedRight(16);
+        leftLabel.setBounds(left.removeFromLeft(80));
+        leftSlider.setBounds(left);
+        rightLabel.setBounds(row.removeFromLeft(80));
+        rightSlider.setBounds(row);
+        area.removeFromTop(28);
+    };
+
+    header(harmonicsLabel, harmonicsOnButton);
+    pairRow(harmonicsFreqLabel, harmonicsFreqSlider, harmonicsAmountLabel, harmonicsAmountSlider);
+    header(attackLabel, attackOnButton);
+    pairRow(attackFreqLabel, attackFreqSlider, attackAmountLabel, attackAmountSlider);
+    auto row = header(satLabel, satOnButton);
+    satModeBox.setBounds(row.removeFromLeft(130).reduced(0, 1));
+    row.removeFromLeft(16);
+    intentionalButton.setBounds(row.removeFromLeft(200));
+    pairRow(satDriveLabel, satDriveSlider, satMixLabel, satMixSlider);
 }
 
 void AgentEditor::layoutChain(juce::Rectangle<int> area)
 {
-    chainTitle.setBounds(area.removeFromTop(28));
-    area.removeFromTop(6);
+    area.reduce(12, 12);
+    chainTitle.setBounds(area.removeFromTop(22));
+    area.removeFromTop(10);
+    auto right = area.removeFromRight(area.getWidth() / 2 - 12);
+    area.removeFromRight(24);
 
-    const auto pairRow = [&](juce::Label& leftLabel, juce::Slider& leftSlider, juce::Label& rightLabel, juce::Slider& rightSlider) {
-        auto row = area.removeFromTop(24);
-        auto left = row.removeFromLeft(row.getWidth() / 2).withTrimmedRight(8);
-        leftLabel.setBounds(left.removeFromLeft(70));
-        leftSlider.setBounds(left);
-        rightLabel.setBounds(row.removeFromLeft(70));
-        rightSlider.setBounds(row);
-        area.removeFromTop(2);
+    const auto sliderRow = [](juce::Rectangle<int>& column, juce::Label& label, juce::Slider& slider) {
+        auto row = column.removeFromTop(24);
+        label.setBounds(row.removeFromLeft(80));
+        slider.setBounds(row);
+        column.removeFromTop(4);
     };
-    const auto header = [&](juce::Label& label, juce::ToggleButton* button) {
-        auto row = area.removeFromTop(24);
+    const auto header = [](juce::Rectangle<int>& column, juce::Label& label, juce::ToggleButton* button) {
+        auto row = column.removeFromTop(24);
         label.setBounds(row.removeFromLeft(200));
         if (button != nullptr)
             button->setBounds(row.removeFromLeft(72));
-        area.removeFromTop(2);
+        column.removeFromTop(4);
     };
-    const auto statusRow = [&](juce::Label& label) {
-        label.setBounds(area.removeFromTop(36));
-        area.removeFromTop(10);
+    const auto statusRow = [](juce::Rectangle<int>& column, juce::Label& label) {
+        label.setBounds(column.removeFromTop(36));
+        column.removeFromTop(16);
     };
 
-    header(cleanLabel, nullptr);
-    pairRow(hpfLabel, hpfSlider, monoLabel, monoSlider);
-    pairRow(mudFreqLabel, mudFreqSlider, mudGainLabel, mudGainSlider);
-    statusRow(cleanStatus);
+    // Left: cleanup and clipper, right: compressor and evener (the chain runs cleanup, clipper, compressor, evener).
+    header(area, cleanLabel, nullptr);
+    for (auto [label, slider] : { std::pair { &hpfLabel, &hpfSlider }, std::pair { &monoLabel, &monoSlider },
+                                  std::pair { &mudFreqLabel, &mudFreqSlider }, std::pair { &mudGainLabel, &mudGainSlider } })
+        sliderRow(area, *label, *slider);
+    statusRow(area, cleanStatus);
 
-    header(compLabel, &compOnButton);
-    pairRow(compThresholdLabel, compThresholdSlider, compRatioLabel, compRatioSlider);
-    pairRow(compAttackLabel, compAttackSlider, compReleaseLabel, compReleaseSlider);
-    pairRow(compKneeLabel, compKneeSlider, compMakeupLabel, compMakeupSlider);
-    statusRow(compStatus);
+    header(area, clipLabel, &clipOnButton);
+    sliderRow(area, clipCeilingLabel, clipCeilingSlider);
+    sliderRow(area, clipSoftnessLabel, clipSoftnessSlider);
+    statusRow(area, clipStatus);
 
-    header(clipLabel, &clipOnButton);
-    pairRow(clipCeilingLabel, clipCeilingSlider, clipSoftnessLabel, clipSoftnessSlider);
-    statusRow(clipStatus);
+    header(right, compLabel, &compOnButton);
+    for (auto [label, slider] : { std::pair { &compThresholdLabel, &compThresholdSlider }, std::pair { &compRatioLabel, &compRatioSlider },
+                                  std::pair { &compAttackLabel, &compAttackSlider }, std::pair { &compReleaseLabel, &compReleaseSlider },
+                                  std::pair { &compKneeLabel, &compKneeSlider }, std::pair { &compMakeupLabel, &compMakeupSlider } })
+        sliderRow(right, *label, *slider);
+    statusRow(right, compStatus);
 
-    header(evenLabel, &evenOnButton);
-    pairRow(evenAmountLabel, evenAmountSlider, evenRefLabel, evenRefSlider);
-    statusRow(evenStatus);
+    header(right, evenLabel, &evenOnButton);
+    sliderRow(right, evenAmountLabel, evenAmountSlider);
+    sliderRow(right, evenRefLabel, evenRefSlider);
+    statusRow(right, evenStatus);
+}
 
-    header(stereoLabel, nullptr);
-    stereoView.setBounds(area.removeFromTop(110));
+void AgentEditor::layoutStereo(juce::Rectangle<int> area)
+{
+    area.reduce(12, 12);
+    stereoLabel.setBounds(area.removeFromTop(24));
     area.removeFromTop(4);
-    statusRow(stereoStatus);
+    stereoStatus.setBounds(area.removeFromBottom(44));
+    area.removeFromBottom(8);
+    stereoView.setBounds(area);
 }

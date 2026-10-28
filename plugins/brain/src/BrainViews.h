@@ -43,38 +43,69 @@ public:
         repaint();
     }
 
+    // Height all items need at the current width (the editor scrolls the rest).
+    int contentHeight() const { return juce::roundToInt(place(nullptr)); }
+
     void paint(juce::Graphics& g) override
     {
-        namespace colours = ma::ui::colours;
-        auto area = getLocalBounds().toFloat();
-        g.setColour(colours::panel);
-        g.fillRoundedRectangle(area, 4.0f);
-        area.reduce(10.0f, 8.0f);
-
-        for (const auto& item : items)
-        {
-            juce::AttributedString text;
-            text.append(item.detail, juce::FontOptions(12.5f), colours::quiet);
-            juce::TextLayout layout;
-            layout.createLayout(text, area.getWidth() - 16.0f);
-
-            auto row = area.removeFromTop(19.0f + layout.getHeight());
-            if (row.getBottom() > static_cast<float>(getHeight()))
-                break;
-
-            g.setColour(statusColour(item.status));
-            g.fillEllipse(row.getX(), row.getY() + 5.0f, 9.0f, 9.0f);
-            row.removeFromLeft(16.0f);
-
-            g.setColour(colours::text);
-            g.setFont(juce::FontOptions(14.0f, juce::Font::bold));
-            g.drawText(item.title, row.removeFromTop(19.0f), juce::Justification::centredLeft);
-            layout.draw(g, row);
-            area.removeFromTop(10.0f);
-        }
+        g.setColour(ma::ui::colours::panel);
+        g.fillRoundedRectangle(getLocalBounds().toFloat(), 4.0f);
+        place(&g);
     }
 
 private:
+    // Lays the items out in one column, or two when wide, balanced by height; draws them when given a context.
+    // Returns the bottom of the taller column.
+    float place(juce::Graphics* g) const
+    {
+        namespace colours = ma::ui::colours;
+        const auto area = getLocalBounds().toFloat().reduced(10.0f, 8.0f);
+        constexpr float gap = 28.0f;
+        const int columns = area.getWidth() >= 640.0f ? 2 : 1;
+        const float columnWidth = (area.getWidth() - gap * static_cast<float>(columns - 1)) / static_cast<float>(columns);
+
+        std::vector<juce::TextLayout> layouts(items.size());
+        float total = 0.0f;
+        for (size_t i = 0; i < items.size(); ++i)
+        {
+            juce::AttributedString text;
+            text.append(items[i].detail, juce::FontOptions(12.5f), colours::quiet);
+            layouts[i].createLayout(text, columnWidth - 16.0f);
+            total += 29.0f + layouts[i].getHeight();
+        }
+        size_t split = items.size();
+        if (columns == 2)
+        {
+            float first = 0.0f;
+            split = 0;
+            while (split < items.size() && first + (29.0f + layouts[split].getHeight()) * 0.5f < total * 0.5f)
+                first += 29.0f + layouts[split++].getHeight();
+        }
+
+        float bottom = area.getY();
+        for (int column = 0; column < columns; ++column)
+        {
+            const float x = area.getX() + static_cast<float>(column) * (columnWidth + gap);
+            float y = area.getY();
+            for (size_t i = column == 0 ? 0 : split; i < (column == 0 ? split : items.size()); ++i)
+            {
+                juce::Rectangle<float> row(x, y, columnWidth, 19.0f + layouts[i].getHeight());
+                y = row.getBottom() + 10.0f;
+                if (g == nullptr)
+                    continue;
+                g->setColour(statusColour(items[i].status));
+                g->fillEllipse(row.getX(), row.getY() + 5.0f, 9.0f, 9.0f);
+                row.removeFromLeft(16.0f);
+                g->setColour(colours::text);
+                g->setFont(juce::FontOptions(14.0f, juce::Font::bold));
+                g->drawText(items[i].title, row.removeFromTop(19.0f), juce::Justification::centredLeft);
+                layouts[i].draw(*g, row);
+            }
+            bottom = std::max(bottom, y);
+        }
+        return bottom;
+    }
+
     std::vector<MixSnapshot::ReportItem> items;
 };
 

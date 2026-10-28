@@ -7,6 +7,7 @@
 
 #include <array>
 #include <cmath>
+#include <functional>
 
 namespace ma::ui
 {
@@ -42,6 +43,52 @@ const juce::Colour good { 0xff5cbf73 };
 const juce::Colour warning { 0xffe8b04c };
 const juce::Colour critical { 0xffe8584c };
 } // namespace colours
+
+// One tab's content. The editor keeps the controls as its own members and says where they go.
+class Page : public juce::Component
+{
+public:
+    std::function<void(juce::Rectangle<int>)> layout;
+
+    void resized() override
+    {
+        if (layout)
+            layout(getLocalBounds());
+    }
+};
+
+// Tabs in the plugins' colours, so the editors keep one fixed size that fits the screen. Pages stay owned
+// by the editor.
+class Tabs : public juce::TabbedComponent
+{
+public:
+    Tabs() : juce::TabbedComponent(juce::TabbedButtonBar::TabsAtTop)
+    {
+        setTabBarDepth(30);
+        setOutline(1);
+        setIndent(0);
+        setColour(juce::TabbedComponent::backgroundColourId, colours::background);
+        setColour(juce::TabbedComponent::outlineColourId, colours::panel);
+        setColour(juce::TabbedButtonBar::tabOutlineColourId, colours::panel);
+        setColour(juce::TabbedButtonBar::frontOutlineColourId, colours::panel);
+        setColour(juce::TabbedButtonBar::tabTextColourId, colours::quiet);
+        setColour(juce::TabbedButtonBar::frontTextColourId, colours::text);
+    }
+
+    void add(const juce::String& name, Page& page, const juce::String& tooltip = {})
+    {
+        addTab(name, colours::panel, &page, false);
+        getTabbedButtonBar().getTabButton(getNumTabs() - 1)->setTooltip(tooltip);
+    }
+
+    std::function<void(int)> onChange;
+
+    void currentTabChanged(int index, const juce::String&) override
+    {
+        if (onChange)
+            onChange(index);
+    }
+};
 
 // Horizontal level bar from -60 dB to 0 dB with an optional target marker.
 class LevelBar : public juce::Component

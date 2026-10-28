@@ -34,36 +34,26 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     styleLabel(lowCorrelationLabel, pl("Korelacja < 120 Hz"), colours::quiet);
     styleLabel(fullCorrelationLabel, pl("Korelacja całości"), colours::quiet);
     styleLabel(ceilingLabel, pl("Limit szczytu"), colours::quiet);
-    styleLabel(reportLabel, pl("Raport poprawności"), colours::text, 15.0f);
-    styleLabel(channelsLabel, pl("Kanały"), colours::text, 15.0f);
-    styleLabel(overlayLabel, pl("Widma kanałów tak, jak słyszy je ucho (szare tło: suma)"), colours::text, 15.0f);
-    styleLabel(issuesLabel, pl("Kolizje: kto kogo zasłania"), colours::text, 15.0f);
+    styleLabel(overlayLabel, pl("Widma kanałów tak, jak słyszy je ucho (szare tło: suma)"), colours::quiet, 13.0f);
+    styleLabel(issuesLabel, pl("Kto kogo zasłania. Kliknij wiersz, żeby zaznaczyć kanał."), colours::quiet, 13.0f);
     for (auto* value : { &integratedValue, &shortTermValue, &truePeakValue, &plrValue, &lowCorrelationValue, &fullCorrelationValue })
     {
         styleLabel(*value, {}, colours::text);
         value->setJustificationType(juce::Justification::centredRight);
     }
 
-    for (auto* label : { &title, &agentsLabel, &integratedLabel, &integratedValue, &shortTermLabel, &shortTermValue,
-                         &truePeakLabel, &truePeakValue, &plrLabel, &plrValue, &lowCorrelationLabel, &lowCorrelationValue,
-                         &fullCorrelationLabel, &fullCorrelationValue, &ceilingLabel, &reportLabel, &channelsLabel,
-                         &overlayLabel, &issuesLabel })
-        addAndMakeVisible(label);
 
     ceilingSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    ceilingSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 22);
+    ceilingSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 64, 22);
     ceilingSlider.setColour(juce::Slider::thumbColourId, colours::accent);
-    addAndMakeVisible(ceilingSlider);
     ceilingAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         processor.parameters, BrainProcessor::peakCeilingId, ceilingSlider);
 
     styleLabel(targetLabel, pl("Cel mastera"), colours::quiet);
     targetLabel.setTooltip(pl("Głośność, do której Ozone podciągnie master. Podgląd mastera sprawdza, ile limiter musiałby przy tym ściąć."));
-    addAndMakeVisible(targetLabel);
     targetSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    targetSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 22);
+    targetSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 64, 22);
     targetSlider.setColour(juce::Slider::thumbColourId, colours::accent);
-    addAndMakeVisible(targetSlider);
     targetAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         processor.parameters, BrainProcessor::masterTargetId, targetSlider);
     masteringReportButton.setButtonText(pl("Raport dla Ozone..."));
@@ -71,30 +61,23 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     masteringReportButton.setTooltip(pl("Zapisuje raport przed masteringiem (HTML): głośność, zapas, podgląd mastera, balans, stereo, "
                                         "referencje i co zostało do zrobienia w Ozone."));
     masteringReportButton.onClick = [this] { saveMasteringReport(); };
-    addAndMakeVisible(masteringReportButton);
 
     resetButton.setButtonText(pl("Zeruj pomiar"));
     resetButton.setColour(juce::TextButton::buttonColourId, colours::panel);
     resetButton.onClick = [this] { processor.requestReset(); };
-    addAndMakeVisible(resetButton);
 
     profilesButton.setButtonText(pl("Z nauczonych profili"));
     profilesButton.setTooltip(pl("Kolizje liczone z profili nauczonych w Agentach zamiast z tego, co gra teraz."));
     profilesButton.setColour(juce::ToggleButton::textColourId, colours::quiet);
     profilesButton.setToggleState(processor.usesLearnedProfiles(), juce::dontSendNotification);
     profilesButton.onClick = [this] { processor.setUseLearnedProfiles(profilesButton.getToggleState()); };
-    addAndMakeVisible(profilesButton);
 
-    styleLabel(proposalLabel, pl("Propozycja"), colours::text, 15.0f);
     styleLabel(proposalStatus, {}, colours::quiet, 13.0f);
-    addAndMakeVisible(proposalLabel);
-    addAndMakeVisible(proposalStatus);
 
-    const auto styleButton = [this](juce::TextButton& button, const juce::String& text) {
+    const auto styleButton = [](juce::TextButton& button, const juce::String& text) {
         button.setButtonText(text);
         button.setColour(juce::TextButton::buttonColourId, colours::panel);
         button.setColour(juce::TextButton::buttonOnColourId, colours::warning.darker(0.3f));
-        addAndMakeVisible(button);
     };
     styleButton(proposeButton, pl("Zaproponuj"));
     styleButton(wholeMixButton, pl("Ustaw cały miks"));
@@ -110,13 +93,13 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     proposeButton.onClick = [this] {
         processor.propose();
         proposalStatus.setText({}, juce::dontSendNotification);
+        tabs.setCurrentTabIndex(static_cast<int>(Tab::proposal));
         timerCallback();
     };
     wholeMixButton.onClick = [this] {
         processor.proposeWholeMix();
         proposalStatus.setText({}, juce::dontSendNotification);
-        verdictViewButton.setToggleState(true, juce::dontSendNotification);
-        showView(View::verdict);
+        tabs.setCurrentTabIndex(static_cast<int>(Tab::verdict));
         timerCallback();
     };
     applyButton.onClick = [this] {
@@ -140,44 +123,18 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     adaptiveButton.setTooltip(pl("Mózg dalej słucha i powoli (0,25 dB na sekundę) przesuwa korekcje EQ w Agentach za miksem, "
                                  "w limitach solvera. Wyłączenie zamraża to, co jest ustawione."));
     adaptiveButton.setColour(juce::ToggleButton::textColourId, colours::quiet);
-    addAndMakeVisible(adaptiveButton);
     adaptiveAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         processor.parameters, BrainProcessor::adaptiveId, adaptiveButton);
 
     proposalViewport.setViewedComponent(&proposalView, false);
     proposalViewport.setScrollBarsShown(true, false);
-    addAndMakeVisible(proposalViewport);
 
-    for (auto* button : { &channelsViewButton, &tonalViewButton, &translationViewButton, &stereoViewButton, &stemsViewButton, &verdictViewButton })
-    {
-        button->setClickingTogglesState(true);
-        button->setRadioGroupId(1);
-        button->setColour(juce::TextButton::buttonColourId, colours::panel);
-        button->setColour(juce::TextButton::buttonOnColourId, colours::accent.darker(0.4f));
-        addAndMakeVisible(button);
-    }
-    channelsViewButton.setButtonText(pl("Kanały"));
-    tonalViewButton.setButtonText(pl("Balans tonalny"));
-    tonalViewButton.setTooltip(pl("Balans tonalny sumy wobec celu z referencji."));
-    translationViewButton.setButtonText(pl("Translacja"));
-    channelsViewButton.onClick = [this] { showView(View::channels); };
-    tonalViewButton.onClick = [this] { showView(View::tonal); };
-    translationViewButton.onClick = [this] { showView(View::translation); };
-    stereoViewButton.setButtonText("Stereo");
-    stereoViewButton.setTooltip(pl("Faza w pasmach sumy, jak Correlometer: na dole przeciwfaza. Kropki: zaznaczony kanał."));
-    stereoViewButton.onClick = [this] { showView(View::stereo); };
-    addChildComponent(stereoView);
-    stemsViewButton.setButtonText(pl("Referencje"));
-    stemsViewButton.setTooltip(pl("Perkusja, bas, wokal i reszta wobec stemów referencji, drop do dropu: poziom, barwa, szerokość."));
-    stemsViewButton.onClick = [this] { showView(View::stems); };
-    addChildComponent(stemView);
     stemBox.setTextWhenNothingSelected(pl("wybierz zestaw"));
     stemBox.setColour(juce::ComboBox::backgroundColourId, colours::panel);
     stemBox.onChange = [this] {
         if (stemBox.getSelectedId() > 0)
             processor.selectStemTarget(stemBox.getText());
     };
-    addChildComponent(stemBox);
     styleButton(newStemsButton, pl("Nowy zestaw"));
     styleButton(loadStemsButton, pl("Wczytaj stemy..."));
     styleButton(removeStemsButton, pl("Usuń ostatnią"));
@@ -186,8 +143,6 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     newStemsButton.onClick = [this] { askForNewStemTarget(); };
     loadStemsButton.onClick = [this] { chooseStems(); };
     removeStemsButton.onClick = [this] { processor.removeLastStemProfile(); };
-    for (auto* c : std::initializer_list<juce::Component*> { &newStemsButton, &loadStemsButton, &removeStemsButton })
-        addChildComponent(c);
     refreshStemTargets();
     // Items: 1 = detect, then 2.. the 24 keys around the Camelot wheel (1A, 1B, 2A, ...).
     keyBox.addItem(pl("Tonacja: wykryj"), 1);
@@ -205,21 +160,18 @@ BrainEditor::BrainEditor(BrainProcessor& p)
         if (keyBox.getSelectedId() > 0)
             processor.setKeyOverride(keyBox.getSelectedId() - 2);
     };
-    addChildComponent(keyBox);
     styleButton(redetectKeyButton, pl("Wykryj od nowa"));
     redetectKeyButton.setTooltip(pl("Zapomina tonację usłyszaną do tej pory (np. po zmianie utworu w projekcie) i słucha mastera od nowa."));
     redetectKeyButton.onClick = [this] {
         processor.restartKeyDetection();
         processor.setKeyOverride(-1);
     };
-    addChildComponent(redetectKeyButton);
     for (auto* button : { &dropSectionButton, &breakSectionButton })
     {
         button->setClickingTogglesState(true);
         button->setRadioGroupId(4712);
         button->setColour(juce::TextButton::buttonColourId, colours::panel);
         button->setColour(juce::TextButton::buttonOnColourId, colours::accent.withAlpha(0.6f));
-        addChildComponent(button);
     }
     dropSectionButton.setButtonText("Drop");
     breakSectionButton.setButtonText("Break");
@@ -227,23 +179,17 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     dropSectionButton.setToggleState(true, juce::dontSendNotification);
     dropSectionButton.onClick = [this] { showBreak = false; };
     breakSectionButton.onClick = [this] { showBreak = true; };
-    verdictViewButton.setButtonText(pl("Werdykt"));
-    verdictViewButton.onClick = [this] { showView(View::verdict); };
     verdictView.onSelect = [this](std::uint64_t owner) { select(owner == selected ? 0 : owner); };
     verdictViewport.setViewedComponent(&verdictView, false);
     verdictViewport.setScrollBarsShown(true, false);
-    addChildComponent(verdictViewport);
-    addChildComponent(translationView);
 
     styleLabel(previewLabel, pl("Odsłuch"), colours::quiet);
     previewLabel.setJustificationType(juce::Justification::centredRight);
-    addAndMakeVisible(previewLabel);
     previewBox.addItemList(BrainProcessor::systemNames(), 1);
     previewBox.setColour(juce::ComboBox::backgroundColourId, colours::panel);
     previewBox.setSelectedId(processor.previewSystemIndex() + 1, juce::dontSendNotification);
     previewBox.setTooltip(pl("Posłuchaj miksu tak, jak zagra na innym systemie. Pomiary dalej widzą prawdziwy miks."));
     previewBox.onChange = [this] { processor.setPreviewSystem(previewBox.getSelectedId() - 1); };
-    addAndMakeVisible(previewBox);
 
     targetBox.setTextWhenNothingSelected(pl("wybierz cel"));
     targetBox.setColour(juce::ComboBox::backgroundColourId, colours::panel);
@@ -251,7 +197,6 @@ BrainEditor::BrainEditor(BrainProcessor& p)
         if (targetBox.getSelectedId() > 0)
             processor.selectTarget(targetBox.getText());
     };
-    addChildComponent(targetBox);
     styleButton(newTargetButton, pl("Nowy cel"));
     styleButton(captureButton, pl("Nagraj referencję"));
     styleButton(removeReferenceButton, pl("Usuń ostatnią"));
@@ -264,18 +209,66 @@ BrainEditor::BrainEditor(BrainProcessor& p)
         timerCallback();
     };
     removeReferenceButton.onClick = [this] { processor.removeLastReference(); };
-    addChildComponent(tonalView);
     refreshTargets();
-    channelsViewButton.setToggleState(true, juce::dontSendNotification);
-    showView(View::channels);
 
     table.onSelect = [this](std::uint64_t owner) { select(owner); };
     issues.onSelect = [this](std::uint64_t owner) { select(owner == selected ? 0 : owner); };
-    for (auto* view : std::initializer_list<juce::Component*> { &report, &table, &overlay, &issues })
-        addAndMakeVisible(view);
+    reportViewport.setViewedComponent(&report, false);
+    reportViewport.setScrollBarsShown(true, false);
+
+    // One fixed-size window: the header, the meters and the proposal's buttons stay, the rest sits on tabs.
+    for (auto* c : std::initializer_list<juce::Component*> {
+             &title, &previewLabel, &previewBox, &agentsLabel, &masteringReportButton, &resetButton, &integratedLabel,
+             &integratedValue, &shortTermLabel, &shortTermValue, &truePeakLabel, &truePeakValue, &plrLabel, &plrValue,
+             &lowCorrelationLabel, &lowCorrelationValue, &fullCorrelationLabel, &fullCorrelationValue, &ceilingLabel,
+             &ceilingSlider, &targetLabel, &targetSlider, &tabs, &wholeMixButton, &proposeButton, &applyButton, &undoButton,
+             &compareButton, &proposalStatus, &adaptiveButton })
+        addAndMakeVisible(c);
+    const auto page = [this](Tab tab, const juce::String& name, const juce::String& tooltip,
+                             std::initializer_list<juce::Component*> children, std::function<void(juce::Rectangle<int>)> layout) {
+        auto& target = pages[static_cast<size_t>(tab)];
+        for (auto* c : children)
+            target.addAndMakeVisible(c);
+        target.layout = std::move(layout);
+        tabs.add(name, target, tooltip);
+    };
+    const auto fill = [](juce::Component& c) { return [&c](juce::Rectangle<int> area) { c.setBounds(area.reduced(10)); }; };
+    page(Tab::report, pl("Raport"), pl("Raport poprawności: co jest w porządku, a co trzeba poprawić."), { &reportViewport },
+         [this](juce::Rectangle<int> area) {
+             reportViewport.setBounds(area.reduced(10));
+             layoutReport();
+         });
+    page(Tab::channels, pl("Kanały"), {}, { &table, &overlayLabel, &profilesButton, &overlay },
+         [this](auto area) { layoutChannels(area); });
+    page(Tab::collisions, pl("Kolizje"), pl("Kto kogo zasłania i co już z tym robi."), { &issuesLabel, &issues },
+         [this](juce::Rectangle<int> area) {
+             area.reduce(10, 10);
+             issuesLabel.setBounds(area.removeFromTop(20));
+             area.removeFromTop(4);
+             issues.setBounds(area);
+         });
+    page(Tab::proposal, pl("Propozycja"), pl("Zmiany z „Zaproponuj” i „Ustaw cały miks”. Odznacz to, czego nie chcesz."),
+         { &proposalViewport }, [this](juce::Rectangle<int> area) {
+             proposalViewport.setBounds(area.reduced(10));
+             layoutProposal();
+         });
+    page(Tab::verdict, pl("Werdykt"), pl("Co „Ustaw cały miks” ustawił na każdym kanale i dlaczego."), { &verdictViewport },
+         fill(verdictViewport));
+    page(Tab::tonal, pl("Balans tonalny"), pl("Balans tonalny sumy wobec celu z referencji."),
+         { &targetBox, &newTargetButton, &captureButton, &removeReferenceButton, &tonalView }, [this](auto area) { layoutTonal(area); });
+    page(Tab::stems, pl("Referencje"), pl("Perkusja, bas, wokal i reszta wobec stemów referencji, drop do dropu: poziom, barwa, szerokość."),
+         { &stemBox, &newStemsButton, &loadStemsButton, &removeStemsButton, &keyBox, &redetectKeyButton, &dropSectionButton,
+           &breakSectionButton, &stemView },
+         [this](auto area) { layoutStems(area); });
+    page(Tab::translation, pl("Translacja"), pl("Jak miks zagra na telefonie, laptopie, słuchawkach, w aucie i w klubie."),
+         { &translationView }, fill(translationView));
+    page(Tab::stereo, "Stereo", pl("Faza w pasmach sumy, jak Correlometer: na dole przeciwfaza. Kropki: zaznaczony kanał."),
+         { &stereoView }, fill(stereoView));
+    tabs.setCurrentTabIndex(juce::jlimit(0, tabs.getNumTabs() - 1, processor.editorTab), false);
+    tabs.onChange = [this](int index) { processor.editorTab = index; };
 
     processor.setEditorOpen(true);
-    setSize(1120, 920);
+    setSize(kWidth, kHeight);
     startTimerHz(10);
 }
 
@@ -285,24 +278,6 @@ BrainEditor::~BrainEditor()
     if (processor.isComparing())
         processor.setComparing(false);
     processor.setEditorOpen(false);
-}
-
-void BrainEditor::showView(View view)
-{
-    currentView = view;
-    const bool tonal = view == View::tonal;
-    overlay.setVisible(view == View::channels);
-    profilesButton.setVisible(view == View::channels);
-    translationView.setVisible(view == View::translation);
-    verdictViewport.setVisible(view == View::verdict);
-    stereoView.setVisible(view == View::stereo);
-    for (auto* c : std::initializer_list<juce::Component*> { &stemView, &stemBox, &newStemsButton, &loadStemsButton, &removeStemsButton,
-                                                             &keyBox, &redetectKeyButton, &dropSectionButton, &breakSectionButton })
-        c->setVisible(view == View::stems);
-    overlayLabel.setVisible(false);
-    for (auto* c : std::initializer_list<juce::Component*> { &tonalView, &targetBox, &newTargetButton, &captureButton, &removeReferenceButton })
-        c->setVisible(tonal);
-    resized();
 }
 
 void BrainEditor::refreshTargets()
@@ -405,6 +380,7 @@ void BrainEditor::timerCallback()
 
     agentsLabel.setText(pl("Agenci: ") + juce::String(static_cast<int>(mix.channels.size())), juce::dontSendNotification);
     report.setItems(mix.report);
+    layoutReport();
     table.setChannels(mix.channels, selected);
 
     std::array<double, ma::SpectrumAnalyzer::kMaxBands> bands {}, centres {};
@@ -588,111 +564,96 @@ void BrainEditor::resized()
     header.removeFromRight(6);
     previewLabel.setBounds(header.removeFromRight(70));
     title.setBounds(header);
-    area.removeFromTop(10);
+    area.removeFromTop(8);
 
-    auto left = area.removeFromLeft(310);
-    area.removeFromLeft(14);
-
-    const auto row = [&left](juce::Label& label, juce::Label& value) {
-        auto r = left.removeFromTop(22);
-        label.setBounds(r.removeFromLeft(170));
-        value.setBounds(r);
-    };
-    row(integratedLabel, integratedValue);
-    row(shortTermLabel, shortTermValue);
-    row(truePeakLabel, truePeakValue);
-    row(plrLabel, plrValue);
-    row(lowCorrelationLabel, lowCorrelationValue);
-    row(fullCorrelationLabel, fullCorrelationValue);
-    left.removeFromTop(4);
-    auto ceilingRow = left.removeFromTop(26);
-    ceilingLabel.setBounds(ceilingRow.removeFromLeft(100));
-    ceilingSlider.setBounds(ceilingRow);
-    auto targetRow = left.removeFromTop(26);
-    targetLabel.setBounds(targetRow.removeFromLeft(100));
-    targetSlider.setBounds(targetRow);
-    left.removeFromTop(10);
-    reportLabel.setBounds(left.removeFromTop(22));
-    left.removeFromTop(4);
-    report.setBounds(left);
-
-    channelsLabel.setBounds(area.removeFromTop(22));
-    area.removeFromTop(4);
-    table.setBounds(area.removeFromTop(190));
-    area.removeFromTop(10);
-    auto overlayHeader = area.removeFromTop(24);
-    channelsViewButton.setBounds(overlayHeader.removeFromLeft(90));
-    overlayHeader.removeFromLeft(4);
-    tonalViewButton.setBounds(overlayHeader.removeFromLeft(110));
-    overlayHeader.removeFromLeft(4);
-    translationViewButton.setBounds(overlayHeader.removeFromLeft(100));
-    overlayHeader.removeFromLeft(4);
-    stereoViewButton.setBounds(overlayHeader.removeFromLeft(70));
-    overlayHeader.removeFromLeft(4);
-    stemsViewButton.setBounds(overlayHeader.removeFromLeft(95));
-    overlayHeader.removeFromLeft(4);
-    verdictViewButton.setBounds(overlayHeader.removeFromLeft(90));
-    profilesButton.setBounds(overlayHeader.removeFromRight(170));
-    overlayLabel.setBounds({});
-    area.removeFromTop(4);
-    auto viewArea = area.removeFromTop(250);
-    overlay.setBounds(viewArea);
-    translationView.setBounds(viewArea);
-    verdictViewport.setBounds(viewArea);
-    stereoView.setBounds(viewArea);
-    if (tonalView.isVisible())
+    // Meters in two rows of four columns; the two right columns are wider for the sliders.
+    const int narrow = 210, wide = (area.getWidth() - 2 * narrow - 3 * 24) / 2;
+    using Cell = std::pair<juce::Component*, juce::Component*>;
+    const std::array<std::array<Cell, 4>, 2> cells { {
+        { { { &integratedLabel, &integratedValue }, { &shortTermLabel, &shortTermValue }, { &truePeakLabel, &truePeakValue },
+            { &plrLabel, &plrValue } } },
+        { { { &lowCorrelationLabel, &lowCorrelationValue }, { &fullCorrelationLabel, &fullCorrelationValue },
+            { &ceilingLabel, &ceilingSlider }, { &targetLabel, &targetSlider } } },
+    } };
+    for (const auto& line : cells)
     {
-        auto controls = viewArea.removeFromTop(26);
-        targetBox.setBounds(controls.removeFromLeft(170));
-        controls.removeFromLeft(6);
-        newTargetButton.setBounds(controls.removeFromLeft(90));
-        controls.removeFromLeft(6);
-        captureButton.setBounds(controls.removeFromLeft(150));
-        controls.removeFromLeft(6);
-        removeReferenceButton.setBounds(controls.removeFromLeft(110));
-        viewArea.removeFromTop(4);
-        tonalView.setBounds(viewArea);
+        auto row = area.removeFromTop(26);
+        for (size_t i = 0; i < line.size(); ++i)
+        {
+            auto cell = row.removeFromLeft(i < 2 ? narrow : wide);
+            row.removeFromLeft(24);
+            line[i].first->setBounds(cell.removeFromLeft(i < 2 ? 140 : 110));
+            line[i].second->setBounds(cell);
+        }
     }
-    if (stemView.isVisible())
-    {
-        auto controls = viewArea.removeFromTop(26);
-        stemBox.setBounds(controls.removeFromLeft(170));
-        controls.removeFromLeft(6);
-        newStemsButton.setBounds(controls.removeFromLeft(110));
-        controls.removeFromLeft(6);
-        loadStemsButton.setBounds(controls.removeFromLeft(140));
-        controls.removeFromLeft(6);
-        removeStemsButton.setBounds(controls.removeFromLeft(110));
-        viewArea.removeFromTop(4);
-        auto keyRow = viewArea.removeFromTop(26);
-        keyBox.setBounds(keyRow.removeFromLeft(220));
-        keyRow.removeFromLeft(6);
-        redetectKeyButton.setBounds(keyRow.removeFromLeft(130));
-        breakSectionButton.setBounds(keyRow.removeFromRight(70));
-        dropSectionButton.setBounds(keyRow.removeFromRight(70));
-        viewArea.removeFromTop(4);
-        stemView.setBounds(viewArea);
-    }
-    area.removeFromTop(10);
-    issuesLabel.setBounds(area.removeFromTop(22));
-    area.removeFromTop(4);
-    issues.setBounds(area.removeFromTop(110));
+    area.removeFromTop(8);
 
-    area.removeFromTop(10);
-    auto proposalHeader = area.removeFromTop(26);
-    proposalLabel.setBounds(proposalHeader.removeFromLeft(140));
+    auto actions = area.removeFromBottom(28);
     for (auto* button : { &wholeMixButton, &proposeButton, &applyButton, &undoButton, &compareButton })
     {
-        button->setBounds(proposalHeader.removeFromLeft(button == &applyButton || button == &wholeMixButton ? 140 : 95));
-        proposalHeader.removeFromLeft(6);
+        button->setBounds(actions.removeFromLeft(button == &applyButton || button == &wholeMixButton ? 150 : 100));
+        actions.removeFromLeft(6);
     }
-    area.removeFromTop(4);
-    auto statusRow = area.removeFromTop(22);
-    adaptiveButton.setBounds(statusRow.removeFromRight(150));
-    proposalStatus.setBounds(statusRow);
+    adaptiveButton.setBounds(actions.removeFromRight(150));
+    proposalStatus.setBounds(actions.withTrimmedLeft(6));
+    area.removeFromBottom(8);
+    tabs.setBounds(area);
+}
+
+void BrainEditor::layoutChannels(juce::Rectangle<int> area)
+{
+    area.reduce(10, 10);
+    table.setBounds(area.removeFromTop(190));
+    area.removeFromTop(8);
+    auto row = area.removeFromTop(22);
+    profilesButton.setBounds(row.removeFromRight(170));
+    overlayLabel.setBounds(row);
     area.removeFromTop(2);
-    proposalViewport.setBounds(area);
-    layoutProposal();
+    overlay.setBounds(area);
+}
+
+void BrainEditor::layoutTonal(juce::Rectangle<int> area)
+{
+    area.reduce(10, 10);
+    auto controls = area.removeFromTop(26);
+    targetBox.setBounds(controls.removeFromLeft(200));
+    controls.removeFromLeft(6);
+    newTargetButton.setBounds(controls.removeFromLeft(100));
+    controls.removeFromLeft(6);
+    captureButton.setBounds(controls.removeFromLeft(160));
+    controls.removeFromLeft(6);
+    removeReferenceButton.setBounds(controls.removeFromLeft(120));
+    area.removeFromTop(6);
+    tonalView.setBounds(area);
+}
+
+void BrainEditor::layoutStems(juce::Rectangle<int> area)
+{
+    area.reduce(10, 10);
+    auto controls = area.removeFromTop(26);
+    stemBox.setBounds(controls.removeFromLeft(200));
+    controls.removeFromLeft(6);
+    newStemsButton.setBounds(controls.removeFromLeft(110));
+    controls.removeFromLeft(6);
+    loadStemsButton.setBounds(controls.removeFromLeft(140));
+    controls.removeFromLeft(6);
+    removeStemsButton.setBounds(controls.removeFromLeft(110));
+    area.removeFromTop(4);
+    auto keyRow = area.removeFromTop(26);
+    keyBox.setBounds(keyRow.removeFromLeft(200));
+    keyRow.removeFromLeft(6);
+    redetectKeyButton.setBounds(keyRow.removeFromLeft(130));
+    breakSectionButton.setBounds(keyRow.removeFromRight(70));
+    dropSectionButton.setBounds(keyRow.removeFromRight(70));
+    area.removeFromTop(6);
+    stemView.setBounds(area);
+}
+
+void BrainEditor::layoutReport()
+{
+    const int width = reportViewport.getMaximumVisibleWidth();
+    report.setSize(width, 10);
+    report.setSize(width, std::max(reportViewport.getHeight(), report.contentHeight()));
 }
 
 void BrainEditor::layoutProposal()

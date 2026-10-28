@@ -15,6 +15,8 @@ public:
     void paint(juce::Graphics&) override;
     void resized() override;
 
+    static constexpr int kWidth = 1120, kHeight = 680;
+
 private:
     void timerCallback() override;
     void select(std::uint64_t owner);
@@ -26,11 +28,10 @@ private:
     juce::Label integratedLabel, integratedValue, shortTermLabel, shortTermValue;
     juce::Label truePeakLabel, truePeakValue, plrLabel, plrValue;
     juce::Label lowCorrelationLabel, lowCorrelationValue, fullCorrelationLabel, fullCorrelationValue;
-    juce::Label ceilingLabel, reportLabel, channelsLabel, overlayLabel, issuesLabel;
+    juce::Label ceilingLabel, overlayLabel, issuesLabel;
     juce::Slider ceilingSlider;
     juce::TextButton resetButton;
     juce::ToggleButton profilesButton;
-    juce::TextButton channelsViewButton, tonalViewButton, translationViewButton, stereoViewButton, stemsViewButton, verdictViewButton;
     ma::ui::CoherenceView stereoView;
     brain::VerdictView verdictView;
     juce::Viewport verdictViewport;
@@ -56,15 +57,12 @@ private:
     void refreshStemTargets();
     void askForNewStemTarget();
     void chooseStems();
-    enum class View { channels, tonal, translation, stereo, stems, verdict };
-    void showView(View view);
-    View currentView = View::channels;
     void refreshTargets();
     void askForNewTarget();
     std::unique_ptr<juce::AlertWindow> nameDialog;
     juce::String shownTarget;
 
-    juce::Label proposalLabel, proposalStatus;
+    juce::Label proposalStatus;
     juce::TextButton proposeButton, wholeMixButton, applyButton, undoButton, compareButton;
     juce::ToggleButton adaptiveButton;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> adaptiveAttachment;
@@ -73,6 +71,8 @@ private:
     void layoutProposal();
 
     brain::ReportView report;
+    juce::Viewport reportViewport;
+    void layoutReport();
     brain::ChannelTable table;
     brain::OverlayView overlay;
     brain::IssuesView issues;
@@ -85,6 +85,14 @@ private:
     juce::TextButton masteringReportButton;
     std::unique_ptr<juce::FileChooser> reportChooser;
     void saveMasteringReport();
+
+    // Fixed window: the meters and the proposal's buttons stay, everything else is one tab at a time.
+    enum class Tab { report, channels, collisions, proposal, verdict, tonal, stems, translation, stereo, count };
+    std::array<ma::ui::Page, static_cast<size_t>(Tab::count)> pages;
+    ma::ui::Tabs tabs;
+    void layoutChannels(juce::Rectangle<int> area);
+    void layoutTonal(juce::Rectangle<int> area);
+    void layoutStems(juce::Rectangle<int> area);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(BrainEditor)
 };

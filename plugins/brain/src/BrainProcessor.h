@@ -223,6 +223,7 @@ public:
     void setUseLearnedProfiles(bool shouldUse);
     // While an editor is open the Agents are asked to keep their live spectra running.
     void setEditorOpen(bool open) { editorOpen = open; }
+    int editorTab = 0; // the editor's last tab, so reopening the window shows it again (message thread only)
     // A collision the Agents already deal with still shows in the averaged spectra: the duck
     // works only while the kick hits, and the solver's cut stops at its limit.
     enum class IssueHandling
