@@ -91,6 +91,13 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   30 ms, 1/16 release, 3 dB on P95; vocals 2:1, 10 ms, 1/8, 2 dB; music 2:1, 30 ms, 1/4, 1.5 dB; none when the crest says the
   sources arrive squashed. On apply a bus keeps its trim; its thresholds move with its sources' gain and `Command::inputShiftDb`
   shifts its published learned levels (persisted, reset by Learn, restored by undo), so a second plan is idempotent.
+  Phase 16 intro and build: `StemSection` {intro, build, breakdown}; `StemProfile::section()`, `StemTarget::contrast()`,
+  `stemSectionTarget`. The profiler finds drop entries (first drop block after >= 4 s without one, moved back 1.5 s for the
+  short-term loudness's lag): build = the 8 s before each entry outside the drop (>= 4 s total), intro = before the first entry
+  minus its build (>= 8 s); the break now only counts after the first entry and may overlap a build. File lines `intro`/`build`
+  plus `i`/`u`-prefixed `group`/`mid`/`side` (like `break`/`b...`). The Brain bins every update by the host's song position
+  (`songBins`, 1 s, position minus 0.5 s) and in `updateSongSections` finds the first drop as the first 4 s run of bins at the
+  drop's level (minus 1.5 s), so a later louder drop does not move it; `MixSnapshot::sections` holds all three. Report/view/HTML only.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

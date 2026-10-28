@@ -28,6 +28,39 @@ constexpr double kBreakRangeDb = 20.0;      // the rest still plays: within this
 constexpr int kDrumsSmoothBlocks = 10;      // +-1 s, so the gaps between kicks do not count
 constexpr double kExtraGroupDb = -25.0; // a group the references lack must be at least this loud to be named
 constexpr double kContrastToleranceDb = 1.5;
+// Phase 16: sections around the drop. A drop comes in after at least 4 s without one; the
+// short-term loudness (3 s) finds it about 1.5 s late, so the entry is moved back by that.
+constexpr int kEntryGapBlocks = 40;
+constexpr int kLoudnessLagBlocks = 15;
+constexpr int kBuildBlocks = 80;            // the build: the last 8 s before a drop
+constexpr double kMinimumBuildSeconds = 4.0;
+constexpr double kSectionRangeDb = 30.0;    // playing at all: within this of the drop
+
+// File format: the section's line and the first letter of its group / spectrum lines.
+const char* sectionKey(StemSection s)
+{
+    return s == StemSection::intro ? "intro" : s == StemSection::build ? "build" : "break";
+}
+char sectionPrefix(StemSection s)
+{
+    return s == StemSection::intro ? 'i' : s == StemSection::build ? 'u' : 'b';
+}
+// The section a line kind names: its key ("break") with what = 0, or one of its group /
+// spectrum lines ("bgroup", "bmid", "bside") with what = 1; -1 = none.
+int sectionOfKind(const std::string& kind, int what)
+{
+    for (int s = 0; s < kStemSections; ++s)
+    {
+        const auto section = static_cast<StemSection>(s);
+        if (what == 0 && kind == sectionKey(section))
+            return s;
+        if (what == 1 && kind.size() > 1 && kind[0] == sectionPrefix(section)
+            && (kind.compare(1, std::string::npos, "group") == 0 || kind.compare(1, std::string::npos, "mid") == 0
+                || kind.compare(1, std::string::npos, "side") == 0))
+            return s;
+    }
+    return -1;
+}
 
 constexpr std::array<double, kStemRegions + 1> kRegionEdges { 30.0, 90.0, 250.0, 700.0, 2000.0, 5500.0, 16000.0 };
 
@@ -414,16 +447,22 @@ void StemProfiler::prepare(double rate, bool haveFullMix)
     loudness.clear();
     drums.clear();
     drop.clear();
-    breakdown.clear();
-    for (auto* set : { &groups, &breakGroups })
-        for (auto& g : *set)
+    for (auto& g : groups)
+    {
+        g.prepare(rate);
+        g.reset();
+    }
+    for (auto& set : sectionGroups)
+        for (auto& g : set)
         {
             g.prepare(rate);
             g.reset();
         }
+    for (auto& s : sections)
+        s.clear();
     seen = {};
-    breakSeen = {};
-    breakBlocks = 0;
+    sectionSeen = {};
+    sectionBlocks = {};
     sum.prepare(rate, BandScale::erb);
     sum.reset();
     mix.prepare(rate, BandScale::erb);
@@ -468,11 +507,54 @@ void StemProfiler::chooseDrop()
             break;
     }
 
-    // The break: the drums gone (smoothed over two seconds, so the gaps between kicks do not
-    // count), the rest still playing.
-    breakdown.assign(loudness.size(), 0);
-    breakBlocks = 0;
-    if (drums.empty() || dropBlocks == 0)
+    for (auto& s : sections)
+        s.assign(loudness.size(), 0);
+    sectionBlocks = {};
+    if (dropBlocks == 0)
+        return;
+    double dropLoudness = 0.0;
+    for (size_t i = 0; i < drop.size(); ++i)
+        dropLoudness += drop[i] != 0 ? loudness[i] : 0.0;
+    dropLoudness /= dropBlocks;
+    auto playing = [&](size_t i) { return std::isfinite(loudness[i]) && loudness[i] >= dropLoudness - kSectionRangeDb; };
+    auto keep = [&](StemSection section, double minimumSeconds) {
+        auto& mask = sections[static_cast<size_t>(section)];
+        int count = 0;
+        for (char m : mask)
+            count += m;
+        if (count * blockSeconds < minimumSeconds)
+        {
+            std::fill(mask.begin(), mask.end(), 0);
+            count = 0;
+        }
+        sectionBlocks[static_cast<size_t>(section)] = count;
+    };
+
+    // Phase 16: where the drops come in, the build before each, the intro before the first.
+    std::vector<size_t> entries;
+    long lastDrop = -1000000;
+    for (size_t i = 0; i < drop.size(); ++i)
+        if (drop[i] != 0)
+        {
+            if (static_cast<long>(i) - lastDrop > kEntryGapBlocks)
+                entries.push_back(i > static_cast<size_t>(kLoudnessLagBlocks) ? i - kLoudnessLagBlocks : 0);
+            lastDrop = static_cast<long>(i);
+        }
+    auto& build = sections[static_cast<size_t>(StemSection::build)];
+    for (size_t entry : entries)
+        for (size_t i = entry > static_cast<size_t>(kBuildBlocks) ? entry - kBuildBlocks : 0; i < entry; ++i)
+            build[i] = drop[i] == 0 && playing(i) ? 1 : 0;
+    keep(StemSection::build, kMinimumBuildSeconds);
+    const size_t firstEntry = entries.empty() ? 0 : entries.front();
+    auto& intro = sections[static_cast<size_t>(StemSection::intro)];
+    for (size_t i = 0; i < firstEntry; ++i)
+        intro[i] = drop[i] == 0 && build[i] == 0 && playing(i) ? 1 : 0;
+    keep(StemSection::intro, kMinimumDropSeconds);
+
+    // The break: after the first drop, the drums gone (smoothed over two seconds, so the gaps
+    // between kicks do not count), the rest still playing. Defined by what plays, so it may
+    // hold a build too (the end of a breakdown rising into the drop).
+    if (drums.empty())
         return;
     drums.resize(loudness.size(), 0.0);
     std::vector<double> smooth(drums.size(), 0.0);
@@ -485,28 +567,21 @@ void StemProfiler::chooseDrop()
             sum += drums[j];
         smooth[i] = sum / static_cast<double>(to - from + 1);
     }
-    double dropDrums = 0.0, dropLoudness = 0.0;
+    double dropDrums = 0.0;
     for (size_t i = 0; i < drop.size(); ++i)
         if (drop[i] != 0)
-        {
             dropDrums += smooth[i];
-            dropLoudness += loudness[i];
-        }
     dropDrums /= dropBlocks;
-    dropLoudness /= dropBlocks;
     if (dropDrums <= 0.0)
         return;
     const double quietDrums = dropDrums * std::pow(10.0, -kBreakDrumsBelowDb / 10.0);
-    for (size_t i = 0; i < loudness.size(); ++i)
-    {
-        breakdown[i] = drop[i] == 0 && std::isfinite(loudness[i]) && loudness[i] >= dropLoudness - kBreakRangeDb && smooth[i] <= quietDrums ? 1 : 0;
-        breakBlocks += breakdown[i];
-    }
-    if (breakBlocks * blockSeconds < kMinimumDropSeconds)
-    {
-        std::fill(breakdown.begin(), breakdown.end(), 0);
-        breakBlocks = 0;
-    }
+    auto& breakdown = sections[static_cast<size_t>(StemSection::breakdown)];
+    for (size_t i = firstEntry; i < loudness.size(); ++i)
+        breakdown[i] = drop[i] == 0 && std::isfinite(loudness[i]) && loudness[i] >= dropLoudness - kBreakRangeDb
+                               && smooth[i] <= quietDrums
+                           ? 1
+                           : 0;
+    keep(StemSection::breakdown, kMinimumDropSeconds);
 }
 
 void StemProfiler::measureDrums(const float* left, const float* right, int numSamples)
@@ -520,9 +595,20 @@ void StemProfiler::measureDrums(const float* left, const float* right, int numSa
         drums.back() = numSamples > 0 ? power / numSamples : 0.0;
 }
 
-bool StemProfiler::inBreak(int blockIndex) const
+bool StemProfiler::inSection(StemSection section, int blockIndex) const
 {
-    return blockIndex >= 0 && blockIndex < static_cast<int>(breakdown.size()) && breakdown[static_cast<size_t>(blockIndex)] != 0;
+    const auto& mask = sections[static_cast<size_t>(section)];
+    return blockIndex >= 0 && blockIndex < static_cast<int>(mask.size()) && mask[static_cast<size_t>(blockIndex)] != 0;
+}
+
+bool StemProfiler::needed(int blockIndex) const
+{
+    if (inDrop(blockIndex))
+        return true;
+    for (int s = 0; s < kStemSections; ++s)
+        if (inSection(static_cast<StemSection>(s), blockIndex))
+            return true;
+    return false;
 }
 
 bool StemProfiler::inDrop(int blockIndex) const
@@ -534,8 +620,10 @@ void StemProfiler::analyseBlock(int blockIndex, const std::array<const float*, k
                                 const std::array<const float*, kStemGroups>& right, const float* mixLeft,
                                 const float* mixRight, int numSamples)
 {
-    if (inBreak(blockIndex))
+    for (int s = 0; s < kStemSections; ++s)
     {
+        if (!inSection(static_cast<StemSection>(s), blockIndex))
+            continue;
         numSamples = std::min(numSamples, block);
         for (int g = 0; g < kStemGroups; ++g)
         {
@@ -543,8 +631,8 @@ void StemProfiler::analyseBlock(int blockIndex, const std::array<const float*, k
             if (l == nullptr)
                 continue;
             const float* r = right[static_cast<size_t>(g)] != nullptr ? right[static_cast<size_t>(g)] : l;
-            breakGroups[static_cast<size_t>(g)].process(l, r, numSamples);
-            breakSeen[static_cast<size_t>(g)] = true;
+            sectionGroups[static_cast<size_t>(s)][static_cast<size_t>(g)].process(l, r, numSamples);
+            sectionSeen[static_cast<size_t>(s)][static_cast<size_t>(g)] = true;
         }
         return;
     }
@@ -586,20 +674,23 @@ StemProfile StemProfiler::finish(const std::string& name) const
     profile.measure = measureBands(profile.groupDb, profile.sideDb);
     profile.hasBands = true;
 
-    if (breakBlocks > 0)
+    for (int s = 0; s < kStemSections; ++s)
     {
-        auto& b = profile.breakdown;
-        readAnalysers(breakGroups, breakSeen, b.groupDb, b.sideDb);
+        const auto at = static_cast<size_t>(s);
+        if (sectionBlocks[at] == 0)
+            continue;
+        auto& b = profile.section(static_cast<StemSection>(s));
+        readAnalysers(sectionGroups[at], sectionSeen[at], b.groupDb, b.sideDb);
         b.measure = measureBands(b.groupDb, b.sideDb);
         b.valid = b.measure.valid;
-        b.seconds = breakBlocks * static_cast<double>(block) / sampleRate;
-        double dropLoudness = 0.0, breakLoudness = 0.0;
+        b.seconds = sectionBlocks[at] * static_cast<double>(block) / sampleRate;
+        double dropLoudness = 0.0, sectionLoudness = 0.0;
         for (size_t i = 0; i < loudness.size(); ++i)
         {
             dropLoudness += drop[i] != 0 ? loudness[i] : 0.0;
-            breakLoudness += breakdown[i] != 0 ? loudness[i] : 0.0;
+            sectionLoudness += sections[at][i] != 0 ? loudness[i] : 0.0;
         }
-        b.belowDropDb = dropLoudness / std::max(1, dropBlocks) - breakLoudness / breakBlocks;
+        b.belowDropDb = dropLoudness / std::max(1, dropBlocks) - sectionLoudness / sectionBlocks[at];
     }
     const auto key = keys.estimate();
     if (key.confident)
@@ -657,11 +748,15 @@ void StemTarget::rebuild()
         for (int r = 0; r < kStemRegions; ++r)
             shape[static_cast<size_t>(g)][static_cast<size_t>(r)] = corridorOf(shapes[static_cast<size_t>(r)], shapeTolerance(r));
     }
-    std::vector<double> contrasts;
-    for (const auto& p : profiles)
-        if (p.breakdown.valid)
-            contrasts.push_back(p.breakdown.belowDropDb);
-    breakContrast = corridorOf(contrasts, kContrastToleranceDb);
+    for (int s = 0; s < kStemSections; ++s)
+    {
+        std::vector<double> contrasts;
+        for (const auto& p : profiles)
+            if (p.section(static_cast<StemSection>(s)).valid)
+                contrasts.push_back(p.section(static_cast<StemSection>(s)).belowDropDb);
+        const auto corridor = corridorOf(contrasts, kContrastToleranceDb);
+        (s == 0 ? introContrast : s == 1 ? buildContrast : breakContrast) = corridor;
+    }
 }
 
 std::string serialiseStemTarget(const StemTarget& target)
@@ -685,18 +780,23 @@ std::string serialiseStemTarget(const StemTarget& target)
                 }
         for (int g = 0; g < kStemGroups; ++g)
             writeGroupLine(out, "group", g, p.measure.groups[static_cast<size_t>(g)]);
-        if (p.breakdown.valid)
+        for (int s = 0; s < kStemSections; ++s)
         {
-            out << "break " << number(p.breakdown.seconds) << " " << number(p.breakdown.belowDropDb) << "\n";
+            const auto section = static_cast<StemSection>(s);
+            const auto& b = p.section(section);
+            if (!b.valid)
+                continue;
+            const std::string prefix(1, sectionPrefix(section));
+            out << sectionKey(section) << " " << number(b.seconds) << " " << number(b.belowDropDb) << "\n";
             for (int g = 0; g < kStemGroups; ++g)
-                writeGroupLine(out, "bgroup", g, p.breakdown.measure.groups[static_cast<size_t>(g)]);
+                writeGroupLine(out, (prefix + "group").c_str(), g, b.measure.groups[static_cast<size_t>(g)]);
             for (int g = 0; g < kStemGroups; ++g)
                 for (int which = 0; which < 2; ++which)
                 {
-                    const auto& db = (which == 0 ? p.breakdown.groupDb : p.breakdown.sideDb)[static_cast<size_t>(g)];
-                    out << (which == 0 ? "bmid " : "bside ") << stemGroupKey(static_cast<StemGroup>(g));
-                    for (int b = 0; b < numBands(); ++b)
-                        out << " " << number(std::max(kAbsentDb, db[static_cast<size_t>(b)]), 2);
+                    const auto& db = (which == 0 ? b.groupDb : b.sideDb)[static_cast<size_t>(g)];
+                    out << prefix << (which == 0 ? "mid " : "side ") << stemGroupKey(static_cast<StemGroup>(g));
+                    for (int band = 0; band < numBands(); ++band)
+                        out << " " << number(std::max(kAbsentDb, db[static_cast<size_t>(band)]), 2);
                     out << "\n";
                 }
         }
@@ -744,10 +844,23 @@ bool parseStemTarget(const std::string& text, StemTarget& target)
             parsed.profiles.back().key = { tonic, minor != 0 };
             parsed.profiles.back().keyCorrelation = correlation;
         }
-        else if (kind == "mid" || kind == "side" || kind == "bmid" || kind == "bside")
+        else if (kind == "mid" || kind == "side" || kind == "group" || sectionOfKind(kind, 1) >= 0)
         {
             if (parsed.profiles.empty())
                 return false;
+            auto& p = parsed.profiles.back();
+            // "mid", "side", "group" for the drop; with a section's letter in front for that section.
+            const int s = kind == "mid" || kind == "side" || kind == "group" ? -1 : sectionOfKind(kind, 1);
+            const std::string rest = s < 0 ? kind : kind.substr(1);
+            StemProfile::Section* section = s < 0 ? nullptr : &p.section(static_cast<StemSection>(s));
+            if (section != nullptr && !section->valid)
+                return false;
+            if (rest == "group")
+            {
+                if (!readGroupLine(words, section != nullptr ? section->measure : p.measure))
+                    return false;
+                continue;
+            }
             std::string key;
             words >> key;
             int g = -1;
@@ -756,11 +869,8 @@ bool parseStemTarget(const std::string& text, StemTarget& target)
                     g = k;
             if (g < 0)
                 return false;
-            auto& p = parsed.profiles.back();
-            const bool inBreak = kind[0] == 'b';
-            if (inBreak && !p.breakdown.valid)
-                return false;
-            auto& set = kind == "mid" ? p.groupDb : kind == "side" ? p.sideDb : kind == "bmid" ? p.breakdown.groupDb : p.breakdown.sideDb;
+            const bool mid = rest == "mid";
+            auto& set = section != nullptr ? (mid ? section->groupDb : section->sideDb) : (mid ? p.groupDb : p.sideDb);
             auto& db = set[static_cast<size_t>(g)];
             for (int b = 0; b < numBands(); ++b)
             {
@@ -768,22 +878,14 @@ bool parseStemTarget(const std::string& text, StemTarget& target)
                 if (words.fail())
                     return false;
             }
-            if (!inBreak)
+            if (section == nullptr)
                 p.hasBands = true;
         }
-        else if (kind == "group" || kind == "bgroup")
+        else if (sectionOfKind(kind, 0) >= 0)
         {
             if (parsed.profiles.empty())
                 return false;
-            auto& p = parsed.profiles.back();
-            if (!readGroupLine(words, kind == "group" ? p.measure : p.breakdown.measure))
-                return false;
-        }
-        else if (kind == "break")
-        {
-            if (parsed.profiles.empty())
-                return false;
-            auto& b = parsed.profiles.back().breakdown;
+            auto& b = parsed.profiles.back().section(static_cast<StemSection>(sectionOfKind(kind, 0)));
             words >> b.seconds >> b.belowDropDb;
             if (words.fail())
                 return false;
@@ -817,11 +919,13 @@ StemTarget keyedStemTarget(const StemTarget& target, MusicalKey trackKey)
             continue;
         for (int g = 0; g < kStemGroups; ++g)
             if (stemGroupHasKey(g))
-                for (auto* set : { &p.groupDb, &p.sideDb, &p.breakdown.groupDb, &p.breakdown.sideDb })
+                for (auto* set : { &p.groupDb, &p.sideDb, &p.breakdown.groupDb, &p.breakdown.sideDb, &p.intro.groupDb,
+                                   &p.intro.sideDb, &p.build.groupDb, &p.build.sideDb })
                     (*set)[static_cast<size_t>(g)] = shiftErbSpectrum((*set)[static_cast<size_t>(g)], shift);
         p.measure = measureBands(p.groupDb, p.sideDb);
-        if (p.breakdown.valid)
-            p.breakdown.measure = measureBands(p.breakdown.groupDb, p.breakdown.sideDb);
+        for (auto* section : { &p.breakdown, &p.intro, &p.build })
+            if (section->valid)
+                section->measure = measureBands(section->groupDb, section->sideDb);
         p.shiftSemitones = shift;
         moved = true;
     }
@@ -832,20 +936,30 @@ StemTarget keyedStemTarget(const StemTarget& target, MusicalKey trackKey)
 
 StemTarget stemBreakTarget(const StemTarget& target)
 {
+    return stemSectionTarget(target, StemSection::breakdown);
+}
+
+StemTarget stemSectionTarget(const StemTarget& target, StemSection section)
+{
     StemTarget out;
     out.name = target.name;
     for (const auto& p : target.profiles)
     {
-        if (!p.breakdown.valid)
+        const auto& from = p.section(section);
+        if (!from.valid)
             continue;
         StemProfile b = p;
-        b.measure = p.breakdown.measure;
-        b.groupDb = p.breakdown.groupDb;
-        b.sideDb = p.breakdown.sideDb;
-        b.dropSeconds = p.breakdown.seconds;
+        b.measure = from.measure;
+        b.groupDb = from.groupDb;
+        b.sideDb = from.sideDb;
+        b.dropSeconds = from.seconds;
         out.profiles.push_back(b);
     }
     out.rebuild();
+    // The contrasts stay those of the full set: each section against its own drop.
+    out.introContrast = target.introContrast;
+    out.buildContrast = target.buildContrast;
+    out.breakContrast = target.breakContrast;
     return out;
 }
 

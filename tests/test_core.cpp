@@ -2173,6 +2173,103 @@ void testStemBreak()
     check(!anyBreak, "no drums stem, no break");
 }
 
+// Phase 16: intro (drums alone), build (no drums, the music rising), drop, break, build, drop.
+void testStemSections()
+{
+    constexpr double sr = 48000.0, pi = 3.14159265358979323846;
+    const int total = static_cast<int>(80.0 * sr);
+    std::array<std::vector<float>, 4> stems;
+    for (auto& v : stems)
+        v.assign(static_cast<size_t>(total), 0.0f);
+    auto dropAt = [](double t) { return (t >= 24.0 && t < 40.0) || t >= 64.0; };
+    for (int i = 0; i < total; ++i)
+    {
+        const double t = i / sr;
+        const bool intro = t < 16.0, drop = dropAt(t);
+        const bool build = (t >= 16.0 && t < 24.0) || (t >= 56.0 && t < 64.0);
+        const double beat = std::fmod(t, 0.5);
+        const auto at = static_cast<size_t>(i);
+        const double kick = beat < 0.15 ? 0.6 * std::exp(-beat * 25.0) * std::sin(2 * pi * 55.0 * beat) : 0.0;
+        if (intro || drop)
+            stems[0][at] = static_cast<float>(intro ? 0.5 * kick : kick);
+        if (drop)
+            stems[1][at] = static_cast<float>(0.25 * std::sin(2 * pi * 55.0 * t));
+        if (!intro)
+            stems[2][at] = static_cast<float>((drop ? 0.08 : 0.04) * std::sin(2 * pi * 440.0 * t) + 0.02 * std::sin(2 * pi * 2600.0 * t));
+        const double rise = build ? 0.03 + 0.07 * std::fmod(t, 8.0) / 8.0 : drop ? 0.1 : 0.04;
+        if (!intro)
+            stems[3][at] = static_cast<float>(rise * (std::sin(2 * pi * 330.0 * t) + std::sin(2 * pi * 1800.0 * t)));
+    }
+    ma::StemProfiler profiler;
+    profiler.prepare(sr, false);
+    const int n = profiler.blockLength();
+    std::vector<float> sum(static_cast<size_t>(n));
+    for (int start = 0; start < total; start += n)
+    {
+        const int len = std::min(n, total - start);
+        for (int i = 0; i < len; ++i)
+        {
+            const auto at = static_cast<size_t>(start + i);
+            sum[static_cast<size_t>(i)] = stems[0][at] + stems[1][at] + stems[2][at] + stems[3][at];
+        }
+        profiler.measureBlock(sum.data(), sum.data(), len);
+        profiler.measureDrums(stems[0].data() + start, stems[0].data() + start, len);
+    }
+    profiler.chooseDrop();
+    int index = 0, buildInDrop = 0, introAfter = 0;
+    for (int start = 0; start < total; start += n, ++index)
+    {
+        const double t = static_cast<double>(start) / sr;
+        buildInDrop += profiler.inSection(ma::StemSection::build, index) && dropAt(t) ? 1 : 0;
+        introAfter += profiler.inSection(ma::StemSection::intro, index) && t >= 16.0 ? 1 : 0;
+        if (!profiler.needed(index))
+            continue;
+        std::array<const float*, 4> l {};
+        for (size_t g = 0; g < 4; ++g)
+            l[g] = stems[g].data() + start;
+        profiler.analyseBlock(index, l, l, nullptr, nullptr, std::min(n, total - start));
+    }
+    const auto profile = profiler.finish("sections");
+    const auto& intro = profile.intro;
+    const auto& build = profile.build;
+    std::printf("      build drums %d %.1f dB, music %.1f dB\n", int(build.measure.groups[0].present), build.measure.groups[0].levelDb, build.measure.groups[3].levelDb);
+    std::printf("      intro %.1f s %.1f dB under the drop, build %.1f s %.1f dB under, break %.1f s (blocks: build in a drop %d, intro after 16 s %d)\n",
+                intro.seconds, intro.belowDropDb, build.seconds, build.belowDropDb, profile.breakdown.seconds, buildInDrop, introAfter);
+    check(intro.valid && intro.seconds > 10.0 && intro.seconds <= 16.5 && introAfter == 0, "the intro is what plays before the first drop's build");
+    check(intro.measure.groups[0].present && !intro.measure.groups[1].present && !intro.measure.groups[3].present,
+          "the intro: drums alone, as played");
+    check(intro.belowDropDb > 3.0, "and quieter than the drop");
+    check(build.valid && build.seconds > 10.0 && build.seconds <= 16.5 && buildInDrop == 0, "the builds: the last 8 s before each drop, never in it");
+    check((!build.measure.groups[0].present || build.measure.groups[0].levelDb < -15.0) && build.measure.groups[3].present,
+          "the build: (next to) no drums, the music rising");
+    check(profile.breakdown.valid, "the break is still found");
+
+    ma::StemTarget set;
+    set.name = "sections";
+    set.profiles.push_back(profile);
+    set.rebuild();
+    check(set.introContrast.valid && set.buildContrast.valid, "the set knows how much quieter its intros and builds are");
+    const auto intros = ma::stemSectionTarget(set, ma::StemSection::intro);
+    check(intros.profiles.size() == 1 && intros.level[0].valid && !intros.level[1].valid, "the intros compare as a set of their own");
+    ma::StemTarget reread;
+    check(ma::parseStemTarget(ma::serialiseStemTarget(set), reread) && reread.profiles[0].intro.valid && reread.profiles[0].build.valid
+              && std::abs(reread.profiles[0].build.belowDropDb - build.belowDropDb) < 0.01
+              && std::abs(ma::stemSectionTarget(reread, ma::StemSection::build).level[3].centre
+                          - ma::stemSectionTarget(set, ma::StemSection::build).level[3].centre) < 0.01,
+          "intro and build are saved with the set");
+    // A set saved before phase 16 still reads (no intro, no build).
+    {
+        auto old = set;
+        old.profiles[0].intro = {};
+        old.profiles[0].build = {};
+        ma::StemTarget back;
+        check(ma::parseStemTarget(ma::serialiseStemTarget(old), back) && !back.profiles[0].intro.valid && back.profiles[0].breakdown.valid,
+              "older sets read without them");
+    }
+    const auto keyed = ma::keyedStemTarget(set, { 3, true });
+    check(keyed.profiles[0].build.valid && keyed.profiles[0].intro.valid, "moving to another key keeps the sections");
+}
+
 int main()
 {
     testLoudness();
@@ -2206,6 +2303,7 @@ int main()
     testSaturationPlan();
     testKickTuning();
     testBusGlue();
+    testStemSections();
     testMasterPreview();
     testWavRoundTrip();
 

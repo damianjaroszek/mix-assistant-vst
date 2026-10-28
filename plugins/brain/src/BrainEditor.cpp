@@ -166,19 +166,25 @@ BrainEditor::BrainEditor(BrainProcessor& p)
         processor.restartKeyDetection();
         processor.setKeyOverride(-1);
     };
-    for (auto* button : { &dropSectionButton, &breakSectionButton })
+    for (auto* button : { &introSectionButton, &buildSectionButton, &dropSectionButton, &breakSectionButton })
     {
         button->setClickingTogglesState(true);
         button->setRadioGroupId(4712);
         button->setColour(juce::TextButton::buttonColourId, colours::panel);
         button->setColour(juce::TextButton::buttonOnColourId, colours::accent.withAlpha(0.6f));
     }
+    introSectionButton.setButtonText("Intro");
+    buildSectionButton.setButtonText("Build");
     dropSectionButton.setButtonText("Drop");
     breakSectionButton.setButtonText("Break");
+    introSectionButton.setTooltip(pl("Intro: to, co gra przed pierwszym dropem (bez buildu). Mózg zna je z pozycji w utworze."));
+    buildSectionButton.setTooltip(pl("Build: ostatnie 8 s przed dropem. Porównuje proporcje i to, o ile build jest cichszy od dropu."));
     breakSectionButton.setTooltip(pl("Break: część bez stopy. Porównuje proporcje w breaku i to, o ile jest cichszy od dropu."));
     dropSectionButton.setToggleState(true, juce::dontSendNotification);
-    dropSectionButton.onClick = [this] { showBreak = false; };
-    breakSectionButton.onClick = [this] { showBreak = true; };
+    introSectionButton.onClick = [this] { shownSection = static_cast<int>(ma::StemSection::intro); };
+    buildSectionButton.onClick = [this] { shownSection = static_cast<int>(ma::StemSection::build); };
+    dropSectionButton.onClick = [this] { shownSection = -1; };
+    breakSectionButton.onClick = [this] { shownSection = static_cast<int>(ma::StemSection::breakdown); };
     verdictView.onSelect = [this](std::uint64_t owner) { select(owner == selected ? 0 : owner); };
     verdictViewport.setViewedComponent(&verdictView, false);
     verdictViewport.setScrollBarsShown(true, false);
@@ -257,8 +263,8 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     page(Tab::tonal, pl("Balans tonalny"), pl("Balans tonalny sumy wobec celu z referencji."),
          { &targetBox, &newTargetButton, &captureButton, &removeReferenceButton, &tonalView }, [this](auto area) { layoutTonal(area); });
     page(Tab::stems, pl("Referencje"), pl("Perkusja, bas, wokal i reszta wobec stemów referencji, drop do dropu: poziom, barwa, szerokość."),
-         { &stemBox, &newStemsButton, &loadStemsButton, &removeStemsButton, &keyBox, &redetectKeyButton, &dropSectionButton,
-           &breakSectionButton, &stemView },
+         { &stemBox, &newStemsButton, &loadStemsButton, &removeStemsButton, &keyBox, &redetectKeyButton, &introSectionButton,
+           &buildSectionButton, &dropSectionButton, &breakSectionButton, &stemView },
          [this](auto area) { layoutStems(area); });
     page(Tab::translation, pl("Translacja"), pl("Jak miks zagra na telefonie, laptopie, słuchawkach, w aucie i w klubie."),
          { &translationView }, fill(translationView));
@@ -440,29 +446,36 @@ void BrainEditor::timerCallback()
     juce::String keyStatus;
     bool keyWarning = false;
     updateKeyControls(keyStatus, keyWarning);
-    if (showBreak)
+    if (shownSection >= 0)
     {
-        const auto& breaks = processor.stemBreakTarget();
+        const auto section = static_cast<ma::StemSection>(shownSection);
+        const auto& target = processor.stemSectionTarget(section);
+        const auto& ours = mix.section(section);
+        const auto text = BrainProcessor::sectionText(section);
+        const auto name = text.name.substring(0, 1).toUpperCase() + text.name.substring(1);
+        static constexpr const char* missing[] = { "Żadna referencja w zestawie nie ma intro (co najmniej 8 s przed pierwszym dropem).",
+                                                   "Żadna referencja w zestawie nie ma buildu (co najmniej 4 s przed dropem).",
+                                                   "Żadna referencja w zestawie nie ma breaku (części bez perkusji, co najmniej 8 s)." };
         if (!stems.valid())
         {
             // the drop's status already says what is missing
         }
-        else if (!breaks.valid())
-            stemStatus = pl("Żadna referencja w zestawie nie ma breaku (części bez perkusji, co najmniej 8 s).");
-        else if (!mix.breakStems.valid)
-            stemStatus = pl("Break: puść część bez stopy po dropie: ") + juce::String(juce::roundToInt(mix.breakSeconds)) + " / "
-                         + juce::String(juce::roundToInt(BrainProcessor::kMinimumDropSeconds)) + " s";
+        else if (!target.valid())
+            stemStatus = pl(missing[shownSection]);
+        else if (!ours.stems.valid)
+            stemStatus = text.waiting + " " + juce::String(juce::roundToInt(ours.seconds)) + " / "
+                         + juce::String(juce::roundToInt(section == ma::StemSection::build ? 4.0 : BrainProcessor::kMinimumDropSeconds)) + " s";
         else
         {
-            const auto& contrast = breaks.breakContrast;
-            stemStatus = pl("Break miksu: ") + juce::String(juce::roundToInt(mix.breakSeconds)) + pl(" s, ") + juce::String(mix.breakBelowDropDb, 1)
+            const auto& contrast = target.contrast(section);
+            stemStatus = name + pl(" miksu: ") + juce::String(juce::roundToInt(ours.seconds)) + pl(" s, ") + juce::String(ours.belowDropDb, 1)
                          + pl(" dB ciszej niż drop") + (contrast.valid ? pl(" (referencje ") + juce::String(contrast.low, 1) + pl("–")
                                                                               + juce::String(contrast.high, 1) + " dB)"
                                                                         : juce::String())
                          + ".";
-            stemWarning = contrast.valid && std::abs(contrast.outside(mix.breakBelowDropDb)) >= 1.0;
+            stemWarning = contrast.valid && std::abs(contrast.outside(ours.belowDropDb)) >= 1.0;
         }
-        stemView.setData(breaks, mix.breakStems, stemStatus, stemWarning, keyStatus, keyWarning);
+        stemView.setData(target, ours.stems, stemStatus, stemWarning, keyStatus, keyWarning);
     }
     else
         stemView.setData(stems, mix.stems, stemStatus, stemWarning, keyStatus, keyWarning);
@@ -643,8 +656,10 @@ void BrainEditor::layoutStems(juce::Rectangle<int> area)
     keyBox.setBounds(keyRow.removeFromLeft(200));
     keyRow.removeFromLeft(6);
     redetectKeyButton.setBounds(keyRow.removeFromLeft(130));
-    breakSectionButton.setBounds(keyRow.removeFromRight(70));
-    dropSectionButton.setBounds(keyRow.removeFromRight(70));
+    breakSectionButton.setBounds(keyRow.removeFromRight(64));
+    dropSectionButton.setBounds(keyRow.removeFromRight(64));
+    buildSectionButton.setBounds(keyRow.removeFromRight(64));
+    introSectionButton.setBounds(keyRow.removeFromRight(64));
     area.removeFromTop(6);
     stemView.setBounds(area);
 }
