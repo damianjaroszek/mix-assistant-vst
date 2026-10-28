@@ -235,8 +235,11 @@ struct StemLevelPlan
     std::array<double, kStemGroups> before {}, after {}; // level against the sum
     bool any = false;
 };
+// Phase 17: `fixed` groups (a sketch's ghosts) count in the sum but do not move, and the
+// loudness kept is that of the others.
 StemLevelPlan planStemLevels(const std::array<SpectrumAnalyzer::Bands, kStemGroups>& groupDb,
-                             const std::array<bool, kStemGroups>& present, const StemTarget& target);
+                             const std::array<bool, kStemGroups>& present, const StemTarget& target,
+                             const std::array<bool, kStemGroups>* fixed = nullptr);
 
 // For the solver: our channels grouped, measured over the drop (pre Brain EQ, like its input).
 struct StemShapeInput
@@ -248,6 +251,9 @@ struct StemShapeInput
     // Per solver channel: no boost in a region centred below this (the cleanup's high-pass
     // took that range out on purpose); 0 = anywhere.
     std::vector<double> lowestBoostHz;
+    // Phase 17: a group's region the arrangement leaves empty (no channel of the group plays
+    // there): a part to add, not a shape to EQ.
+    std::array<std::array<bool, kStemRegions>, kStemGroups> arrangementHole {};
 };
 
 } // namespace ma

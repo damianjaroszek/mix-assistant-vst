@@ -29,6 +29,9 @@ struct SolverChannel
     SpectrumAnalyzer::Bands rawDb {}; // ERB bands, dBFS, after trim, before the Brain's EQ
     int priority = 5;
     bool valid = false;
+    // Phase 17: a part the arrangement does not have yet (sketch mode). It counts in collisions
+    // and the tonal balance, so the mix leaves it room, but never gets a change itself.
+    bool ghost = false;
 };
 
 struct SolverOptions
@@ -43,6 +46,7 @@ struct SolverOptions
     const StemShapeInput* stems = nullptr;
     double maxStemBoostDb = 3.0;
     double maxStemCutDb = 4.0;
+    double maxGhostCutDb = 3.0; // deepest cut that makes room for a ghost
 };
 
 struct SolverChange

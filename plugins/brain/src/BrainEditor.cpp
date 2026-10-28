@@ -72,6 +72,14 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     profilesButton.setToggleState(processor.usesLearnedProfiles(), juce::dontSendNotification);
     profilesButton.onClick = [this] { processor.setUseLearnedProfiles(profilesButton.getToggleState()); };
 
+    sketchButton.setButtonText(pl("Tryb szkicu: brakujące partie jako duchy"));
+    sketchButton.setTooltip(pl("Gdy dropowi brakuje partii, które mają referencje (albo typowy drop house'u), Mózg wstawia za nie "
+                               "partie-duchy: balans tonalny, proporcje i kolizje liczy z nimi, a „Ustaw cały miks” zostawia im miejsce "
+                               "i nie łata EQ-em dziur aranżu. Wyłączony: miks oceniany tak, jak gra."));
+    sketchButton.setColour(juce::ToggleButton::textColourId, colours::text);
+    sketchButton.setToggleState(processor.sketchMode(), juce::dontSendNotification);
+    sketchButton.onClick = [this] { processor.setSketchMode(sketchButton.getToggleState()); };
+
     styleLabel(proposalStatus, {}, colours::quiet, 13.0f);
 
     const auto styleButton = [](juce::TextButton& button, const juce::String& text) {
@@ -266,6 +274,13 @@ BrainEditor::BrainEditor(BrainProcessor& p)
          { &stemBox, &newStemsButton, &loadStemsButton, &removeStemsButton, &keyBox, &redetectKeyButton, &introSectionButton,
            &buildSectionButton, &dropSectionButton, &breakSectionButton, &stemView },
          [this](auto area) { layoutStems(area); });
+    page(Tab::arrangement, pl("Aranż"), pl("Tryb szkicu: czego dropowi brakuje względem referencji i co dograć."),
+         { &sketchButton, &arrangementView }, [this](juce::Rectangle<int> area) {
+             area.reduce(10, 10);
+             sketchButton.setBounds(area.removeFromTop(24).removeFromLeft(420));
+             area.removeFromTop(6);
+             arrangementView.setBounds(area);
+         });
     page(Tab::translation, pl("Translacja"), pl("Jak miks zagra na telefonie, laptopie, słuchawkach, w aucie i w klubie."),
          { &translationView }, fill(translationView));
     page(Tab::stereo, "Stereo", pl("Faza w pasmach sumy, jak Correlometer: na dole przeciwfaza. Kropki: zaznaczony kanał."),
@@ -353,6 +368,14 @@ void BrainEditor::askForNewTarget()
     }));
 }
 
+namespace
+{
+juce::String stemsNameFor(const BrainProcessor& processor)
+{
+    return juce::String::fromUTF8(processor.stemTarget().name.c_str());
+}
+} // namespace
+
 void BrainEditor::select(std::uint64_t owner)
 {
     selected = owner;
@@ -417,7 +440,36 @@ void BrainEditor::timerCallback()
     else
         tonalStatus = pl("Cel „") + targetName + "\" (" + juce::String(static_cast<int>(target.references.size()))
                       + pl(" ref.), miks z ") + juce::String(juce::roundToInt(processor.secondsAnalysed())) + " s";
-    tonalView.setData(target, mix.tonal, tonalStatus);
+    if (mix.sketch.active() && mix.sketch.tonal.valid)
+        tonalStatus += pl(". Przerywana: z partiami-duchami, szare: dziury aranżu (nie EQ)");
+    tonalView.setData(target, mix.tonal, tonalStatus, mix.sketch.active() ? mix.sketch.tonal : ma::TonalComparison {},
+                      mix.sketch.arrangementRegion);
+    {
+        juce::String status;
+        juce::StringArray briefs;
+        const auto source = mix.sketch.arrangement.fromReferences ? pl("drop referencji „") + stemsNameFor(processor) + pl("”")
+                                                                   : pl("typowy drop house'u (wczytaj stemy referencji, żeby porównać z nimi)");
+        if (!processor.sketchMode())
+            status = pl("Tryb szkicu wyłączony: miks oceniany tak, jak gra.");
+        else if (mix.dropSeconds < BrainProcessor::kMinimumDropSeconds)
+            status = pl("Puść drop: sprawdzę, czy ma wszystkie partie. ") + juce::String(juce::roundToInt(mix.dropSeconds)) + " / "
+                     + juce::String(juce::roundToInt(BrainProcessor::kMinimumDropSeconds)) + " s";
+        else if (!mix.sketch.active())
+            status = pl("Drop ma wszystkie partie, które ma ") + source + ".";
+        else
+        {
+            status = pl("Szkic. Porównanie: ") + source + pl(". Duchy liczą się w balansie, proporcjach i kolizjach, nie dostają zmian.");
+            for (const auto& ghost : mix.sketch.analysis.ghosts)
+                briefs.add(pl("• ") + processor.ghostBrief(ghost));
+            for (const auto& collision : mix.sketch.collisions)
+                if (collision.ghost < mix.sketch.analysis.ghosts.size())
+                    briefs.add(pl("Zasłoni: ") + mix.channels[collision.masker].name + pl(" → ")
+                               + BrainProcessor::ghostName(mix.sketch.analysis.ghosts[collision.ghost]) + " ("
+                               + juce::String(juce::roundToInt(collision.score * 100.0)) + pl("%). „Ustaw cały miks” zrobi miejsce."));
+        }
+        arrangementView.setData(mix.sketch, status, briefs);
+        sketchButton.setToggleState(processor.sketchMode(), juce::dontSendNotification);
+    }
 
     const auto& stems = processor.stemTarget();
     const auto stemsName = juce::String::fromUTF8(stems.name.c_str());

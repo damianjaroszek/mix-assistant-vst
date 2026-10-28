@@ -98,6 +98,14 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   plus `i`/`u`-prefixed `group`/`mid`/`side` (like `break`/`b...`). The Brain bins every update by the host's song position
   (`songBins`, 1 s, position minus 0.5 s) and in `updateSongSections` finds the first drop as the first 4 s run of bins at the
   drop's level (minus 1.5 s), so a later louder drop does not move it; `MixSnapshot::sections` holds all three. Report/view/HTML only.
+  Phase 17 sketch mode (`ma/Sketch.h`): `arrangementFromStems` (each group's drop spectrum relative to the whole, averaged over
+  profiles, at the level corridor's centre; expected = most profiles have it) or `typicalArrangement` (house shapes, no vocal);
+  `analyseSketch` anchors it to the groups that play and makes ghosts: a whole missing group, or a region of a present group none
+  of its channels carries (within 10 dB of its own loudest region) that is >= 6 dB (9 typical) short and not `cutOnPurpose`.
+  The Brain (`updateSketch`, drop only, `sketchOn` saved as `sketchMode`) adds them to the tonal comparison (`addGhosts`,
+  `arrangementRegions` = plain regions the ghosts explain), to stem levels (`addGhostGroups`; `planStemLevels` `fixed`), to the
+  solver (`SolverChannel::ghost`: never cut, cuts making room for one capped at 3 dB, tonal excess left alone when ghosts carry
+  >= 30%; `StemShapeInput::arrangementHole` skipped) and to collisions; report "Aranż", tab "Aranż", advisory proposal items.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 
