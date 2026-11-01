@@ -603,15 +603,28 @@ void BrainProcessor::timerCallback()
     buildReport();
 }
 
-ma::SolverResult BrainProcessor::solveNow(double headroomGainDb, const ma::StemShapeInput* stems) const
+ma::SolverResult BrainProcessor::solveNow(double headroomGainDb, const ma::StemShapeInput* stems,
+                                          const std::array<double, ma::kStemGroups>* groupGain) const
 {
     std::vector<ma::SolverChannel> channels(mix.channels.size());
     for (size_t c = 0; c < mix.channels.size(); ++c)
     {
-        channels[c].valid = mix.channels[c].spectrumValid && inMixSums(mix.channels[c]);
-        channels[c].priority = mix.channels[c].data.priority;
+        const auto& channel = mix.channels[c];
+        channels[c].valid = channel.spectrumValid && inMixSums(channel);
+        channels[c].priority = channel.data.priority;
         for (int b = 0; b < ma::bus::kBands; ++b)
-            channels[c].rawDb[static_cast<size_t>(b)] = mix.channels[c].bandsDb[static_cast<size_t>(b)];
+        {
+            channels[c].rawDb[static_cast<size_t>(b)] = channel.bandsDb[static_cast<size_t>(b)];
+            channels[c].nowDb[static_cast<size_t>(b)] = channel.measuredDb[static_cast<size_t>(b)];
+        }
+        // Phase 18: what the master carries now and what this proposal moves, so the tonal stage
+        // neither redoes what is applied nor corrects twice what a level move already does.
+        channels[c].hasNow = true;
+        if (channel.data.eqBypass == 0)
+            for (int b = 0; b < ma::kEqBands; ++b)
+                channels[c].currentEq[static_cast<size_t>(b)] = channel.data.eq[b];
+        const int group = groupOfChannel(channel);
+        channels[c].gainDb = groupGain != nullptr && group >= 0 ? (*groupGain)[static_cast<size_t>(group)] : 0.0;
     }
     // Phase 17: the ghosts after the channels, so the indices of the channels stay.
     if (mix.sketch.active())
@@ -630,6 +643,11 @@ ma::SolverResult BrainProcessor::solveNow(double headroomGainDb, const ma::StemS
         options.tonal = &mix.sketch.tonal; // holes the ghosts fill are the arrangement's, not the EQ's
     else if (mix.tonal.valid)
         options.tonal = &mix.tonal;
+    if (mix.tonal.valid)
+    {
+        options.tonalTarget = &currentTarget;
+        options.tonalMasterDb = mix.sketch.active() ? ma::addGhosts(averageSpectrum(), mix.sketch.analysis) : averageSpectrum();
+    }
     options.stems = stems;
     return ma::solve(channels, options);
 }
@@ -787,6 +805,7 @@ void BrainProcessor::collectChannels(ma::bus::Region& region, std::uint64_t now)
                            + alpha * (level - previous->rawDb[static_cast<size_t>(b)]);
         }
         applyCleanup(channel, channel.data.cleanup);
+        channel.measuredDb = channel.heardDb;
 
         // What the Agent actually sends on, smoothed like the rest.
         channel.outputValid = !useProfiles && channel.data.liveValid != 0
@@ -1925,7 +1944,7 @@ juce::String BrainProcessor::describeIssue(const ma::MaskingIssue& issue) const
     return text;
 }
 
-void BrainProcessor::propose()
+void BrainProcessor::propose(const std::array<double, ma::kStemGroups>* groupGain)
 {
     currentProposal = {};
     currentProposal.made = true;
@@ -1933,7 +1952,8 @@ void BrainProcessor::propose()
     const double peak = truePeakDb();
     const double over = std::isfinite(peak) ? peak - peakCeilingDb() : 0.0;
     const auto stems = stemShapeInput();
-    const auto solved = solveNow(over > 0.0 ? -std::ceil((over + 0.5) * 2.0) / 2.0 : 0.0, stems.target != nullptr ? &stems : nullptr);
+    const auto solved = solveNow(over > 0.0 ? -std::ceil((over + 0.5) * 2.0) / 2.0 : 0.0, stems.target != nullptr ? &stems : nullptr,
+                                 groupGain);
     currentProposal.crowdingBefore = solved.crowdingBefore;
     currentProposal.crowdingAfter = solved.crowdingAfter;
     for (size_t c = 0; c < mix.channels.size(); ++c)
@@ -2175,7 +2195,51 @@ void BrainProcessor::proposeWholeMix()
             masking[c].rawDb[static_cast<size_t>(b)] = mix.channels[c].heardDb[static_cast<size_t>(b)];
     }
     mix.masking = ma::analyseMasking(masking);
-    propose();
+
+    // Phase 9 and 18: the stem groups' levels against the references. Planned before the EQ, so
+    // the solver's tonal stage works on what the level moves leave instead of filling the same
+    // hole twice, then again with the proposed EQ (its cuts and boosts move the groups too).
+    auto planLevels = [&](bool withProposal) {
+        std::vector<ma::EqSettings> eqs;
+        for (const auto& channel : mix.channels)
+        {
+            const auto found = std::find_if(currentProposal.eq.begin(), currentProposal.eq.end(),
+                                            [&](const auto& e) { return e.first == channel.owner; });
+            const bool changes = withProposal && std::any_of(currentProposal.items.begin(), currentProposal.items.end(), [&](const auto& item) {
+                return item.owner == channel.owner && item.action == Proposal::Item::Action::solver;
+            });
+            ma::EqSettings eq {};
+            if (changes && found != currentProposal.eq.end())
+                eq = found->second;
+            else if (channel.data.eqBypass == 0)
+                for (int b = 0; b < ma::kEqBands; ++b)
+                    eq[static_cast<size_t>(b)] = channel.data.eq[b]; // apply keeps what is there
+            eqs.push_back(eq);
+        }
+        std::array<bool, ma::kStemGroups> present {}, ghostOnly {};
+        auto groups = stemGroupDb(true, present, nullptr, &eqs);
+        addGhostGroups(groups, present, ghostOnly);
+        return ma::planStemLevels(groups, present, keyedStems, &ghostOnly);
+    };
+    const bool levelsPlanned = stemsReady();
+    ma::StemLevelPlan levels;
+    std::array<double, ma::kStemGroups> groupGain {};
+    if (levelsPlanned)
+        groupGain = planLevels(false).gainDb;
+    propose(levelsPlanned ? &groupGain : nullptr);
+    if (levelsPlanned)
+    {
+        levels = planLevels(true);
+        double moved = 0.0;
+        for (int g = 0; g < ma::kStemGroups; ++g)
+            moved = std::max(moved, std::abs(levels.gainDb[static_cast<size_t>(g)] - groupGain[static_cast<size_t>(g)]));
+        if (moved > 0.5)
+        {
+            groupGain = levels.gainDb;
+            propose(&groupGain);
+            levels = planLevels(true);
+        }
+    }
 
     const double bpm = tempoBpm();
     std::vector<Proposal::Item> chainItems;
@@ -2329,29 +2393,8 @@ void BrainProcessor::proposeWholeMix()
     }
 
     // Phase 9: each stem group's level against the references, with the planned cleanup.
-    if (stemsReady())
+    if (levelsPlanned)
     {
-        // With the EQ just proposed: its cuts and boosts move the groups' levels too.
-        std::vector<ma::EqSettings> proposedEq;
-        for (const auto& channel : mix.channels)
-        {
-            const auto found = std::find_if(currentProposal.eq.begin(), currentProposal.eq.end(),
-                                            [&](const auto& e) { return e.first == channel.owner; });
-            const bool changes = std::any_of(currentProposal.items.begin(), currentProposal.items.end(), [&](const auto& item) {
-                return item.owner == channel.owner && item.action == Proposal::Item::Action::solver;
-            });
-            ma::EqSettings eq {};
-            if (changes && found != currentProposal.eq.end())
-                eq = found->second;
-            else if (channel.data.eqBypass == 0)
-                for (int b = 0; b < ma::kEqBands; ++b)
-                    eq[static_cast<size_t>(b)] = channel.data.eq[b]; // apply keeps what is there
-            proposedEq.push_back(eq);
-        }
-        std::array<bool, ma::kStemGroups> present {}, ghostOnly {};
-        auto groups = stemGroupDb(true, present, nullptr, &proposedEq);
-        addGhostGroups(groups, present, ghostOnly);
-        const auto levels = ma::planStemLevels(groups, present, keyedStems, &ghostOnly);
         const auto setName = quoted(juce::String::fromUTF8(currentStems.name.c_str()));
         for (int g = 0; g < ma::kStemGroups && levels.any; ++g)
         {

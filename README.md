@@ -85,6 +85,13 @@ dropu, główne pasmo, szerokość i tonację z referencji oraz sekcje, w który
 kompletności decyduje sam drop, więc rzadkie intro to nie szkic. Gdy po „Ustaw cały miks” dojdzie nowy
 kanał, raport przypomni, żeby uruchomić je jeszcze raz. Wyłączony tryb szkicu ocenia miks tak, jak gra.
 
+Jedna korekta na problem (faza 18): balans tonalny w propozycji liczony jest na sumie po całej
+propozycji, a nie na tym, co zmierzono. Uwzględnia EQ, które kanały już mają, cięcia z kolizji i
+referencji ze stemów oraz zmiany poziomów grup z „Ustaw cały miks” (te Mózg planuje teraz przed EQ).
+Dlatego EQ nie dokłada drugi raz tego, co robi już ruch poziomu. Drugie „Zaproponuj” po „Zastosuj” daje
+ten sam EQ, zamiast zdejmować podbicia, które właśnie wypełniły dziurę. Podbicie, które przestrzeliłoby
+na drugą stronę korytarza, jest zmniejszane.
+
 ### Przed masteringiem (Ozone)
 
 „Cel mastera” w Mózgu to głośność, do której Ozone podciągnie master (domyślnie -8 LUFS). Mózg w tle robi

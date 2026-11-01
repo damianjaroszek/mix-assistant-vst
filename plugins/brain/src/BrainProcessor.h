@@ -48,6 +48,8 @@ struct MixSnapshot
         std::array<double, ma::bus::kBands> bandsDb {};
         // ... and with it (what the mix hears).
         std::array<double, ma::bus::kBands> heardDb {};
+        // ... and that as measured, which a planned cleanup does not touch (what the master carries now).
+        std::array<double, ma::bus::kBands> measuredDb {};
         bool spectrumValid = false;
         // Measured after the Agent's whole chain (harmonics and duck included), for translation.
         std::array<double, ma::bus::kBands> outputDb {};
@@ -271,7 +273,7 @@ public:
 
     // Phase 3: propose, apply, undo, compare.
     const Proposal& proposal() const { return currentProposal; }
-    void propose();
+    void propose() { propose(nullptr); }
     // Phase 7: every channel's chain (cleanup, compression, clipper, bass notes) planned with the
     // whole mix in view, then the usual proposal on top of it, plus a verdict per channel.
     void proposeWholeMix();
@@ -378,12 +380,16 @@ private:
     void buildReport();
     void updateLoudnessMatch(std::uint64_t now);
     void sendCommand(std::uint64_t owner, const ma::bus::Command& command);
+    void propose(const std::array<double, ma::kStemGroups>* groupGain);
     void proposeDynamics();
     void proposeHarmonics(); // translation steps and harmonics for tonal holes
     static void applyCleanup(MixSnapshot::Channel& channel, const ma::CleanupSettings& cleanup);
     Proposal::Verdict judge(size_t channel, const ma::ChainPlan& plan, const ma::StereoPlan& stereoPlan) const;
     void adaptStep(std::uint64_t now);
-    ma::SolverResult solveNow(double headroomGainDb, const ma::StemShapeInput* stems = nullptr) const;
+    // `groupGain`: level moves per stem group planned with this proposal (phase 18), so the EQ
+    // works on what they leave.
+    ma::SolverResult solveNow(double headroomGainDb, const ma::StemShapeInput* stems = nullptr,
+                              const std::array<double, ma::kStemGroups>* groupGain = nullptr) const;
     juce::String kickName() const;
     juce::String stereoCulprit(double lowHz, double highHz) const; // phase 8 report // the channel most likely feeding the sidechains
     static juce::File targetFolder();

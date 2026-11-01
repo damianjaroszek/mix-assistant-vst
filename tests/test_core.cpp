@@ -2453,6 +2453,91 @@ void testSketch()
     check(without.before[0] > with.before[0] + 0.5, "sketch: without it every group reads louder against the sum");
 }
 
+// Phase 18: the tonal stage works on the master as the proposal leaves it.
+void testOneCorrection()
+{
+    const int bands = ma::SpectrumAnalyzer::numBandsFor(ma::BandScale::erb);
+    // Kick, bass, a vocal and hats; the target has 7 dB more at 2-4.5 kHz and 9 dB more at 40-120 Hz.
+    std::vector<ma::SolverChannel> channels { solverBand(45.0, 90.0, -14.0, 1), solverBand(40.0, 160.0, -18.0, 2),
+                                              solverBand(300.0, 5000.0, -24.0, 2), solverBand(5000.0, 9000.0, -30.0, 5) };
+    const auto mix = mixOf(channels);
+    ma::Curve reference = mix;
+    for (int b = 0; b < bands; ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        if (hz >= 2000.0 && hz <= 4500.0)
+            reference[static_cast<size_t>(b)] += 7.0;
+        if (hz >= 40.0 && hz <= 120.0)
+            reference[static_cast<size_t>(b)] += 9.0;
+    }
+    ma::TonalTarget target;
+    target.references.push_back(ma::normaliseCurve(reference));
+    target.rebuild();
+
+    auto solveWith = [&](const std::vector<ma::SolverChannel>& in, const ma::Curve& master) {
+        ma::SolverOptions options;
+        options.tonalTarget = &target;
+        options.tonalMasterDb = master;
+        return ma::solve(in, options);
+    };
+    auto boostIn = [](const ma::SolverResult& r, double lowHz, double highHz) {
+        double gain = 0.0;
+        for (const auto& change : r.changes)
+            if (change.kind == ma::SolverChange::Kind::tonalBoost)
+            {
+                const auto& band = r.eq[static_cast<size_t>(change.channel)][static_cast<size_t>(change.eqSlot)];
+                if (band.hz >= lowHz && band.hz <= highHz)
+                    gain += band.gainDb;
+            }
+        return gain;
+    };
+
+    const auto first = solveWith(channels, mix);
+    check(boostIn(first, 1500.0, 5000.0) > 0.0 && boostIn(first, 30.0, 150.0) > 0.0, "one correction: both holes get a boost");
+
+    // Applied: the channels carry the proposal and the master is measured with it. Solving again
+    // keeps the boosts instead of dropping them (the measured master no longer shows the holes).
+    auto applied = channels;
+    for (size_t c = 0; c < applied.size(); ++c)
+        applied[c].currentEq = first.eq[c];
+    ma::Curve heard {};
+    for (int b = 0; b < bands; ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        double p = 0.0;
+        for (size_t c = 0; c < applied.size(); ++c)
+            p += std::pow(10.0, (applied[c].rawDb[static_cast<size_t>(b)] + ma::eqResponseDb(first.eq[c], hz)) / 10.0);
+        heard[static_cast<size_t>(b)] = 10.0 * std::log10(p);
+    }
+    const auto second = solveWith(applied, heard);
+    bool same = true;
+    for (size_t c = 0; c < channels.size(); ++c)
+        for (int k = 0; k < ma::kEqBands; ++k)
+            same = same && std::abs(second.eq[c][static_cast<size_t>(k)].gainDb - first.eq[c][static_cast<size_t>(k)].gainDb) < 0.01f;
+    check(same, "one correction: solving again after applying gives the same EQ");
+    // The old way (the measured comparison alone) would take the boosts back off.
+    const auto heardComparison = ma::compareToTarget(heard, target);
+    ma::SolverOptions old;
+    old.tonal = &heardComparison;
+    check(boostIn(ma::solve(applied, old), 30.0, 5000.0) < boostIn(first, 30.0, 5000.0), "one correction: the measured master alone loses the boosts");
+
+    // A level move planned with the proposal (the bass group louder) fills part of the low hole:
+    // the EQ only works on what is left.
+    auto lowFix = [&](double bassGainDb) {
+        auto in = channels;
+        in[1].gainDb = bassGainDb;
+        const auto r = solveWith(in, mix);
+        double deviation = 0.0;
+        for (const auto& change : r.changes)
+            if (change.kind == ma::SolverChange::Kind::tonalBoost && change.highHz <= 300.0)
+                deviation = change.deviationDb;
+        return std::make_pair(boostIn(r, 30.0, 150.0), deviation);
+    };
+    const auto none = lowFix(0.0), some = lowFix(6.0);
+    check(some.second > none.second + 1.0, "one correction: the low hole left after a +6 dB level move is smaller ("
+              + std::to_string(some.second) + " vs " + std::to_string(none.second) + " dB)");
+}
+
 int main()
 {
     testLoudness();
@@ -2488,6 +2573,7 @@ int main()
     testBusGlue();
     testStemSections();
     testSketch();
+    testOneCorrection();
     testMasterPreview();
     testWavRoundTrip();
 

@@ -27,7 +27,7 @@ std::vector<MaskingChannel> withEq(const std::vector<SolverChannel>& channels, c
         for (int b = 0; b < numBands; ++b)
         {
             const double hz = SpectrumAnalyzer::bandCentreHz(BandScale::erb, b);
-            out[c].rawDb[static_cast<size_t>(b)] = channels[c].rawDb[static_cast<size_t>(b)] + eqResponseDb(eq[c], hz);
+            out[c].rawDb[static_cast<size_t>(b)] = channels[c].rawDb[static_cast<size_t>(b)] + channels[c].gainDb + eqResponseDb(eq[c], hz);
         }
     }
     return out;
@@ -408,7 +408,242 @@ SolverResult solve(const std::vector<SolverChannel>& channels, const SolverOptio
     if (options.stems != nullptr && options.stems->target != nullptr && options.stems->target->valid())
         solveStemShape(channels, options, result);
 
-    if (options.tonal != nullptr && options.tonal->valid)
+    // One tonal region: fill a hole on the most important carrier, take an excess off the least important.
+    auto fixRegion = [&](const TonalRegion& region) {
+        const auto current = withEq(channels, result.eq);
+        std::vector<double> power(channels.size(), 0.0);
+        double total = 0.0;
+        for (size_t c = 0; c < channels.size(); ++c)
+        {
+            if (!channels[c].valid)
+                continue;
+            // Only real content counts: within 30 dB of the channel's own loudest band.
+            const auto& levels = current[c].rawDb;
+            const double peak = *std::max_element(levels.begin(), levels.begin() + SpectrumAnalyzer::numBandsFor(BandScale::erb));
+            double inRegion = -200.0;
+            for (int b = region.firstBand; b <= region.lastBand; ++b)
+                inRegion = std::max(inRegion, levels[static_cast<size_t>(b)]);
+            if (inRegion < peak - kContentRangeDb || inRegion < -100.0)
+                continue;
+            for (int b = region.firstBand; b <= region.lastBand; ++b)
+                power[c] += std::pow(10.0, levels[static_cast<size_t>(b)] / 10.0);
+            total += power[c];
+        }
+
+        double ghostShare = 0.0;
+        for (size_t c = 0; c < channels.size(); ++c)
+            ghostShare += channels[c].ghost && total > 0.0 ? power[c] / total : 0.0;
+        std::vector<int> order;
+        for (size_t c = 0; c < channels.size(); ++c)
+            if (total > 0.0 && !channels[c].ghost && power[c] / total >= (region.hole() ? 0.15 : 0.25))
+                order.push_back(static_cast<int>(c));
+
+        const double centre = std::sqrt(region.lowHz * region.highHz);
+        const double q = qForRange(region.lowHz, region.highHz);
+        SolverChange change;
+        change.lowHz = region.lowHz;
+        change.highHz = region.highHz;
+        change.deviationDb = region.deviationDb;
+
+        if (region.hole())
+        {
+            // Most important channel first: it is the one that should be heard there.
+            std::sort(order.begin(), order.end(), [&](int a, int b) {
+                return channels[static_cast<size_t>(a)].priority != channels[static_cast<size_t>(b)].priority
+                           ? channels[static_cast<size_t>(a)].priority < channels[static_cast<size_t>(b)].priority
+                           : power[static_cast<size_t>(a)] > power[static_cast<size_t>(b)];
+            });
+            const auto before = analyseMasking(current, options.minimumScore);
+            bool filled = false;
+            for (int c : order)
+            {
+                auto& eq = result.eq[static_cast<size_t>(c)];
+                // A free band only: reusing a nearby boost would move it off the region it was set for.
+                int slot = -1;
+                for (int b = 0; b < kEqBands && slot < 0; ++b)
+                    if (!isOn(eq[static_cast<size_t>(b)]))
+                        slot = b;
+                if (slot < 0)
+                    continue;
+                const double share = power[static_cast<size_t>(c)] / total;
+                double gain = roundHalf(std::clamp(gainForShare(share, -region.deviationDb), 1.0, options.maxBoostDb));
+                const auto saved = eq[static_cast<size_t>(slot)];
+
+                for (int attempt = 0; attempt < 2 && !filled; ++attempt, gain = roundHalf(gain / 2.0))
+                {
+                    if (gain < 1.0)
+                        break;
+                    eq[static_cast<size_t>(slot)] = { static_cast<float>(centre), static_cast<float>(gain), static_cast<float>(q) };
+                    const auto after = analyseMasking(withEq(channels, result.eq), options.minimumScore);
+                    bool newCollision = false;
+                    for (size_t k = 0; k < channels.size(); ++k)
+                    {
+                        if (static_cast<int>(k) == c || channels[k].priority > channels[static_cast<size_t>(c)].priority)
+                            continue;
+                        const double was = before.amount[static_cast<size_t>(c)][k];
+                        const double now = after.amount[static_cast<size_t>(c)][k];
+                        newCollision = newCollision || (now >= options.minimumScore && now - was > 0.05);
+                    }
+                    if (!newCollision)
+                    {
+                        filled = true;
+                        change.kind = SolverChange::Kind::tonalBoost;
+                        change.channel = c;
+                        change.eqSlot = slot;
+                        change.gainDb = gain;
+                    }
+                }
+                if (filled)
+                    break;
+                eq[static_cast<size_t>(slot)] = saved;
+            }
+
+            if (!filled)
+            {
+                // Nothing to boost: the octave below is where harmonics would come from.
+                change.kind = SolverChange::Kind::tonalAdvice;
+                double best = 0.0;
+                for (size_t c = 0; c < channels.size(); ++c)
+                {
+                    if (!channels[c].valid || channels[c].ghost)
+                        continue;
+                    double below = 0.0;
+                    for (int b = 0; b < SpectrumAnalyzer::numBandsFor(BandScale::erb); ++b)
+                    {
+                        const double hz = SpectrumAnalyzer::bandCentreHz(BandScale::erb, b);
+                        if (hz >= region.lowHz / 2.0 && hz <= region.highHz / 2.0)
+                            below += std::pow(10.0, current[c].rawDb[static_cast<size_t>(b)] / 10.0);
+                    }
+                    if (below > best)
+                    {
+                        best = below;
+                        change.sourceChannel = static_cast<int>(c);
+                    }
+                }
+            }
+            result.changes.push_back(change);
+        }
+        else if (!order.empty() && ghostShare < 0.3)
+        {
+            // Least important carrier first. (An excess the ghosts carry much of is left alone:
+            // the part that comes may well be played quieter than its stand-in.)
+            std::sort(order.begin(), order.end(), [&](int a, int b) {
+                return channels[static_cast<size_t>(a)].priority != channels[static_cast<size_t>(b)].priority
+                           ? channels[static_cast<size_t>(a)].priority > channels[static_cast<size_t>(b)].priority
+                           : power[static_cast<size_t>(a)] > power[static_cast<size_t>(b)];
+            });
+            const int c = order.front();
+            auto& eq = result.eq[static_cast<size_t>(c)];
+            const int slot = findSlot(eq, centre, false);
+            if (slot < 0)
+                return;
+            const double share = power[static_cast<size_t>(c)] / total;
+            const double gain = roundHalf(std::clamp(gainForShare(share, -region.deviationDb), -options.maxCutDb, -1.0));
+            auto& band = eq[static_cast<size_t>(slot)];
+            if (isOn(band))
+            {
+                // A cut already there (a collision's or a stem group's) that is deep enough is the same correction.
+                if (band.gainDb <= gain + 0.01)
+                    return;
+                band.gainDb = static_cast<float>(gain);
+                band.q = std::min(band.q, static_cast<float>(q));
+            }
+            else
+            {
+                band = { static_cast<float>(centre), static_cast<float>(gain), static_cast<float>(q) };
+            }
+            change.kind = SolverChange::Kind::tonalCut;
+            change.channel = c;
+            change.eqSlot = slot;
+            change.gainDb = band.gainDb;
+            result.changes.push_back(change);
+        }
+    };
+
+    const bool predicting = options.tonalTarget != nullptr && options.tonalTarget->valid();
+    if (predicting)
+    {
+        // The master as this proposal leaves it: the change from each channel's current EQ to the
+        // proposed one, and its planned level move, added to what was measured.
+        const int numBands = SpectrumAnalyzer::numBandsFor(BandScale::erb);
+        auto predict = [&]() {
+            Curve master = options.tonalMasterDb;
+            for (int b = 0; b < numBands; ++b)
+            {
+                const double hz = SpectrumAnalyzer::bandCentreHz(BandScale::erb, b);
+                double before = 0.0, after = 0.0;
+                for (size_t c = 0; c < channels.size(); ++c)
+                {
+                    if (!channels[c].valid)
+                        continue;
+                    const double raw = channels[c].rawDb[static_cast<size_t>(b)];
+                    before += std::pow(10.0, (channels[c].hasNow ? channels[c].nowDb[static_cast<size_t>(b)]
+                                                                 : raw + eqResponseDb(channels[c].currentEq, hz)) / 10.0);
+                    after += std::pow(10.0, (raw + channels[c].gainDb + eqResponseDb(result.eq[c], hz)) / 10.0);
+                }
+                if (before > 1e-20 && after > 1e-20)
+                    master[static_cast<size_t>(b)] += 10.0 * std::log10(after / before);
+            }
+            return compareToTarget(master, *options.tonalTarget);
+        };
+        // Largest region first, measured again after each fix (a bell reaches its neighbours),
+        // each range worked on once.
+        constexpr int kMaxRegions = 4;
+        std::vector<std::pair<double, double>> tried;
+        for (int handled = 0; handled < kMaxRegions; ++handled)
+        {
+            const auto now = predict();
+            const TonalRegion* next = nullptr;
+            for (const auto& region : now.regions)
+            {
+                const bool done = std::any_of(tried.begin(), tried.end(),
+                                              [&](const auto& t) { return region.lowHz < t.second && region.highHz > t.first; });
+                if (!done)
+                {
+                    next = &region;
+                    break;
+                }
+            }
+            if (next == nullptr)
+                break;
+            tried.emplace_back(next->lowHz, next->highHz);
+            const TonalRegion region = *next;
+            const size_t before = result.changes.size();
+            const auto eqBefore = result.eq;
+            fixRegion(region);
+            if (result.changes.size() == before)
+                continue;
+            auto& change = result.changes.back();
+            if (change.kind != SolverChange::Kind::tonalBoost && change.kind != SolverChange::Kind::tonalCut)
+                continue;
+            // Sized from the carrier's share alone, a bell can overshoot to the other side of the
+            // corridor: step it back while it does, and drop it under 1 dB.
+            auto& band = result.eq[static_cast<size_t>(change.channel)][static_cast<size_t>(change.eqSlot)];
+            for (int step = 0; step < 6; ++step)
+            {
+                const auto after = predict();
+                double over = 0.0;
+                for (int b = region.firstBand; b <= region.lastBand; ++b)
+                {
+                    const double d = after.deviationDb[static_cast<size_t>(b)];
+                    over += region.hole() ? std::max(0.0, d) : std::max(0.0, -d);
+                }
+                over /= region.lastBand - region.firstBand + 1;
+                if (over < 0.5)
+                    break;
+                const double smaller = band.gainDb > 0.0f ? band.gainDb - 0.5 : band.gainDb + 0.5;
+                if (std::abs(smaller) < 1.0)
+                {
+                    band = eqBefore[static_cast<size_t>(change.channel)][static_cast<size_t>(change.eqSlot)];
+                    result.changes.pop_back();
+                    break;
+                }
+                band.gainDb = static_cast<float>(smaller);
+                change.gainDb = smaller;
+            }
+        }
+    }
+    else if (options.tonal != nullptr && options.tonal->valid)
     {
         constexpr int kMaxRegions = 4;
         int handled = 0;
@@ -416,152 +651,7 @@ SolverResult solve(const std::vector<SolverChannel>& channels, const SolverOptio
         {
             if (handled++ >= kMaxRegions)
                 break;
-
-            const auto current = withEq(channels, result.eq);
-            std::vector<double> power(channels.size(), 0.0);
-            double total = 0.0;
-            for (size_t c = 0; c < channels.size(); ++c)
-            {
-                if (!channels[c].valid)
-                    continue;
-                // Only real content counts: within 30 dB of the channel's own loudest band.
-                const auto& levels = current[c].rawDb;
-                const double peak = *std::max_element(levels.begin(), levels.begin() + SpectrumAnalyzer::numBandsFor(BandScale::erb));
-                double inRegion = -200.0;
-                for (int b = region.firstBand; b <= region.lastBand; ++b)
-                    inRegion = std::max(inRegion, levels[static_cast<size_t>(b)]);
-                if (inRegion < peak - kContentRangeDb || inRegion < -100.0)
-                    continue;
-                for (int b = region.firstBand; b <= region.lastBand; ++b)
-                    power[c] += std::pow(10.0, levels[static_cast<size_t>(b)] / 10.0);
-                total += power[c];
-            }
-
-            double ghostShare = 0.0;
-            for (size_t c = 0; c < channels.size(); ++c)
-                ghostShare += channels[c].ghost && total > 0.0 ? power[c] / total : 0.0;
-            std::vector<int> order;
-            for (size_t c = 0; c < channels.size(); ++c)
-                if (total > 0.0 && !channels[c].ghost && power[c] / total >= (region.hole() ? 0.15 : 0.25))
-                    order.push_back(static_cast<int>(c));
-
-            const double centre = std::sqrt(region.lowHz * region.highHz);
-            const double q = qForRange(region.lowHz, region.highHz);
-            SolverChange change;
-            change.lowHz = region.lowHz;
-            change.highHz = region.highHz;
-            change.deviationDb = region.deviationDb;
-
-            if (region.hole())
-            {
-                // Most important channel first: it is the one that should be heard there.
-                std::sort(order.begin(), order.end(), [&](int a, int b) {
-                    return channels[static_cast<size_t>(a)].priority != channels[static_cast<size_t>(b)].priority
-                               ? channels[static_cast<size_t>(a)].priority < channels[static_cast<size_t>(b)].priority
-                               : power[static_cast<size_t>(a)] > power[static_cast<size_t>(b)];
-                });
-                const auto before = analyseMasking(current, options.minimumScore);
-                bool filled = false;
-                for (int c : order)
-                {
-                    auto& eq = result.eq[static_cast<size_t>(c)];
-                    // A free band only: reusing a nearby boost would move it off the region it was set for.
-                    int slot = -1;
-                    for (int b = 0; b < kEqBands && slot < 0; ++b)
-                        if (!isOn(eq[static_cast<size_t>(b)]))
-                            slot = b;
-                    if (slot < 0)
-                        continue;
-                    const double share = power[static_cast<size_t>(c)] / total;
-                    double gain = roundHalf(std::clamp(gainForShare(share, -region.deviationDb), 1.0, options.maxBoostDb));
-                    const auto saved = eq[static_cast<size_t>(slot)];
-
-                    for (int attempt = 0; attempt < 2 && !filled; ++attempt, gain = roundHalf(gain / 2.0))
-                    {
-                        if (gain < 1.0)
-                            break;
-                        eq[static_cast<size_t>(slot)] = { static_cast<float>(centre), static_cast<float>(gain), static_cast<float>(q) };
-                        const auto after = analyseMasking(withEq(channels, result.eq), options.minimumScore);
-                        bool newCollision = false;
-                        for (size_t k = 0; k < channels.size(); ++k)
-                        {
-                            if (static_cast<int>(k) == c || channels[k].priority > channels[static_cast<size_t>(c)].priority)
-                                continue;
-                            const double was = before.amount[static_cast<size_t>(c)][k];
-                            const double now = after.amount[static_cast<size_t>(c)][k];
-                            newCollision = newCollision || (now >= options.minimumScore && now - was > 0.05);
-                        }
-                        if (!newCollision)
-                        {
-                            filled = true;
-                            change.kind = SolverChange::Kind::tonalBoost;
-                            change.channel = c;
-                            change.eqSlot = slot;
-                            change.gainDb = gain;
-                        }
-                    }
-                    if (filled)
-                        break;
-                    eq[static_cast<size_t>(slot)] = saved;
-                }
-
-                if (!filled)
-                {
-                    // Nothing to boost: the octave below is where harmonics would come from.
-                    change.kind = SolverChange::Kind::tonalAdvice;
-                    double best = 0.0;
-                    for (size_t c = 0; c < channels.size(); ++c)
-                    {
-                        if (!channels[c].valid || channels[c].ghost)
-                            continue;
-                        double below = 0.0;
-                        for (int b = 0; b < SpectrumAnalyzer::numBandsFor(BandScale::erb); ++b)
-                        {
-                            const double hz = SpectrumAnalyzer::bandCentreHz(BandScale::erb, b);
-                            if (hz >= region.lowHz / 2.0 && hz <= region.highHz / 2.0)
-                                below += std::pow(10.0, current[c].rawDb[static_cast<size_t>(b)] / 10.0);
-                        }
-                        if (below > best)
-                        {
-                            best = below;
-                            change.sourceChannel = static_cast<int>(c);
-                        }
-                    }
-                }
-                result.changes.push_back(change);
-            }
-            else if (!order.empty() && ghostShare < 0.3)
-            {
-                // Least important carrier first. (An excess the ghosts carry much of is left alone:
-                // the part that comes may well be played quieter than its stand-in.)
-                std::sort(order.begin(), order.end(), [&](int a, int b) {
-                    return channels[static_cast<size_t>(a)].priority != channels[static_cast<size_t>(b)].priority
-                               ? channels[static_cast<size_t>(a)].priority > channels[static_cast<size_t>(b)].priority
-                               : power[static_cast<size_t>(a)] > power[static_cast<size_t>(b)];
-                });
-                const int c = order.front();
-                auto& eq = result.eq[static_cast<size_t>(c)];
-                const int slot = findSlot(eq, centre, false);
-                if (slot < 0)
-                    continue;
-                const double share = power[static_cast<size_t>(c)] / total;
-                const double gain = roundHalf(std::clamp(gainForShare(share, -region.deviationDb), -options.maxCutDb, -1.0));
-                auto& band = eq[static_cast<size_t>(slot)];
-                if (isOn(band))
-                {
-                    band.gainDb = static_cast<float>(std::min(static_cast<double>(band.gainDb), gain));
-                    band.q = std::min(band.q, static_cast<float>(q));
-                }
-                else
-                {
-                    band = { static_cast<float>(centre), static_cast<float>(gain), static_cast<float>(q) };
-                }
-                change.kind = SolverChange::Kind::tonalCut;
-                change.channel = c;
-                change.eqSlot = slot;
-                change.gainDb = band.gainDb;
-                result.changes.push_back(change);
-            }
+            fixRegion(region);
         }
     }
 
