@@ -527,7 +527,17 @@ void BrainEditor::timerCallback()
                          + ".";
             stemWarning = contrast.valid && std::abs(contrast.outside(ours.belowDropDb)) >= 1.0;
         }
-        stemView.setData(target, ours.stems, stemStatus, stemWarning, keyStatus, keyWarning);
+        if (ours.stems.valid && ours.automation.valid)
+        {
+            std::array<juce::String, ma::kStemGroups> steps;
+            for (int g = 0; g < ma::kStemGroups; ++g)
+                steps[static_cast<size_t>(g)] = BrainProcessor::automationStep(ours.automation, g);
+            const auto advice = processor.automationText(section);
+            stemView.setData(target, ours.stems, stemStatus, stemWarning, keyStatus, keyWarning, &steps,
+                             advice.isNotEmpty() ? advice : pl("Automatyka niepotrzebna: proporcje i głośność względem dropu jak w referencjach."));
+        }
+        else
+            stemView.setData(target, ours.stems, stemStatus, stemWarning, keyStatus, keyWarning);
     }
     else
         stemView.setData(stems, mix.stems, stemStatus, stemWarning, keyStatus, keyWarning);

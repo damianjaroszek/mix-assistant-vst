@@ -1,6 +1,7 @@
 #include "ma/StemReference.h"
 
 #include "ma/EqualLoudness.h"
+#include "ma/LoudnessMeter.h"
 
 #include <algorithm>
 #include <cctype>
@@ -23,6 +24,7 @@ constexpr double kLevelToleranceDb = 1.5;
 constexpr double kShapeToleranceDb = 2.0;
 constexpr double kWidthTolerance = 0.06;
 constexpr double kMaxLevelStepDb = 3.0;
+constexpr double kMaxAutomationDb = 12.0; // phase 19: a section may sit far from the drop
 constexpr double kBreakDrumsBelowDb = 15.0; // drums this far under their drop level: a break
 constexpr double kBreakRangeDb = 20.0;      // the rest still plays: within this of the drop
 constexpr int kDrumsSmoothBlocks = 10;      // +-1 s, so the gaps between kicks do not count
@@ -259,6 +261,40 @@ bool readGroupLine(std::istringstream& words, StemMeasure& measure)
     }
     return true;
 }
+
+// Moves the active groups' gains until each group's level against the sum sits half a dB
+// inside its corridor (or as near as each group's `lowest`..`highest` allows). `levels` gives every group's level
+// against the sum for a set of gains.
+template <typename Levels>
+void balanceGroups(Levels levels, const std::array<bool, kStemGroups>& active, const StemTarget& target,
+                   const std::array<double, kStemGroups>& lowest, const std::array<double, kStemGroups>& highest,
+                   std::array<double, kStemGroups>& gain)
+{
+    for (int iteration = 0; iteration < 24; ++iteration)
+    {
+        const auto rel = levels(gain);
+        double moved = 0.0;
+        for (int g = 0; g < kStemGroups; ++g)
+        {
+            if (!active[static_cast<size_t>(g)])
+                continue;
+            const auto& c = target.level[static_cast<size_t>(g)];
+            // Half a dB inside the corridor, so the next pass finds it inside.
+            const double low = std::min(c.low + 0.5, c.centre), high = std::max(c.high - 0.5, c.centre);
+            const double aim = std::clamp(rel[static_cast<size_t>(g)], low, high);
+            const double step = aim - rel[static_cast<size_t>(g)];
+            // The group moves its own share less than its gain: the sum moves with it.
+            const double share = std::pow(10.0, rel[static_cast<size_t>(g)] / 10.0);
+            const double newGain = std::clamp(gain[static_cast<size_t>(g)] + step / std::max(0.2, 1.0 - share),
+                                              lowest[static_cast<size_t>(g)], highest[static_cast<size_t>(g)]);
+            moved += std::abs(newGain - gain[static_cast<size_t>(g)]);
+            gain[static_cast<size_t>(g)] = newGain;
+        }
+        if (moved < 0.01)
+            break;
+    }
+}
+
 } // namespace
 
 const char* stemGroupKey(StemGroup group)
@@ -1054,29 +1090,10 @@ StemLevelPlan planStemLevels(const std::array<SpectrumAnalyzer::Bands, kStemGrou
     }
 
     std::array<double, kStemGroups> gain {};
-    for (int iteration = 0; iteration < 24; ++iteration)
-    {
-        const auto rel = levels(gain, nullptr);
-        double moved = 0.0;
-        for (int g = 0; g < kStemGroups; ++g)
-        {
-            if (!active[static_cast<size_t>(g)])
-                continue;
-            const auto& c = target.level[static_cast<size_t>(g)];
-            // Half a dB inside the corridor, so the next pass finds it inside.
-            const double low = std::min(c.low + 0.5, c.centre), high = std::max(c.high - 0.5, c.centre);
-            const double aim = std::clamp(rel[static_cast<size_t>(g)], low, high);
-            const double step = aim - rel[static_cast<size_t>(g)];
-            // The group moves its own share less than its gain: the sum moves with it.
-            const double share = std::pow(10.0, rel[static_cast<size_t>(g)] / 10.0);
-            const double newGain = std::clamp(gain[static_cast<size_t>(g)] + step / std::max(0.2, 1.0 - share),
-                                              -kMaxLevelStepDb, kMaxLevelStepDb);
-            moved += std::abs(newGain - gain[static_cast<size_t>(g)]);
-            gain[static_cast<size_t>(g)] = newGain;
-        }
-        if (moved < 0.01)
-            break;
-    }
+    std::array<double, kStemGroups> lowest {}, highest {};
+    lowest.fill(-kMaxLevelStepDb);
+    highest.fill(kMaxLevelStepDb);
+    balanceGroups([&](const std::array<double, kStemGroups>& gn) { return levels(gn, nullptr); }, active, target, lowest, highest, gain);
 
     // Keep the overall loudness (and so the headroom) where it was: the same shift on every
     // group leaves their balance as planned.
@@ -1095,6 +1112,131 @@ StemLevelPlan planStemLevels(const std::array<SpectrumAnalyzer::Bands, kStemGrou
     }
     plan.gainDb = gain;
     plan.after = levels(gain, nullptr);
+    return plan;
+}
+
+
+SectionAutomation planSectionAutomation(const std::array<SpectrumAnalyzer::Bands, kStemGroups>& sectionDb,
+                                        const std::array<bool, kStemGroups>& present, const StemTarget& sectionTarget,
+                                        const StemCorridor& contrast, double belowDropDb,
+                                        const std::array<SpectrumAnalyzer::Bands, kStemGroups>* dropDb)
+{
+    SectionAutomation plan;
+    std::array<SpectrumAnalyzer::Bands, kStemGroups> used {};
+    for (int g = 0; g < kStemGroups; ++g)
+    {
+        used[static_cast<size_t>(g)].fill(kAbsentDb);
+        if (present[static_cast<size_t>(g)])
+            used[static_cast<size_t>(g)] = sectionDb[static_cast<size_t>(g)];
+    }
+    // Every group's level against the sum of the groups that stay.
+    auto levels = [&](const std::array<double, kStemGroups>& gain) {
+        const auto w = weightedPowers(used, gain);
+        double t = 0.0;
+        for (int g = 0; g < kStemGroups; ++g)
+            t += plan.mute[static_cast<size_t>(g)] ? 0.0 : w[static_cast<size_t>(g)];
+        std::array<double, kStemGroups> rel {};
+        for (int g = 0; g < kStemGroups; ++g)
+            rel[static_cast<size_t>(g)] = t > 0.0 && w[static_cast<size_t>(g)] > 0.0 ? toDb(w[static_cast<size_t>(g)]) - toDb(t) : kAbsentDb;
+        return rel;
+    };
+    // The section's loudness as the meter weighs it (K-weighting, every band), for the contrast.
+    std::array<double, kStemGroups> loud {};
+    for (int b = 0; b < numBands(); ++b)
+    {
+        const double k = toPower(kWeightingDb(hzOf(b)));
+        for (int g = 0; g < kStemGroups; ++g)
+            loud[static_cast<size_t>(g)] += toPower(used[static_cast<size_t>(g)][static_cast<size_t>(b)]) * k;
+    }
+    auto loudness = [&](const std::array<double, kStemGroups>& gain) {
+        double t = 0.0;
+        for (int g = 0; g < kStemGroups; ++g)
+            t += plan.mute[static_cast<size_t>(g)] ? 0.0 : loud[static_cast<size_t>(g)] * toPower(gain[static_cast<size_t>(g)]);
+        return toDb(t);
+    };
+
+    plan.before = levels({});
+    const double loudBefore = loudness({});
+    if (!(loudBefore > kAbsentDb + 1.0) || !sectionTarget.valid())
+        return plan;
+    plan.valid = true;
+
+    // A group the references silence in this section: out (the rest is balanced without it).
+    bool anyKept = false;
+    for (int g = 0; g < kStemGroups; ++g)
+    {
+        const auto at = static_cast<size_t>(g);
+        plan.mute[at] = !sectionTarget.level[at].valid && plan.before[at] > kExtraGroupDb;
+        anyKept = anyKept || (!plan.mute[at] && plan.before[at] > -40.0);
+    }
+    if (!anyKept)
+    {
+        plan.any = std::any_of(plan.mute.begin(), plan.mute.end(), [](bool m) { return m; });
+        return plan;
+    }
+
+    // Each group may come up at most to where it plays in the drop: a section louder than the
+    // drop in one part would take the drop's impact away.
+    std::array<double, kStemGroups> lowest {}, highest {};
+    lowest.fill(-kMaxAutomationDb);
+    highest.fill(kMaxAutomationDb);
+    if (dropDb != nullptr)
+    {
+        const auto inSection = weightedPowers(used, {});
+        const auto inDrop = weightedPowers(*dropDb, {});
+        for (int g = 0; g < kStemGroups; ++g)
+        {
+            const auto at = static_cast<size_t>(g);
+            if (inSection[at] > 0.0 && inDrop[at] > 0.0)
+                highest[at] = std::clamp(toDb(inDrop[at]) - toDb(inSection[at]), 0.0, kMaxAutomationDb);
+        }
+    }
+    std::array<bool, kStemGroups> active {}, audible {};
+    for (int g = 0; g < kStemGroups; ++g)
+    {
+        const auto at = static_cast<size_t>(g);
+        audible[at] = !plan.mute[at] && plan.before[at] > -40.0;
+        active[at] = audible[at] && sectionTarget.level[at].valid;
+    }
+    std::array<double, kStemGroups> gain {};
+    balanceGroups(levels, active, sectionTarget, lowest, highest, gain);
+
+    // How much quieter than the drop the section ends up: the balance moves its loudness, and
+    // when that leaves it outside the references' contrast, every audible group moves together
+    // (half a dB inside the corridor), which leaves the balance as planned where no limit holds.
+    if (std::isfinite(belowDropDb))
+    {
+        plan.belowDropBefore = belowDropDb;
+        double below = belowDropDb - (loudness(gain) - loudBefore);
+        if (contrast.valid)
+        {
+            const double low = std::min(contrast.low + 0.5, contrast.centre), high = std::max(contrast.high - 0.5, contrast.centre);
+            for (int iteration = 0; iteration < 6; ++iteration)
+            {
+                const double shift = below - std::clamp(below, low, high); // positive: the section has to get louder
+                if (std::abs(shift) < 0.05)
+                    break;
+                for (int g = 0; g < kStemGroups; ++g)
+                    if (audible[static_cast<size_t>(g)])
+                        gain[static_cast<size_t>(g)] = std::clamp(gain[static_cast<size_t>(g)] + shift, lowest[static_cast<size_t>(g)],
+                                                                  highest[static_cast<size_t>(g)]);
+                below = belowDropDb - (loudness(gain) - loudBefore);
+            }
+        }
+        plan.belowDropAfter = below;
+    }
+
+    for (int g = 0; g < kStemGroups; ++g)
+    {
+        auto& value = gain[static_cast<size_t>(g)];
+        // Under a dB is not worth an automation lane.
+        value = plan.mute[static_cast<size_t>(g)] || std::abs(value) < 1.0 ? 0.0 : std::round(value * 2.0) / 2.0;
+        plan.any = plan.any || value != 0.0 || plan.mute[static_cast<size_t>(g)];
+    }
+    plan.gainDb = gain;
+    plan.after = levels(gain);
+    if (std::isfinite(belowDropDb))
+        plan.belowDropAfter = belowDropDb - (loudness(gain) - loudBefore);
     return plan;
 }
 

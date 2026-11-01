@@ -962,9 +962,16 @@ private:
 class StemView : public juce::Component
 {
 public:
+    // Phase 19: a section's automation adds a column and its advice under the table.
     void setData(const ma::StemTarget& newTarget, const ma::StemComparison& newComparison, const juce::String& newStatus,
-                 bool newWarning, const juce::String& newKeyStatus, bool newKeyWarning)
+                 bool newWarning, const juce::String& newKeyStatus, bool newKeyWarning,
+                 const std::array<juce::String, ma::kStemGroups>* newSteps = nullptr, const juce::String& newAdvice = {})
     {
+        steps = {};
+        showSteps = newSteps != nullptr;
+        if (newSteps != nullptr)
+            steps = *newSteps;
+        advice = newAdvice;
         target = newTarget;
         comparison = newComparison;
         status = newStatus;
@@ -996,7 +1003,8 @@ public:
             return;
 
         constexpr float nameWidth = 90.0f, levelWidth = 190.0f, widthWidth = 92.0f;
-        const float regionWidth = (area.getWidth() - nameWidth - levelWidth - widthWidth - 12.0f) / ma::kStemRegions;
+        const float stepWidth = showSteps ? 84.0f : 0.0f;
+        const float regionWidth = (area.getWidth() - nameWidth - levelWidth - widthWidth - stepWidth - 12.0f) / ma::kStemRegions;
         const char* const regions[ma::kStemRegions] { "sub", "bas", "dół-środek", "środek", "prezencja", "powietrze" };
 
         auto header = area.removeFromTop(16.0f);
@@ -1008,6 +1016,8 @@ public:
         for (int r = 0; r < ma::kStemRegions; ++r)
             g.drawText(pl(regions[r]), header.removeFromLeft(regionWidth), juce::Justification::centred);
         header.removeFromLeft(6.0f);
+        if (showSteps)
+            g.drawText(pl("automatyka"), header.removeFromRight(stepWidth), juce::Justification::centred);
         g.drawText(pl("szerokość"), header, juce::Justification::centred);
 
         const float rowHeight = std::min(34.0f, area.getHeight() / ma::kStemGroups);
@@ -1070,6 +1080,17 @@ public:
             }
             row.removeFromLeft(6.0f);
 
+            // Phase 19: the section's volume automation for the group.
+            if (showSteps)
+            {
+                auto cell = row.removeFromRight(stepWidth).reduced(4.0f, 0.0f);
+                const auto& step = steps[static_cast<size_t>(group)];
+                g.setColour(step.isEmpty() ? colours::background : colours::warning.withAlpha(0.35f));
+                g.fillRoundedRectangle(cell, 3.0f);
+                g.setColour(step.isEmpty() ? colours::quiet : colours::text);
+                g.drawText(step.isEmpty() ? juce::String("-") : step, cell, juce::Justification::centred);
+            }
+
             // Width: side share, ours against the references.
             const auto& w = target.width[static_cast<size_t>(group)];
             g.setColour(c.widthCompared && std::abs(c.widthDeviation) >= 0.04 ? colours::warning : colours::quiet);
@@ -1079,11 +1100,20 @@ public:
                                          : juce::String();
             g.drawText(widthText + refText, row, juce::Justification::centred);
         }
+        if (advice.isNotEmpty())
+        {
+            g.setFont(juce::FontOptions(12.0f));
+            g.setColour(colours::text);
+            g.drawFittedText(advice, area.reduced(0.0f, 6.0f).toNearestInt(), juce::Justification::topLeft, 4);
+        }
     }
 
 private:
     ma::StemTarget target;
     ma::StemComparison comparison;
+    std::array<juce::String, ma::kStemGroups> steps;
+    bool showSteps = false;
+    juce::String advice;
     juce::String status, keyStatus;
     bool warning = false, keyWarning = false;
 };

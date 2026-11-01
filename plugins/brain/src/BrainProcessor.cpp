@@ -46,6 +46,7 @@ constexpr double kLoudnessLagSeconds = 1.5;    // where the drop's loudness show
 constexpr double kMaxSongSeconds = 600.0;
 constexpr int kDropRunSeconds = 4;             // a drop: this many seconds in a row at its level
 constexpr double kBuildSeconds = 8.0;
+constexpr double kSectionGuardSeconds = 1.0; // phase 19: left out on either side of a section boundary
 constexpr double kMinimumBuildSeconds = 4.0;
 constexpr double kSectionRangeDb = 30.0;       // playing at all: within this of the drop
 
@@ -102,6 +103,32 @@ bool inMixSums(const MixSnapshot::Channel& channel)
 int groupOfChannel(const MixSnapshot::Channel& channel)
 {
     return ma::stemGroupForRole(static_cast<ma::Role>(juce::jlimit(0, static_cast<int>(ma::Role::send), static_cast<int>(channel.data.role))));
+}
+
+// Phase 19: runs of the song's seconds (gaps up to 2 s bridged, runs under 2 s left out), as
+// [start, end) in seconds.
+std::vector<std::pair<double, double>> songRanges(const std::set<int>& seconds)
+{
+    std::vector<std::pair<double, double>> out;
+    int start = 0, last = 0;
+    bool open = false;
+    auto close = [&] {
+        if (open && last + 1 - start >= 2)
+            out.emplace_back(start, last + 1);
+    };
+    for (const int s : seconds)
+    {
+        if (open && s - last <= 3)
+        {
+            last = s;
+            continue;
+        }
+        close();
+        start = last = s;
+        open = true;
+    }
+    close();
+    return out;
 }
 
 // The part of the file names every stem shares: the reference track's title.
@@ -582,6 +609,10 @@ void BrainProcessor::timerCallback()
             }
     }
     updateSongSections();
+    // Phase 19: the drop's groups as the sections are measured, so no automation raises a group above it.
+    std::array<bool, ma::kStemGroups> dropPresent {};
+    const auto dropGroups = stemsReady() ? stemGroupDb(true, dropPresent, nullptr, nullptr)
+                                         : std::array<ma::SpectrumAnalyzer::Bands, ma::kStemGroups> {};
     for (int s = 0; s < ma::kStemSections; ++s)
     {
         const auto section = static_cast<ma::StemSection>(s);
@@ -597,6 +628,14 @@ void BrainProcessor::timerCallback()
         out.measure = ma::measureStemGroups(groups, side, present);
         out.stems = ma::compareStems(out.measure, keyedSectionStems[static_cast<size_t>(s)]);
         out.belowDropDb = dropLevelSum / static_cast<double>(std::max(1L, dropUpdates)) - sums.levelSum / static_cast<double>(sums.updates);
+        out.automation = ma::planSectionAutomation(groups, present, keyedSectionStems[static_cast<size_t>(s)],
+                                                   keyedSectionStems[static_cast<size_t>(s)].contrast(section), out.belowDropDb, &dropGroups);
+        out.ranges = songRanges(sums.seconds);
+        // A break comes after the first drop; seconds before it caught by an early guess of the drop are not shown.
+        if (section == ma::StemSection::breakdown && std::isfinite(firstDropSecond))
+            out.ranges.erase(std::remove_if(out.ranges.begin(), out.ranges.end(),
+                                            [this](const auto& r) { return r.second <= firstDropSecond; }),
+                             out.ranges.end());
     }
     updateLoudnessMatch(now);
     adaptStep(now);
@@ -974,6 +1013,8 @@ void BrainProcessor::accumulateDrop()
             accumulate(breakSums.sums);
             ++breakSums.updates;
             breakSums.levelSum += level;
+            if (position >= 0.0 && position < kMaxSongSeconds)
+                breakSums.seconds.insert(static_cast<int>(position));
         }
         return;
     }
@@ -1029,11 +1070,19 @@ void BrainProcessor::updateSongSections()
     for (const auto& [second, bin] : songBins)
     {
         // By each second's middle: the build the last 8 s before the drop, the intro what played before.
+        // Phase 19: a second on either side of a boundary is left out, so the spectra's smoothing
+        // does not carry one section into the next (and an automated part into the other).
         const double middle = second + 0.5;
+        const double buildStart = firstDropSecond - kBuildSeconds;
+        const bool playing = levelOf(bin) >= dropLevel - kSectionRangeDb;
+        // Where the section is (for the automation's bars) and what is measured of it.
+        SectionSums* range = middle < buildStart ? (playing ? &introSums : nullptr) : middle < firstDropSecond ? &buildSums : nullptr;
+        if (range != nullptr)
+            range->seconds.insert(second);
         SectionSums* into = nullptr;
-        if (middle < firstDropSecond - kBuildSeconds && levelOf(bin) >= dropLevel - kSectionRangeDb)
+        if (middle < buildStart - kSectionGuardSeconds && playing)
             into = &introSums;
-        else if (middle >= firstDropSecond - kBuildSeconds && middle < firstDropSecond)
+        else if (middle >= buildStart + kSectionGuardSeconds && middle < firstDropSecond - kSectionGuardSeconds)
             into = &buildSums;
         if (into == nullptr)
             continue;
@@ -1847,6 +1896,10 @@ void BrainProcessor::buildReport()
             item.status = parts.isEmpty() ? Status::good : Status::warning;
             item.detail = parts.isEmpty() ? text.fine
                                           : parts.joinIntoString(", ") + pl(". To sprawa aranżu i automatyki głośności, nie EQ.");
+            // Phase 19: the automation itself.
+            const auto automation = automationText(section);
+            if (automation.isNotEmpty())
+                item.detail += " " + automation;
         }
         report.push_back(item);
     }
@@ -3957,6 +4010,65 @@ juce::String signedDb(double db)
 }
 } // namespace
 
+juce::String BrainProcessor::automationStep(const ma::SectionAutomation& automation, int group)
+{
+    const auto at = static_cast<size_t>(group);
+    if (!automation.valid || group < 0 || group >= ma::kStemGroups)
+        return {};
+    if (automation.mute[at])
+        return pl("zgaś");
+    return std::abs(automation.gainDb[at]) > 0.05 ? signedDb(automation.gainDb[at]) : juce::String();
+}
+
+juce::String BrainProcessor::automationText(ma::StemSection section) const
+{
+    const auto& ours = mix.section(section);
+    const auto& automation = ours.automation;
+    if (!ours.stems.valid || !automation.valid || !automation.any)
+        return {};
+    juce::StringArray parts;
+    for (int g = 0; g < ma::kStemGroups; ++g)
+    {
+        const auto step = automationStep(automation, g);
+        if (step.isEmpty())
+            continue;
+        juce::StringArray names;
+        for (const auto& channel : mix.channels)
+            if (groupOfChannel(channel) == g && channel.name.isNotEmpty())
+                names.add(channel.name);
+        parts.add(stemGroupName(g) + " " + step + (names.isEmpty() ? juce::String() : " (" + names.joinIntoString(", ") + ")"));
+    }
+    juce::String out = pl("Automatyka głośności względem dropu (głośność kanału w Channel Rack, przed Agentem, żeby Mózg ją słyszał): ")
+                       + parts.joinIntoString(", ");
+    if (section == ma::StemSection::build)
+        out += pl(" (średnio; build zwykle narasta do dropu)");
+    if (std::isfinite(automation.belowDropAfter) && std::isfinite(automation.belowDropBefore)
+        && std::abs(automation.belowDropAfter - automation.belowDropBefore) >= 0.5)
+        out += pl(", wtedy ") + sectionText(section).name + pl(" będzie ") + juce::String(automation.belowDropAfter, 1)
+               + pl(" dB ciszej niż drop");
+    // Where: bars (4/4 at the host's tempo) and minutes.
+    juce::StringArray where;
+    const double bpm = tempoBpm();
+    auto clock = [](double seconds) {
+        const int total = juce::roundToInt(seconds);
+        return juce::String(total / 60) + ":" + juce::String(total % 60).paddedLeft('0', 2);
+    };
+    for (size_t r = 0; r < ours.ranges.size() && r < 3; ++r)
+    {
+        const auto [from, to] = ours.ranges[r];
+        juce::String text;
+        if (bpm > 0.0)
+            text = pl("takty ") + juce::String(static_cast<int>(from * bpm / 240.0) + 1) + pl("–")
+                   + juce::String(static_cast<int>(std::ceil(to * bpm / 240.0 - 1e-6))) + " (" + clock(from) + pl("–") + clock(to) + ")";
+        else
+            text = clock(from) + pl("–") + clock(to);
+        where.add(text);
+    }
+    if (!where.isEmpty())
+        out += pl(". Gdzie: ") + where.joinIntoString(", ");
+    return out + ".";
+}
+
 juce::String BrainProcessor::masteringReportHtml() const
 {
     const double integratedNow = integratedLufs(), peak = truePeakDb(), ceiling = peakCeilingDb();
@@ -4129,7 +4241,10 @@ juce::String BrainProcessor::masteringReportHtml() const
         if (target.contrast(section).valid)
             out << pl(", w referencjach ") << juce::String(target.contrast(section).low, 1) << pl("–")
                 << juce::String(target.contrast(section).high, 1) << " dB";
-        out << pl(". Różnice w sekcjach poprawia aranż i automatyka głośności, nie EQ.") << "</p>" << groupTable(ours.stems) << "</section>\n";
+        out << pl(". Różnice w sekcjach poprawia aranż i automatyka głośności, nie EQ.") << "</p>" << groupTable(ours.stems);
+        if (const auto automation = automationText(section); automation.isNotEmpty())
+            out << "<p>" << html(automation) << "</p>";
+        out << "</section>\n";
     }
 
     out << "<h2>" << pl("Kanały") << "</h2><section class=\"wrap\"><table><tr><th>" << pl("Kanał") << "</th><th>" << pl("Rola")

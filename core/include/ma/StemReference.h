@@ -7,6 +7,7 @@
 #include "Stereo.h"
 
 #include <array>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -240,6 +241,29 @@ struct StemLevelPlan
 StemLevelPlan planStemLevels(const std::array<SpectrumAnalyzer::Bands, kStemGroups>& groupDb,
                              const std::array<bool, kStemGroups>& present, const StemTarget& target,
                              const std::array<bool, kStemGroups>* fixed = nullptr);
+
+// Phase 19: volume automation for a section (intro, build, break), per group and relative to
+// how the group plays in the drop. Each group's level against the section's sum goes into the
+// section's corridor (as planStemLevels, up to 12 dB); a group the references silence there is
+// muted; then, when the section's loudness against the drop (`belowDropDb`, drop minus section,
+// short-term loudness) ends up outside the references' `contrast`, every group moves together.
+// Works from what the Brain measures (the Agents' input), so the automation belongs before the
+// Agents (FL's channel volume): measured again, the section then needs no further change.
+// With `dropDb` (the groups over the drop, same scale) no group is raised above its drop level.
+// The contrast is estimated with the K-weighting, as the loudness it compares is measured.
+struct SectionAutomation
+{
+    bool valid = false;
+    std::array<double, kStemGroups> gainDb {}; // 0 = leave it; under 1 dB is left out
+    std::array<bool, kStemGroups> mute {};      // the references have no such group in the section
+    std::array<double, kStemGroups> before {}, after {}; // level against the section's sum
+    double belowDropBefore = NAN, belowDropAfter = NAN;
+    bool any = false;
+};
+SectionAutomation planSectionAutomation(const std::array<SpectrumAnalyzer::Bands, kStemGroups>& sectionDb,
+                                        const std::array<bool, kStemGroups>& present, const StemTarget& sectionTarget,
+                                        const StemCorridor& contrast, double belowDropDb,
+                                        const std::array<SpectrumAnalyzer::Bands, kStemGroups>* dropDb = nullptr);
 
 // For the solver: our channels grouped, measured over the drop (pre Brain EQ, like its input).
 struct StemShapeInput

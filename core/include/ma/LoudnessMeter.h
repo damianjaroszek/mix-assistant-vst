@@ -9,6 +9,9 @@
 namespace ma
 {
 
+// The K-weighting's response at `hz` (dB): how much a band counts in LUFS.
+double kWeightingDb(double hz);
+
 // Loudness meter after ITU-R BS.1770-4 / EBU R128.
 // Momentary (400 ms), short-term (3 s) and gated integrated loudness.
 // Integrated loudness uses a fixed histogram, so process() never allocates

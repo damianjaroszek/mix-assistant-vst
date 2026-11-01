@@ -112,6 +112,12 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   an overshooting bell back (< 1 dB dropped); a tonal cut where a deep enough cut already sits is not recorded. `proposeWholeMix`
   plans stem group levels first (`planLevels`), solves with them as `gainDb`, re-plans with the proposed EQ and re-solves once if a
   group moved more than 0.5 dB.
+  Phase 19 section automation: `planSectionAutomation` (StemReference) per section: group levels into the section corridor (shared
+  `balanceGroups` with `planStemLevels`, up to 12 dB, never above the group's drop level), groups the references lack there muted,
+  then all audible groups shifted together until the K-weighted (`kWeightingDb`) loudness change puts `belowDropDb` in the contrast
+  corridor; < 1 dB dropped. The Brain plans it in the timer (`MixSnapshot::Section::automation`, `ranges` from `SectionSums::seconds`,
+  intro/build measured with a 1 s guard each side of a boundary, break ranges before the first drop hidden); report, HTML and the
+  "Referencje" tab's "automatyka" column. Advice only: it belongs in FL's channel volume (before the Agent) so a re-measure is idempotent.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 
