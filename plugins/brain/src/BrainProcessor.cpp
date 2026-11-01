@@ -551,15 +551,27 @@ void BrainProcessor::timerCallback()
     }
     mix.translation = ma::analyseTranslation(translation);
 
+    updateSketch();
+
     mix.stemMeasure = {};
     mix.stems = {};
     if (stemsReady())
     {
-        std::array<bool, ma::kStemGroups> present {};
+        std::array<bool, ma::kStemGroups> present {}, ghostOnly {};
         std::array<ma::SpectrumAnalyzer::Bands, ma::kStemGroups> side {};
-        const auto groups = stemGroupDb(true, present, &side, nullptr);
+        auto groups = stemGroupDb(true, present, &side, nullptr);
+        // A sketch's ghosts count in the sum, so the groups that play are not all too loud
+        // against it, and a hole the arrangement leaves is not asked of the EQ.
+        addGhostGroups(groups, present, ghostOnly);
         mix.stemMeasure = ma::measureStemGroups(groups, side, present);
         mix.stems = ma::compareStems(mix.stemMeasure, keyedStems);
+        for (int g = 0; g < ma::kStemGroups; ++g)
+            if (ghostOnly[static_cast<size_t>(g)])
+            {
+                mix.stemMeasure.groups[static_cast<size_t>(g)] = {};
+                mix.stems.groups[static_cast<size_t>(g)] = {};
+                mix.stems.groups[static_cast<size_t>(g)].missing = true;
+            }
         // What the cleanup or the Brain's cuts took out on purpose is not asked back.
         for (int g = 0; g < ma::kStemGroups; ++g)
             for (int r = 0; r < ma::kStemRegions; ++r)
@@ -601,9 +613,22 @@ ma::SolverResult BrainProcessor::solveNow(double headroomGainDb, const ma::StemS
         for (int b = 0; b < ma::bus::kBands; ++b)
             channels[c].rawDb[static_cast<size_t>(b)] = mix.channels[c].bandsDb[static_cast<size_t>(b)];
     }
+    // Phase 17: the ghosts after the channels, so the indices of the channels stay.
+    if (mix.sketch.active())
+        for (const auto& ghost : mix.sketch.analysis.ghosts)
+        {
+            ma::SolverChannel channel;
+            channel.valid = true;
+            channel.ghost = true;
+            channel.priority = ghost.priority;
+            channel.rawDb = ghost.db;
+            channels.push_back(channel);
+        }
     ma::SolverOptions options;
     options.headroomGainDb = headroomGainDb;
-    if (mix.tonal.valid)
+    if (mix.sketch.active() && mix.sketch.tonal.valid)
+        options.tonal = &mix.sketch.tonal; // holes the ghosts fill are the arrangement's, not the EQ's
+    else if (mix.tonal.valid)
         options.tonal = &mix.tonal;
     options.stems = stems;
     return ma::solve(channels, options);
@@ -1071,6 +1096,8 @@ ma::StemShapeInput BrainProcessor::stemShapeInput() const
     if (!stemsReady())
         return in;
     in.target = &keyedStems;
+    if (mix.sketch.active())
+        in.arrangementHole = mix.sketch.analysis.hole;
     for (const auto& channel : mix.channels)
     {
         const auto found = drop.find(channel.owner);
@@ -1119,6 +1146,149 @@ bool BrainProcessor::cutOnPurpose(int group, int region) const
         }
     }
     return before > 0.0 && after < before * 0.5;
+}
+
+void BrainProcessor::setSketchMode(bool on)
+{
+    sketchOn = on;
+    parameters.state.setProperty("sketchMode", on, nullptr);
+}
+
+void BrainProcessor::updateSketch()
+{
+    auto& sketch = mix.sketch;
+    sketch = {};
+    if (!sketchOn || useProfiles || mix.dropSeconds < kMinimumDropSeconds || dropUpdates == 0)
+        return;
+    if (currentStems.valid())
+        sketch.arrangement = ma::arrangementFromStems(keyedStems);
+    if (!sketch.arrangement.valid())
+        sketch.arrangement = ma::typicalArrangement();
+
+    ma::SketchInput in;
+    in.groupDb = stemGroupDb(true, in.present, nullptr, nullptr);
+    sketch.groupDb = in.groupDb;
+    for (const auto& channel : mix.channels)
+    {
+        const int group = groupOfChannel(channel);
+        const auto found = drop.find(channel.owner);
+        if (group < 0 || found == drop.end())
+            continue;
+        ma::EqSettings eq {};
+        if (channel.data.eqBypass == 0)
+            for (int b = 0; b < ma::kEqBands; ++b)
+                eq[static_cast<size_t>(b)] = channel.data.eq[b];
+        ma::SketchChannel own;
+        own.group = group;
+        for (int b = 0; b < ma::bus::kBands; ++b)
+        {
+            const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+            const double p = found->second.power[static_cast<size_t>(b)] / static_cast<double>(dropUpdates);
+            own.db[static_cast<size_t>(b)] = p > 1e-20 ? 10.0 * std::log10(p) + ma::cleanupResponseDb(channel.data.cleanup, hz) + ma::eqResponseDb(eq, hz)
+                                                       : -200.0;
+        }
+        in.channels.push_back(own);
+    }
+    for (int g = 0; g < ma::kStemGroups; ++g)
+        for (int r = 0; r < ma::kStemRegions; ++r)
+            in.cutOnPurpose[static_cast<size_t>(g)][static_cast<size_t>(r)] = cutOnPurpose(g, r);
+    sketch.analysis = ma::analyseSketch(in, sketch.arrangement);
+    if (!sketch.active())
+        return;
+
+    if (mix.tonal.valid)
+    {
+        sketch.tonal = ma::compareToTarget(ma::addGhosts(averageSpectrum(), sketch.analysis), currentTarget);
+        sketch.arrangementRegion = ma::arrangementRegions(mix.tonal, sketch.tonal);
+    }
+
+    // Who will cover a part that is not there yet.
+    const auto& ghosts = sketch.analysis.ghosts;
+    std::vector<ma::MaskingChannel> masking(mix.channels.size() + ghosts.size());
+    for (size_t c = 0; c < mix.channels.size(); ++c)
+    {
+        const auto& channel = mix.channels[c];
+        masking[c].valid = channel.spectrumValid && inMixSums(channel);
+        masking[c].priority = channel.data.priority;
+        for (int b = 0; b < ma::bus::kBands; ++b)
+            masking[c].rawDb[static_cast<size_t>(b)] = channel.heardDb[static_cast<size_t>(b)];
+    }
+    for (size_t k = 0; k < ghosts.size(); ++k)
+    {
+        auto& m = masking[mix.channels.size() + k];
+        m.valid = true;
+        m.priority = ghosts[k].priority;
+        for (int b = 0; b < ma::bus::kBands; ++b)
+            m.rawDb[static_cast<size_t>(b)] = ghosts[k].db[static_cast<size_t>(b)];
+    }
+    for (const auto& issue : ma::analyseMasking(masking).issues)
+        if (static_cast<size_t>(issue.masker) < mix.channels.size() && static_cast<size_t>(issue.masked) >= mix.channels.size())
+            sketch.collisions.push_back({ static_cast<size_t>(issue.masker), static_cast<size_t>(issue.masked) - mix.channels.size(),
+                                          issue.lowHz, issue.highHz, issue.score });
+}
+
+void BrainProcessor::addGhostGroups(std::array<ma::SpectrumAnalyzer::Bands, ma::kStemGroups>& groups,
+                                    std::array<bool, ma::kStemGroups>& present, std::array<bool, ma::kStemGroups>& ghostOnly) const
+{
+    ghostOnly = {};
+    if (!mix.sketch.active())
+        return;
+    for (const auto& ghost : mix.sketch.analysis.ghosts)
+    {
+        const auto g = static_cast<size_t>(ghost.group);
+        for (size_t b = 0; b < groups[g].size(); ++b)
+        {
+            const double p = (groups[g][b] > -199.0 ? std::pow(10.0, groups[g][b] / 10.0) : 0.0)
+                             + (ghost.db[b] > -199.0 ? std::pow(10.0, ghost.db[b] / 10.0) : 0.0);
+            groups[g][b] = p > 1e-20 ? 10.0 * std::log10(p) : -200.0;
+        }
+        if (!present[g])
+            ghostOnly[g] = present[g] = true;
+    }
+}
+
+juce::String BrainProcessor::ghostName(const ma::SketchGhost& ghost)
+{
+    const int r = ghost.region;
+    switch (static_cast<ma::StemGroup>(ghost.group))
+    {
+        case ma::StemGroup::drums:
+            return r < 0 ? pl("perkusja") : r <= 1 ? pl("stopa") : r <= 3 ? pl("werbel albo clap") : pl("hi-haty, shakery");
+        case ma::StemGroup::bass: return r < 0 ? pl("bas") : r <= 1 ? pl("sub bas") : pl("górna część basu");
+        case ma::StemGroup::vocals: return pl("wokal");
+        case ma::StemGroup::music: break;
+    }
+    return r < 0 ? pl("akordy, pad albo lead") : r <= 2 ? pl("pad albo akordy") : r == 3 ? pl("akordy albo stab")
+                 : r == 4 ? pl("lead, arpeggio albo plucki") : pl("góra padu albo FX");
+}
+
+juce::String BrainProcessor::ghostBrief(const ma::SketchGhost& ghost) const
+{
+    const auto& group = mix.sketch.arrangement.groups[static_cast<size_t>(ghost.group)];
+    const auto name = ghostName(ghost);
+    auto text = name.substring(0, 1).toUpperCase() + name.substring(1);
+    if (ghost.region >= 0)
+        text += pl(" w ") + hzText(ma::stemRegionEdgeHz(ghost.region)) + pl("–") + hzText(ma::stemRegionEdgeHz(ghost.region + 1)) + pl(": grupa ") + quoted(stemGroupName(ghost.group)) + pl(" ma tam ok. ")
+                + juce::String(juce::roundToInt(ghost.shortDb)) + pl(" dB mniej niż ") + (mix.sketch.arrangement.fromReferences ? pl("referencje") : pl("typowy drop"))
+                + pl(", a żaden jej kanał tam nie gra. Dograj partię, EQ tego nie zrobi");
+    else
+    {
+        text += pl(": ok. ") + juce::String(juce::roundToInt(-ghost.levelDb)) + pl(" dB ciszej niż cały drop (ważone uchem), głównie ")
+                + hzText(ghost.lowHz) + pl("–") + hzText(ghost.highHz);
+        if (group.widthValid)
+            text += group.width >= 0.15 ? pl(", szeroko (side ok. ") + juce::String(juce::roundToInt(group.width * 100.0)) + "%)"
+                                        : pl(", raczej w środku (side ok. ") + juce::String(juce::roundToInt(group.width * 100.0)) + "%)";
+        const auto key = trackKey();
+        if (ma::stemGroupHasKey(ghost.group) && key.valid())
+            text += pl(", w tonacji ") + keyText(key);
+        juce::StringArray sections;
+        for (int s = 0; s < ma::kStemSections; ++s)
+            if (group.inSection[static_cast<size_t>(s)])
+                sections.add(sectionText(static_cast<ma::StemSection>(s)).name);
+        if (!sections.isEmpty())
+            text += pl("; w referencjach gra też w sekcjach: ") + sections.joinIntoString(", ");
+    }
+    return text + ".";
 }
 
 juce::String BrainProcessor::stemGroupName(int group)
@@ -1347,23 +1517,96 @@ void BrainProcessor::buildReport()
         {
             item.detail = pl("Słucham miksu: potrzeba ") + juce::String(juce::roundToInt(kMinimumSeconds)) + pl(" s.");
         }
-        else if (mix.tonal.regions.empty())
+        else
+        {
+            // Phase 17: in a sketch the mix is judged with its ghosts in; what they explain is the arrangement's.
+            const bool sketch = mix.sketch.active() && mix.sketch.tonal.valid;
+            const auto& regions = sketch ? mix.sketch.tonal.regions : mix.tonal.regions;
+            auto rangeText = [](const ma::TonalRegion& region) {
+                return (region.hole() ? pl("brakuje ") : pl("za dużo ")) + hzText(region.lowHz) + pl("–") + hzText(region.highHz);
+            };
+            juce::StringArray arrangement;
+            for (size_t i = 0; sketch && i < mix.tonal.regions.size() && i < mix.sketch.arrangementRegion.size(); ++i)
+                if (mix.sketch.arrangementRegion[i] && arrangement.size() < 3)
+                    arrangement.add(rangeText(mix.tonal.regions[i]));
+            const auto arrangementText = arrangement.isEmpty() ? juce::String()
+                                                               : pl(" W samym szkicu (bez duchów): ") + arrangement.joinIntoString(", ")
+                                                                     + pl(". To aranż, nie EQ (widok „Aranż”).");
+            if (regions.empty())
+            {
+                item.status = Status::good;
+                item.detail = (sketch ? pl("Z partiami-duchami miks mieści się w korytarzu celu ") : pl("Cały miks mieści się w korytarzu celu "))
+                              + quoted(juce::String::fromUTF8(currentTarget.name.c_str())) + "." + arrangementText;
+            }
+            else
+            {
+                double worst = 0.0;
+                juce::StringArray parts;
+                for (const auto& region : regions)
+                {
+                    worst = std::max(worst, std::abs(region.deviationDb));
+                    if (parts.size() < 3)
+                        parts.add(rangeText(region));
+                }
+                item.status = worst >= 3.0 ? Status::problem : Status::warning;
+                item.detail = (sketch ? pl("Z partiami-duchami: ") : juce::String()) + parts.joinIntoString(", ")
+                              + pl(". „Zaproponuj” podpowie, co zrobić.") + arrangementText;
+            }
+        }
+        report.push_back(item);
+    }
+
+    // Phase 17: is the drop's arrangement complete, and what to add if not.
+    if (sketchOn)
+    {
+        MixSnapshot::ReportItem item;
+        item.title = pl("Aranż (tryb szkicu)");
+        const auto source = mix.sketch.arrangement.fromReferences
+                                ? pl("referencji ") + quoted(juce::String::fromUTF8(currentStems.name.c_str()))
+                                : pl("typowego dropu house'u (bez referencji ze stemów)");
+        if (useProfiles)
+            item.detail = pl("Tryb szkicu ocenia to, co gra w dropie, a nie nauczone profile.");
+        else if (mix.dropSeconds < kMinimumDropSeconds)
+            item.detail = pl("Puść najgłośniejszą część (drop): sprawdzę, czy ma wszystkie partie. ")
+                          + juce::String(juce::roundToInt(mix.dropSeconds)) + " / " + juce::String(juce::roundToInt(kMinimumDropSeconds)) + " s.";
+        else if (!mix.sketch.active())
         {
             item.status = Status::good;
-            item.detail = pl("Cały miks mieści się w korytarzu celu ") + quoted(juce::String::fromUTF8(currentTarget.name.c_str())) + ".";
+            item.detail = pl("Drop ma wszystkie partie, które ma drop ") + source + ".";
         }
         else
         {
-            double worst = 0.0;
-            juce::StringArray parts;
-            for (const auto& region : mix.tonal.regions)
+            item.status = Status::warning;
+            juce::StringArray names, briefs;
+            for (const auto& ghost : mix.sketch.analysis.ghosts)
             {
-                worst = std::max(worst, std::abs(region.deviationDb));
-                if (parts.size() < 3)
-                    parts.add((region.hole() ? pl("brakuje ") : pl("za dużo ")) + hzText(region.lowHz) + pl("–") + hzText(region.highHz));
+                names.add(ghostName(ghost));
+                briefs.add(pl("• ") + ghostBrief(ghost));
             }
-            item.status = worst >= 3.0 ? Status::problem : Status::warning;
-            item.detail = parts.joinIntoString(", ") + pl(". „Zaproponuj” podpowie, co zrobić.");
+            item.detail = pl("Szkic, brakuje: ") + names.joinIntoString(", ") + pl(". Mózg wstawia za nie partie-duchy z ") + source
+                          + pl(": balans tonalny, proporcje grup i kolizje liczy z nimi, a „Ustaw cały miks” zostawia im miejsce i nie łata "
+                               "EQ-em dziur, które wypełni aranż.\n")
+                          + briefs.joinIntoString("\n");
+            juce::StringArray covers;
+            for (const auto& collision : mix.sketch.collisions)
+                if (covers.size() < 3 && collision.ghost < mix.sketch.analysis.ghosts.size())
+                    covers.add(quoted(mix.channels[collision.masker].name) + pl(" zasłoni: ") + ghostName(mix.sketch.analysis.ghosts[collision.ghost])
+                               + pl(" w ") + hzText(collision.lowHz) + pl("–") + hzText(collision.highHz) + " ("
+                               + juce::String(juce::roundToInt(collision.score * 100.0)) + "%)");
+            if (!covers.isEmpty())
+                item.detail += pl("\nJuż teraz: ") + covers.joinIntoString(", ") + pl(". „Ustaw cały miks” zrobi na to miejsce (do 3 dB).");
+        }
+        juce::StringArray added;
+        if (!plannedOwners.empty())
+            for (const auto& channel : mix.channels)
+                if (channel.spectrumValid && inMixSums(channel)
+                    && std::find(plannedOwners.begin(), plannedOwners.end(), channel.owner) == plannedOwners.end())
+                    added.add(quoted(channel.name));
+        if (!added.isEmpty())
+        {
+            item.status = Status::warning;
+            item.detail += (item.detail.isEmpty() ? juce::String() : pl("\n")) + pl("Doszły kanały: ") + joinNames(added)
+                           + pl(". Kliknij „Ustaw cały miks”, żeby plan objął je razem z resztą.");
         }
         report.push_back(item);
     }
@@ -1573,8 +1816,8 @@ void BrainProcessor::buildReport()
                               + (c.levelDeviationDb > 0.0 ? pl(" dB za głośno") : pl(" dB za cicho")));
                 else if (c.extra)
                     parts.add(stemGroupName(g) + pl(" gra, ") + text.inReferences + pl(" milknie"));
-                else if (c.missing)
-                    parts.add(stemGroupName(g) + pl(" milknie, ") + text.inReferences + pl(" gra"));
+                else if (c.missing && !(mix.sketch.active() && mix.sketch.analysis.missing[static_cast<size_t>(g)]))
+                    parts.add(stemGroupName(g) + pl(" milknie, ") + text.inReferences + pl(" gra")); // a sketch's missing part is in "Aranż"
             }
             const auto& contrast = target.contrast(section);
             const double below = ours.belowDropDb;
@@ -1744,6 +1987,19 @@ void BrainProcessor::propose()
                         + (boost ? pl(" brakuje ") : pl(" jest ")) + juce::String(std::abs(change.deviationDb), 1)
                         + (boost ? pl(" dB do celu ") : pl(" dB za dużo względem celu ")) + targetName;
         }
+        else if (change.kind == ma::SolverChange::Kind::eqCut && static_cast<size_t>(change.maskedChannel) >= mix.channels.size())
+        {
+            // Phase 17: room for a part the sketch does not have yet.
+            const auto& masker = mix.channels[static_cast<size_t>(change.channel)];
+            const auto& ghost = mix.sketch.analysis.ghosts[static_cast<size_t>(change.maskedChannel) - mix.channels.size()];
+            item.owner = masker.owner;
+            item.band = solved.eq[static_cast<size_t>(change.channel)][static_cast<size_t>(change.eqSlot)];
+            item.text = quoted(masker.name) + ": " + juce::String(item.band.gainDb, 1) + pl(" dB przy ") + hzText(item.band.hz)
+                        + " (Q " + juce::String(item.band.q, 1) + pl("), zostawia miejsce na partię, której jeszcze nie ma: ")
+                        + ghostName(ghost) + pl(" w ") + hzText(change.lowHz) + pl("–") + hzText(change.highHz) + " ("
+                        + juce::String(juce::roundToInt(change.scoreBefore * 100.0)) + pl("% → ")
+                        + juce::String(juce::roundToInt(change.scoreAfter * 100.0)) + "%)";
+        }
         else
         {
             const auto& masker = mix.channels[static_cast<size_t>(change.channel)];
@@ -1758,6 +2014,20 @@ void BrainProcessor::propose()
                         + juce::String(juce::roundToInt(change.scoreAfter * 100.0)) + "%)";
         }
         currentProposal.items.push_back(item);
+    }
+    // Phase 17: what the sketch lacks, first, as advice: the plan above already counts with it.
+    if (mix.sketch.active())
+    {
+        std::vector<Proposal::Item> parts;
+        for (const auto& ghost : mix.sketch.analysis.ghosts)
+        {
+            Proposal::Item item;
+            item.advisory = true;
+            item.selected = false;
+            item.text = pl("Szkic, brakująca partia. ") + ghostBrief(ghost);
+            parts.push_back(item);
+        }
+        currentProposal.items.insert(currentProposal.items.begin(), parts.begin(), parts.end());
     }
     proposeDynamics();
     proposeHarmonics();
@@ -2078,9 +2348,10 @@ void BrainProcessor::proposeWholeMix()
                     eq[static_cast<size_t>(b)] = channel.data.eq[b]; // apply keeps what is there
             proposedEq.push_back(eq);
         }
-        std::array<bool, ma::kStemGroups> present {};
-        const auto groups = stemGroupDb(true, present, nullptr, &proposedEq);
-        const auto levels = ma::planStemLevels(groups, present, keyedStems);
+        std::array<bool, ma::kStemGroups> present {}, ghostOnly {};
+        auto groups = stemGroupDb(true, present, nullptr, &proposedEq);
+        addGhostGroups(groups, present, ghostOnly);
+        const auto levels = ma::planStemLevels(groups, present, keyedStems, &ghostOnly);
         const auto setName = quoted(juce::String::fromUTF8(currentStems.name.c_str()));
         for (int g = 0; g < ma::kStemGroups && levels.any; ++g)
         {
@@ -2113,6 +2384,10 @@ void BrainProcessor::proposeWholeMix()
 
     currentProposal.items.insert(currentProposal.items.begin(), chainItems.begin(), chainItems.end());
     currentProposal.wholeMix = true;
+    plannedOwners.clear();
+    for (const auto& channel : mix.channels)
+        if (channel.spectrumValid && inMixSums(channel))
+            plannedOwners.push_back(channel.owner);
 }
 
 const MixSnapshot::Channel* BrainProcessor::kickChannel() const
@@ -3413,6 +3688,7 @@ void BrainProcessor::getStateInformation(juce::MemoryBlock& destData)
     parameters.state.setProperty("keyChroma", chroma.joinIntoString(" "), nullptr);
     parameters.state.setProperty("keySeconds", savedKeySeconds + keySeconds.load(), nullptr);
     parameters.state.setProperty("keyOverride", keyOverride, nullptr);
+    parameters.state.setProperty("sketchMode", sketchOn, nullptr);
     if (auto xml = parameters.copyState().createXml())
         copyXmlToBinary(*xml, destData);
 }
@@ -3450,6 +3726,7 @@ void BrainProcessor::setStateInformation(const void* data, int sizeInBytes)
                 keySeconds.store(0.0);
             }
             keyOverride = juce::jlimit(-1, 23, static_cast<int>(parameters.state.getProperty("keyOverride", -1)));
+            sketchOn = static_cast<bool>(parameters.state.getProperty("sketchMode", true));
             updateKey();
         }
 }
@@ -3684,16 +3961,18 @@ juce::String BrainProcessor::masteringReportHtml() const
     if (s.seconds >= kMinimumPreviewSeconds)
         out << pl(" Podgląd: limiter ścina w głośnej części do ") << juce::String(s.typicalReductionDb, 1) << " dB.";
     out << "</li>";
-    if (mix.tonal.valid && !mix.tonal.regions.empty())
+    // In a sketch, only what stays with the missing parts in belongs to the master's EQ.
+    const auto& masterTonal = mix.sketch.active() && mix.sketch.tonal.valid ? mix.sketch.tonal : mix.tonal;
+    if (masterTonal.valid && !masterTonal.regions.empty())
     {
         out << "<li>" << pl("EQ na sumie (szeroko, względem celu ") << html(quoted(juce::String::fromUTF8(currentTarget.name.c_str()))) << "): ";
         juce::StringArray parts;
-        for (const auto& region : mix.tonal.regions)
+        for (const auto& region : masterTonal.regions)
             parts.add((region.hole() ? "+" : pl("−")) + juce::String(std::abs(region.deviationDb), 1) + " dB " + hzText(region.lowHz) + pl("–")
                       + hzText(region.highHz));
         out << html(parts.joinIntoString(", ")) << pl(". Lepiej poprawić to w miksie, jeśli to jeden kanał.") << "</li>";
     }
-    else if (mix.tonal.valid)
+    else if (masterTonal.valid)
     {
         out << "<li>" << pl("EQ na sumie: balans mieści się w korytarzu celu ") << html(quoted(juce::String::fromUTF8(currentTarget.name.c_str())))
             << pl(", wystarczą drobne korekty do gustu.") << "</li>";
@@ -3778,6 +4057,15 @@ juce::String BrainProcessor::masteringReportHtml() const
         t << "</table></div>";
         return t;
     };
+    if (mix.sketch.active())
+    {
+        out << "<h2>" << pl("Aranż: to jeszcze szkic") << "</h2><section><p>"
+            << pl("Drop nie ma jeszcze wszystkich partii. Balans i proporcje liczone z partiami-duchami; zanim pójdzie do Ozone, dograj:")
+            << "</p><ul>";
+        for (const auto& ghost : mix.sketch.analysis.ghosts)
+            out << "<li>" << html(ghostBrief(ghost)) << "</li>";
+        out << "</ul></section>\n";
+    }
     if (keyedStems.valid() && mix.stems.valid)
     {
         out << "<h2>" << pl("Proporcje jak w referencjach (drop do dropu)") << "</h2><section>";
