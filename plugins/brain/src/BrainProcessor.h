@@ -6,6 +6,7 @@
 #include "ma/StemReference.h"
 #include "ma/CorrelationMeter.h"
 #include "ma/EnergyMap.h"
+#include "ma/GhostNoise.h"
 #include "ma/LoudnessMeter.h"
 #include "ma/MasterPreview.h"
 #include "ma/KickTuning.h"
@@ -261,6 +262,11 @@ public:
     static juce::StringArray systemNames();
     void setPreviewSystem(int index) { previewSystem.store(juce::jlimit(0, ma::kPlaybackSystems - 1, index)); }
     int previewSystemIndex() const { return previewSystem.load(); }
+    // Phase 21: the sketch's ghosts heard as shaped noise in the listening path, during the drop
+    // only. Off on every load (it would end up in an export).
+    void setListenGhosts(bool on) { listenGhostsOn.store(on); }
+    bool listenGhosts() const { return listenGhostsOn.load(); }
+    bool ghostsAudibleNow() const { return ghostAudible.load(); }
 
     const MixSnapshot& snapshot() const { return mix; }
     // Collision analysis on the learned profiles instead of the live spectra.
@@ -492,6 +498,16 @@ private:
     std::atomic<bool> stereo { true };
     std::atomic<double> hostBpm { 0.0 };
     std::atomic<int> previewSystem { 0 };
+    // Phase 21: ghost noise, drums (pulsed) and the rest. The timer publishes the spectra and
+    // whether they play now; the audio thread picks a new version up.
+    void updateGhostNoise();
+    ma::GhostNoise ghostDrums, ghostRest;
+    std::array<std::atomic<float>, ma::SpectrumAnalyzer::kMaxBands> ghostDrumsDb {}, ghostRestDb {};
+    std::atomic<float> ghostDrumsWidth { 0.0f }, ghostRestWidth { 0.0f };
+    std::atomic<int> ghostVersion { 0 };
+    int ghostVersionSeen = -1;
+    std::atomic<bool> listenGhostsOn { false }, ghostAudible { false };
+    juce::SmoothedValue<float> ghostGain;
     ma::SystemSimulator simulator;
     std::atomic<float> outputGainDb { 0.0f };
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> outputGain;

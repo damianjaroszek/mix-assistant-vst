@@ -110,6 +110,13 @@ w których miks gra o 3 dB lub więcej głośniej albo ciszej niż referencje w 
 czerwono). Mózg zna przebieg z pozycji w utworze, więc puść utwór w FL w trybie Song od początku do końca.
 Zestawy referencji zapisane przed fazą 20 nie mają przebiegu: wczytaj ich stemy jeszcze raz.
 
+Odsłuch z duchem (faza 21, zakładka „Aranż”, przełącznik „Słuchaj duchów”): w trybie szkicu Mózg dogrywa w
+odsłuchu brakujące partie jako szum o ich widmie, poziomie i szerokości (perkusja pulsuje na bit z tempa FL).
+Słychać, jak drop zabrzmi, gdy partie dojdą, i czy to, co gra, zostawia im miejsce. Duchy grają tylko w
+dropie (gdy miks jest blisko poziomu dropu) i tylko przy grającym transporcie. Pomiary Mózgu ich nie słyszą,
+ale wychodzą z wtyczki, więc wyłącz przełącznik przed eksportem (raport przypomina). Po każdym otwarciu
+projektu jest wyłączony.
+
 ### Przed masteringiem (Ozone)
 
 „Cel mastera” w Mózgu to głośność, do której Ozone podciągnie master (domyślnie -8 LUFS). Mózg w tle robi

@@ -19,6 +19,7 @@
 #include "ma/StemReference.h"
 #include "ma/Sketch.h"
 #include "ma/EnergyMap.h"
+#include "ma/GhostNoise.h"
 #include "ma/Key.h"
 #include "ma/KickTuning.h"
 #include "ma/MasterPreview.h"
@@ -2709,6 +2710,93 @@ void testEnergyMap()
           "a track shaped like the references has nothing outside");
 }
 
+// Phase 21: ghost noise sounds like the spectrum it is given.
+void testGhostNoise()
+{
+    constexpr double sr = 48000.0;
+    ma::SpectrumAnalyzer::Bands target {};
+    target.fill(-200.0);
+    for (int b = 0; b < 40; ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        if (hz >= 40.0 && hz <= 12000.0)
+            target[static_cast<size_t>(b)] = -30.0 - 6.0 * std::log2(hz / 100.0) * 0.5; // a gentle downward slope
+    }
+    ma::GhostNoise noise;
+    noise.prepare(sr);
+    noise.setSpectrum(target, 0.3);
+    const int total = static_cast<int>(12.0 * sr);
+    std::vector<float> left(static_cast<size_t>(total), 0.0f), right(static_cast<size_t>(total), 0.0f);
+    for (int start = 0; start < total; start += 512)
+        noise.process(left.data() + start, right.data() + start, std::min(512, total - start), 1.0f);
+    ma::SpectrumAnalyzer mono;
+    mono.prepare(sr, ma::BandScale::erb);
+    ma::StereoAnalyzer stereo;
+    stereo.prepare(sr);
+    const int skip = static_cast<int>(1.0 * sr); // past the first frame's fade-in
+    for (int start = skip; start < total; start += 512)
+    {
+        const int len = std::min(512, total - start);
+        const float* ch[] { left.data() + start, right.data() + start };
+        mono.process(ch, 2, len);
+        stereo.process(ch[0], ch[1], len);
+    }
+    const auto got = mono.averageDb();
+    double worst = 0.0;
+    int compared = 0;
+    for (int b = 0; b < 40; ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        if (hz < 60.0 || hz > 10000.0)
+            continue;
+        worst = std::max(worst, std::abs(got[static_cast<size_t>(b)] - target[static_cast<size_t>(b)]));
+        ++compared;
+    }
+    std::printf("  ghost noise: worst band %.2f dB off over %d bands\n", worst, compared);
+    check(compared > 25 && worst < 1.5, "ghost noise measures as the spectrum it was given");
+    double mid = 0.0, side = 0.0;
+    const auto midDb = stereo.averageMidDb(), sideDb = stereo.averageSideDb();
+    for (int b = 0; b < 40; ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        if (hz < 300.0 || hz > 10000.0)
+            continue;
+        mid += std::pow(10.0, midDb[static_cast<size_t>(b)] / 10.0);
+        side += std::pow(10.0, sideDb[static_cast<size_t>(b)] / 10.0);
+    }
+    const double share = side / (mid + side);
+    std::printf("  ghost noise: side share %.2f (asked 0.30)\n", share);
+    check(std::abs(share - 0.3) < 0.05, "its width is the side share it was given");
+
+    // Pulsed on the beat: louder at the hit than between, the same power on average.
+    ma::GhostNoise drums;
+    drums.prepare(sr);
+    drums.setSpectrum(target, 0.0);
+    drums.setPulse(0.06);
+    std::vector<float> l2(static_cast<size_t>(total), 0.0f);
+    for (int start = 0; start < total; start += 512)
+    {
+        const double t = start / sr;
+        drums.process(l2.data() + start, nullptr, std::min(512, total - start), 1.0f, t / 0.5, 0.5);
+    }
+    double hit = 0.0, between = 0.0, all = 0.0, plain = 0.0;
+    for (int i = skip; i < total; ++i)
+    {
+        const double phase = std::fmod(i / sr, 0.5);
+        const double v = static_cast<double>(l2[static_cast<size_t>(i)]) * l2[static_cast<size_t>(i)];
+        if (phase < 0.03)
+            hit += v;
+        else if (phase > 0.3)
+            between += v;
+        all += v;
+        const double m = 0.5 * (static_cast<double>(left[static_cast<size_t>(i)]) + right[static_cast<size_t>(i)]);
+        plain += m * m; // the steady one's mid: the spectrum it was given
+    }
+    check(hit > between * 100.0, "a pulsed ghost hits on the beat");
+    std::printf("  pulsed ghost: average power %.2f dB against steady\n", 10.0 * std::log10(all / plain));
+    check(std::abs(10.0 * std::log10(all / plain)) < 1.5, "and keeps the spectrum's average power");
+}
+
 int main()
 {
     testLoudness();
@@ -2747,6 +2835,7 @@ int main()
     testOneCorrection();
     testSectionAutomation();
     testEnergyMap();
+    testGhostNoise();
     testMasterPreview();
     testWavRoundTrip();
 

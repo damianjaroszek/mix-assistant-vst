@@ -46,6 +46,7 @@ constexpr double kLoudnessLagSeconds = 1.5;    // where the drop's loudness show
 constexpr double kMaxSongSeconds = 600.0;
 constexpr int kDropRunSeconds = 4;             // a drop: this many seconds in a row at its level
 constexpr double kBuildSeconds = 8.0;
+constexpr double kGhostDropRangeDb = 4.0; // phase 21: ghosts play while the mix is this close to its drop level
 constexpr double kSectionGuardSeconds = 1.0; // phase 19: left out on either side of a section boundary
 constexpr double kMinimumBuildSeconds = 4.0;
 constexpr double kSectionRangeDb = 30.0;       // playing at all: within this of the drop
@@ -399,6 +400,12 @@ void BrainProcessor::prepareToPlay(double sampleRate, int)
     masterPreview.setGainDb(previewGainDb.load());
     masterPreview.prepare(sampleRate, channels);
     simulator.prepare(sampleRate);
+    ghostDrums.prepare(sampleRate);
+    ghostDrums.setPulse(0.07);
+    ghostRest.prepare(sampleRate);
+    ghostVersionSeen = -1;
+    ghostGain.reset(sampleRate, 0.4);
+    ghostGain.setCurrentAndTargetValue(0.0f);
     stereo.store(channels >= 2);
     outputGain.reset(sampleRate, 0.1);
     outputGain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(outputGainDb.load()));
@@ -426,9 +433,12 @@ void BrainProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     if (previewResetRequested.exchange(false))
         masterPreview.reset();
 
+    double beatPhase = 0.0; // phase 21: where the block starts within a beat (for a drum ghost)
     if (auto* head = getPlayHead())
         if (const auto position = head->getPosition())
         {
+            if (const auto ppq = position->getPpqPosition())
+                beatPhase = *ppq - std::floor(*ppq);
             if (const auto bpm = position->getBpm())
                 hostBpm.store(*bpm);
             const auto seconds = position->getTimeInSeconds();
@@ -490,6 +500,39 @@ void BrainProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         averageBands[b].store(average[b]);
     }
     analysedSeconds.store(spectrum.framesAnalysed() * hopSeconds);
+
+    // Phase 21: the ghosts, after every measurement (the analysis never hears them) and before the
+    // simulated system (so a phone preview has them too).
+    if (const int version = ghostVersion.load(); version != ghostVersionSeen)
+    {
+        ghostVersionSeen = version;
+        ma::SpectrumAnalyzer::Bands drumsDb {}, restDb {};
+        for (size_t b = 0; b < drumsDb.size(); ++b)
+        {
+            drumsDb[b] = ghostDrumsDb[b].load();
+            restDb[b] = ghostRestDb[b].load();
+        }
+        ghostDrums.setSpectrum(drumsDb, ghostDrumsWidth.load());
+        ghostRest.setSpectrum(restDb, ghostRestWidth.load());
+    }
+    ghostGain.setTargetValue(ghostAudible.load() ? 1.0f : 0.0f);
+    if (ghostGain.isSmoothing() || ghostGain.getTargetValue() > 0.0f)
+    {
+        float* left = buffer.getWritePointer(0);
+        float* right = numChannels >= 2 ? buffer.getWritePointer(1) : nullptr;
+        const double bpm = hostBpm.load();
+        const double beatSeconds = bpm > 0.0 ? 60.0 / bpm : 0.0;
+        // In steps of 32 samples, so the fade stays smooth without a per-sample gain in GhostNoise.
+        for (int start = 0; start < numSamples; start += 32)
+        {
+            const int len = std::min(32, numSamples - start);
+            const float gain = ghostGain.getNextValue();
+            ghostGain.skip(len - 1);
+            const double phase = beatSeconds > 0.0 ? beatPhase + start / (beatSeconds * getSampleRate()) : 0.0;
+            ghostDrums.process(left + start, right != nullptr ? right + start : nullptr, len, gain, phase, beatSeconds);
+            ghostRest.process(left + start, right != nullptr ? right + start : nullptr, len, gain);
+        }
+    }
 
     // Listening through a simulated system; the measurements above still see the real mix.
     simulator.setSystem(static_cast<ma::PlaybackSystem>(previewSystem.load()));
@@ -582,6 +625,7 @@ void BrainProcessor::timerCallback()
     mix.translation = ma::analyseTranslation(translation);
 
     updateSketch();
+    updateGhostNoise();
 
     mix.stemMeasure = {};
     mix.stems = {};
@@ -1294,6 +1338,49 @@ void BrainProcessor::setSketchMode(bool on)
     parameters.state.setProperty("sketchMode", on, nullptr);
 }
 
+void BrainProcessor::updateGhostNoise()
+{
+    // The ghosts' power summed into two layers: the drums (pulsed on the beat) and the rest.
+    std::array<double, ma::SpectrumAnalyzer::kMaxBands> drums {}, rest {};
+    double drumsWidth = 0.0, restWidth = 0.0, restPower = 0.0;
+    const bool active = mix.sketch.active();
+    if (active)
+        for (const auto& ghost : mix.sketch.analysis.ghosts)
+        {
+            auto& into = ghost.group == static_cast<int>(ma::StemGroup::drums) ? drums : rest;
+            double power = 0.0;
+            for (size_t b = 0; b < into.size(); ++b)
+                if (ghost.db[b] > -150.0)
+                {
+                    const double p = std::pow(10.0, ghost.db[b] / 10.0);
+                    into[b] += p;
+                    power += p;
+                }
+            const auto& group = mix.sketch.arrangement.groups[static_cast<size_t>(std::clamp(ghost.group, 0, ma::kStemGroups - 1))];
+            const double width = group.widthValid ? group.width : (ghost.group == static_cast<int>(ma::StemGroup::music) ? 0.3 : 0.1);
+            if (ghost.group == static_cast<int>(ma::StemGroup::drums))
+                drumsWidth = std::max(drumsWidth, width);
+            else
+            {
+                restWidth += width * power; // power-weighted
+                restPower += power;
+            }
+        }
+    for (size_t b = 0; b < drums.size(); ++b)
+    {
+        ghostDrumsDb[b].store(drums[b] > 0.0 ? static_cast<float>(10.0 * std::log10(drums[b])) : -200.0f);
+        ghostRestDb[b].store(rest[b] > 0.0 ? static_cast<float>(10.0 * std::log10(rest[b])) : -200.0f);
+    }
+    ghostDrumsWidth.store(static_cast<float>(drumsWidth));
+    ghostRestWidth.store(static_cast<float>(restPower > 0.0 ? restWidth / restPower : 0.0));
+    ghostVersion.fetch_add(1);
+    // Ghosts are drop parts: they play while the mix is at the drop's level.
+    const double dropAverage = dropUpdates > 0 ? dropLevelSum / static_cast<double>(dropUpdates) : NAN;
+    const double level = shortTermLufs();
+    ghostAudible.store(listenGhostsOn.load() && active && std::isfinite(dropAverage) && std::isfinite(level)
+                       && level >= dropAverage - kGhostDropRangeDb && songSeconds.load() >= 0.0);
+}
+
 void BrainProcessor::updateSketch()
 {
     auto& sketch = mix.sketch;
@@ -1829,7 +1916,12 @@ void BrainProcessor::buildReport()
         MixSnapshot::ReportItem item;
         item.title = pl("Translacja na inne systemy");
         const int preview = previewSystemIndex();
-        if (preview != 0)
+        if (listenGhosts())
+        {
+            item.status = Status::warning;
+            item.detail = pl("W odsłuchu grają partie-duchy (szum w kształcie brakujących partii, tylko w dropie). Wyłącz przed eksportem (zakładka „Aranż”).");
+        }
+        else if (preview != 0)
         {
             item.status = Status::warning;
             item.detail = pl("Odsłuch przez symulację: ") + systemNames()[preview] + pl(". Wyłącz przed eksportem (Odsłuch: Pełne pasmo).");

@@ -124,6 +124,12 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   `compareEnergy` gives first drop / drop count / deepest 4 s between drops against them plus >= 8 s spans >= 3 dB outside. The Brain
   builds ours from `songBins` (`songEnergy`: master short-term per second, group shares K-weighted from the channels' band powers);
   report "Przebieg utworu", HTML, tab "Energia" (`EnergyView`). Advice and view only.
+  Phase 21 audible ghosts (`ma/GhostNoise.h`): random-phase FFT overlap-add noise (8192, square-root Hann, half overlap) shaped to an
+  ERB spectrum as `SpectrumAnalyzer` reads it (the mid; a band narrower than a bin goes to its nearest bin), an independent side stream
+  for the side share, optionally pulsed per beat (mean square kept). The Brain (`updateGhostNoise` in the timer) sums the sketch's
+  ghosts into drums (pulsed, host ppq) and the rest, publishes them through atomics, and `ghostAudible` = `listenGhosts` (not saved)
+  && sketch active && transport playing && short-term within 4 dB of the drop average. Added after every measurement, before the
+  playback simulator; report warning while on.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 
