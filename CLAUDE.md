@@ -106,6 +106,12 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   `arrangementRegions` = plain regions the ghosts explain), to stem levels (`addGhostGroups`; `planStemLevels` `fixed`), to the
   solver (`SolverChannel::ghost`: never cut, cuts making room for one capped at 3 dB, tonal excess left alone when ghosts carry
   >= 30%; `StemShapeInput::arrangementHole` skipped) and to collisions; report "Aranż", tab "Aranż", advisory proposal items.
+  Phase 18 one correction per problem: with `SolverOptions::tonalTarget` + `tonalMasterDb` the solver's tonal stage predicts the
+  master per band from the change of each channel from `nowDb` (Brain: `Channel::measuredDb`, untouched by a planned cleanup) or
+  rawDb + `currentEq` to rawDb + `gainDb` + proposed EQ, re-compares after each fix (largest region first, each range once) and steps
+  an overshooting bell back (< 1 dB dropped); a tonal cut where a deep enough cut already sits is not recorded. `proposeWholeMix`
+  plans stem group levels first (`planLevels`), solves with them as `gainDb`, re-plans with the proposed EQ and re-solves once if a
+  group moved more than 0.5 dB.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

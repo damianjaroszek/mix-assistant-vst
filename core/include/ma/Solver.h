@@ -19,7 +19,8 @@ namespace ma
 // model and deepens the cut while that still helps. Gain is only touched to restore the
 // pre-master headroom, equally on every channel so the balance stays.
 //
-// With a tonal target it then works on the mix's holes and excesses: a hole is filled
+// With a tonal target it then works on the mix's holes and excesses (as the rest of the
+// proposal will leave them, phase 18): a hole is filled
 // by boosting the most important channel that already has content there, as long as
 // that does not create a new collision; an excess is cut on the least important channel
 // that carries it. When no channel has anything in a hole, it says so and names the
@@ -32,6 +33,15 @@ struct SolverChannel
     // Phase 17: a part the arrangement does not have yet (sketch mode). It counts in collisions
     // and the tonal balance, so the mix leaves it room, but never gets a change itself.
     bool ghost = false;
+    // Phase 18: the EQ the channel has now (what the measured master already carries) and a
+    // level move planned with this proposal (a stem group's gain). The tonal stage predicts the
+    // master from them, so nothing is corrected twice and a second solve gives the same answer.
+    EqSettings currentEq {};
+    double gainDb = 0.0;
+    // What the master gets from the channel now, when it differs from rawDb + currentEq (a
+    // planned cleanup already in rawDb). Unset: rawDb + currentEq.
+    SpectrumAnalyzer::Bands nowDb {};
+    bool hasNow = false;
 };
 
 struct SolverOptions
@@ -41,6 +51,12 @@ struct SolverOptions
     double headroomGainDb = 0.0;  // <= 0: gain for every channel to get back under the ceiling
     double maxBoostDb = 4.0;      // highest boost for filling a tonal hole
     const TonalComparison* tonal = nullptr; // the measured mix against a target, if there is one
+    // Phase 18: with the target and the measured master (any scale, the channels' current EQ in),
+    // the tonal stage works on the master as the proposal will leave it: moved by the change from
+    // each channel's current EQ to the proposed one (collision and stem cuts included) and by its
+    // gainDb, measured again after each fix. `tonal` is then only a fallback.
+    const TonalTarget* tonalTarget = nullptr;
+    Curve tonalMasterDb {};
     // Phase 9: each group's shape (drums, bass, vocals, the rest) against stem references,
     // measured over the drop. Broad bells on the group's channel that carries the region.
     const StemShapeInput* stems = nullptr;
