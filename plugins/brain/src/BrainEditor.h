@@ -55,6 +55,7 @@ private:
     int shownSection = -1; // the drop, else a ma::StemSection
     // Phase 17: sketch mode.
     brain::ArrangementView arrangementView;
+    brain::EnergyView energyView; // phase 20
     juce::ToggleButton sketchButton;
     void updateKeyControls(juce::String& status, bool& warning);
     void refreshStemTargets();
@@ -90,7 +91,7 @@ private:
     void saveMasteringReport();
 
     // Fixed window: the meters and the proposal's buttons stay, everything else is one tab at a time.
-    enum class Tab { report, channels, collisions, proposal, verdict, tonal, stems, arrangement, translation, stereo, count };
+    enum class Tab { report, channels, collisions, proposal, verdict, tonal, stems, arrangement, energy, translation, stereo, count };
     std::array<ma::ui::Page, static_cast<size_t>(Tab::count)> pages;
     ma::ui::Tabs tabs;
     void layoutChannels(juce::Rectangle<int> area);

@@ -5,6 +5,7 @@
 #include "ma/StereoPlanner.h"
 #include "ma/StemReference.h"
 #include "ma/CorrelationMeter.h"
+#include "ma/EnergyMap.h"
 #include "ma/LoudnessMeter.h"
 #include "ma/MasterPreview.h"
 #include "ma/KickTuning.h"
@@ -116,6 +117,16 @@ struct MixSnapshot
         bool active() const { return analysis.sketch; }
     };
     Sketch sketch;
+
+    // Phase 20: the energy map. Our track a second at a time (from the host's position) against
+    // the references' own, lined up at the first drop.
+    struct Energy
+    {
+        ma::EnergyTimeline ours;
+        ma::EnergyCorridor references;
+        ma::EnergyComparison comparison;
+    };
+    Energy energy;
 };
 
 // The solver's proposal, waiting for the user to pick what to apply.
@@ -321,6 +332,10 @@ public:
     juce::String automationText(ma::StemSection section) const;
     // Per group: "-4.5 dB", "zgaś" or empty.
     static juce::String automationStep(const ma::SectionAutomation& automation, int group);
+    // A point in the song: "takt 33 (1:02)" at the host's tempo (4/4), else "1:02".
+    juce::String songTime(double seconds) const;
+    // Phase 20: the energy map's verdict (report, HTML, the tab's status).
+    MixSnapshot::ReportItem energyItem() const;
     // Phase 12 and 16: the same set's intros, builds and breaks.
     const ma::StemTarget& stemSectionTarget(ma::StemSection s) const { return keyedSectionStems[static_cast<size_t>(s)]; }
     bool selectStemTarget(const juce::String& name);
@@ -435,6 +450,8 @@ private:
                                                                          const std::vector<ma::EqSettings>* eqs,
                                                                          const SectionSums* section = nullptr) const;
     void updateSongSections();
+    // Phase 20: the song's seconds as an energy timeline (whole and groups against the drop).
+    ma::EnergyTimeline songEnergy() const;
     // A group short in a region its channels' cleanup or the Brain's cuts take out on purpose
     // (more than 3 dB of it): the report does not ask for it back.
     bool cutOnPurpose(int group, int region) const;

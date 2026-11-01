@@ -118,6 +118,12 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   corridor; < 1 dB dropped. The Brain plans it in the timer (`MixSnapshot::Section::automation`, `ranges` from `SectionSums::seconds`,
   intro/build measured with a 1 s guard each side of a boundary, break ranges before the first drop hidden); report, HTML and the
   "Referencje" tab's "automatyka" column. Advice only: it belongs in FL's channel volume (before the Agent) so a re-measure is idempotent.
+  Phase 20 energy map (`ma/EnergyMap.h`): `StemProfile::energy` (`EnergyTimeline`: whole and per-group short-term loudness a second
+  minus the drop's, from `StemProfiler::measureGroup` in pass 1; `energy`/`egroup` lines in `.mastems`). `energyEntries` (first second
+  >= -3 dB starting a 4 s run after a 4 s gap, minus 1.5 s) for both sides, `energyCorridor` lines references up at their first drop,
+  `compareEnergy` gives first drop / drop count / deepest 4 s between drops against them plus >= 8 s spans >= 3 dB outside. The Brain
+  builds ours from `songBins` (`songEnergy`: master short-term per second, group shares K-weighted from the channels' band powers);
+  report "Przebieg utworu", HTML, tab "Energia" (`EnergyView`). Advice and view only.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 
