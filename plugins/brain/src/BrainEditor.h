@@ -51,8 +51,8 @@ private:
     juce::ComboBox keyBox;
     juce::TextButton redetectKeyButton;
     // Phase 12: which section the view compares.
-    juce::TextButton dropSectionButton, breakSectionButton;
-    bool showBreak = false;
+    juce::TextButton introSectionButton, buildSectionButton, dropSectionButton, breakSectionButton;
+    int shownSection = -1; // the drop, else a ma::StemSection
     void updateKeyControls(juce::String& status, bool& warning);
     void refreshStemTargets();
     void askForNewStemTarget();

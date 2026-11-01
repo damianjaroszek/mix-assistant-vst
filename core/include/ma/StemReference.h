@@ -65,6 +65,17 @@ StemMeasure measureStemGroups(const std::array<SpectrumAnalyzer::Bands, kStemGro
                               const std::array<SpectrumAnalyzer::Bands, kStemGroups>& sideDb,
                               const std::array<bool, kStemGroups>& present);
 
+// Phase 12 and 16: the sections around the drop that are compared on their own. The intro is
+// what plays before the first drop (without its build), the build the last 8 s before a drop
+// comes in, the break the part without drums after the first drop.
+enum class StemSection
+{
+    intro = 0,
+    build,
+    breakdown
+};
+constexpr int kStemSections = 3;
+
 // One reference track.
 struct StemProfile
 {
@@ -93,6 +104,9 @@ struct StemProfile
         std::array<SpectrumAnalyzer::Bands, kStemGroups> groupDb {}, sideDb {};
     };
     Section breakdown;
+    Section intro, build; // phase 16
+    Section& section(StemSection s) { return s == StemSection::intro ? intro : s == StemSection::build ? build : breakdown; }
+    const Section& section(StemSection s) const { return s == StemSection::intro ? intro : s == StemSection::build ? build : breakdown; }
 };
 
 // Stems that carry the key: bass, vocals and the rest. Drums do not (the kick's own pitch is
@@ -114,12 +128,14 @@ public:
     // Pass 1, phase 12: the drums stem's level of the same block, so the break can be found
     // (no drums stem, no break).
     void measureDrums(const float* left, const float* right, int numSamples);
-    // Between the passes: the blocks within 3 dB of the loudest short-term loudness, and the
-    // break (drums 15 dB under their drop level, the rest within 20 dB of the drop).
+    // Between the passes: the blocks within 3 dB of the loudest short-term loudness, the break
+    // (drums 15 dB under their drop level, the rest within 20 dB of the drop) and (phase 16)
+    // the intro and the builds.
     void chooseDrop();
     bool inDrop(int blockIndex) const;
-    bool inBreak(int blockIndex) const;
-    bool needed(int blockIndex) const { return inDrop(blockIndex) || inBreak(blockIndex); }
+    bool inSection(StemSection section, int blockIndex) const;
+    bool inBreak(int blockIndex) const { return inSection(StemSection::breakdown, blockIndex); }
+    bool needed(int blockIndex) const;
     int blocks() const { return static_cast<int>(loudness.size()); }
 
     // Pass 2, the same blocks: each group's signal (nullptr = the group has no stem) and the
@@ -136,10 +152,13 @@ private:
     LoudnessMeter meter;
     KeyDetector keys;
     std::vector<double> loudness, drums;
-    std::vector<char> drop, breakdown;
-    std::array<StereoAnalyzer, kStemGroups> groups, breakGroups;
-    std::array<bool, kStemGroups> seen {}, breakSeen {};
-    int breakBlocks = 0;
+    std::vector<char> drop;
+    std::array<StereoAnalyzer, kStemGroups> groups;
+    std::array<bool, kStemGroups> seen {};
+    std::array<std::vector<char>, kStemSections> sections;
+    std::array<std::array<StereoAnalyzer, kStemGroups>, kStemSections> sectionGroups;
+    std::array<std::array<bool, kStemGroups>, kStemSections> sectionSeen {};
+    std::array<int, kStemSections> sectionBlocks {};
     SpectrumAnalyzer sum, mix;
     std::vector<float> sumLeft, sumRight;
     int dropBlocks = 0;
@@ -163,6 +182,11 @@ struct StemTarget
     std::array<std::array<StemCorridor, kStemRegions>, kStemGroups> shape {};
     std::array<StemCorridor, kStemGroups> width {};
     StemCorridor breakContrast; // phase 12: how much quieter the references' break is than their drop (dB)
+    StemCorridor introContrast, buildContrast; // phase 16, the same for the intro and the build
+    const StemCorridor& contrast(StemSection s) const
+    {
+        return s == StemSection::intro ? introContrast : s == StemSection::build ? buildContrast : breakContrast;
+    }
 
     void rebuild();
     bool valid() const { return !profiles.empty(); }
@@ -171,6 +195,8 @@ struct StemTarget
 // Phase 12: the same set as its breaks (profiles without one left out), to compare with the
 // break of the mix through the same functions.
 StemTarget stemBreakTarget(const StemTarget& target);
+// Phase 16: any section the same way (profiles without it left out).
+StemTarget stemSectionTarget(const StemTarget& target, StemSection section);
 
 // The set moved to the track's key: each profile with a known key and spectra is shifted (its
 // groups with a key, the drums stay) and measured again; the corridors rebuilt. An unknown
