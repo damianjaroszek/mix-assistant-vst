@@ -162,6 +162,10 @@ public:
                                                      { "side2Freq", "side2Gain", "side2Q" },
                                                      { "side3Freq", "side3Gain", "side3Q" },
                                                      { "side4Freq", "side4Gain", "side4Q" } };
+    // Phase 25: the widener, a delayed copy of the mid in the side (at -40 dB it is off).
+    static constexpr const char* widenAmountId = "widenAmount";
+    static constexpr const char* widenLowId = "widenFrom";
+    static constexpr const char* widenDelayId = "widenDelay";
     // Live coherence per ERB band for the editor (+1 mono, -1 anti-phase); false while not measured.
     // After the mid-side EQ; `audible` marks bands within 40 dB of the channel's loudest.
     bool copyStereo(double* coherence, bool* audible) const;
@@ -329,8 +333,8 @@ private:
     std::atomic<float> backupTrimAudio { 0.0f };
     std::array<std::array<std::atomic<float>, 3>, ma::kEqBands> backupEqAudio {};
     // DuckSettings (8), sync, polarity, harmonics (3), transients (3), cleanup (5), compressor (7), clipper (3), evener (3)
-    // stereo (12), saturation (4)
-    static constexpr int kDynamicValues = 59;
+    // stereo (12 + the widener's 3, phase 25), saturation (4)
+    static constexpr int kDynamicValues = 62;
     std::array<std::atomic<float>, kDynamicValues> backupDynamicsAudio {};
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(AgentProcessor)

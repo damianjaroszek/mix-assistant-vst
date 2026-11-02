@@ -1932,6 +1932,143 @@ void testCentreZones()
     check(solveWith(channels, mix, close, true).changes.empty(), "centre: half a dB off the centre is left alone");
 }
 
+// Phase 25: the widener and widening every part to its group's width in the references.
+void testWidth()
+{
+    constexpr double sr = 48000.0;
+    // A mono part (noise) through the widener at -6 dB from 300 Hz.
+    {
+        ma::StereoShaper shaper;
+        shaper.prepare(sr);
+        ma::StereoSettings settings;
+        settings.widen.amountDb = -6.0f;
+        settings.widen.lowHz = 300.0f;
+        settings.widen.delayMs = 8.0f;
+        shaper.setSettings(settings);
+        ma::StereoAnalyzer analyser;
+        analyser.prepare(sr);
+        uint32_t seed = 12345;
+        auto noise = [&seed]() { seed = seed * 1664525u + 1013904223u; return static_cast<float>(seed >> 8) / 8388608.0f - 1.0f; };
+        const int n = 512;
+        std::vector<float> l(static_cast<size_t>(n)), r(static_cast<size_t>(n)), in(static_cast<size_t>(n));
+        double monoError = 0.0;
+        for (int block = 0; block < static_cast<int>(6.0 * sr / n); ++block)
+        {
+            for (int i = 0; i < n; ++i)
+                in[static_cast<size_t>(i)] = l[static_cast<size_t>(i)] = r[static_cast<size_t>(i)] = 0.2f * noise();
+            float* channels[] { l.data(), r.data() };
+            shaper.process(channels, 2, n);
+            for (int i = 0; i < n; ++i)
+                monoError = std::max(monoError, static_cast<double>(std::abs(0.5f * (l[static_cast<size_t>(i)] + r[static_cast<size_t>(i)]) - in[static_cast<size_t>(i)])));
+            analyser.process(l.data(), r.data(), n);
+        }
+        check(monoError < 1e-5, "widener: the mono sum stays exactly as it was");
+        const auto mid = analyser.averageMidDb(), side = analyser.averageSideDb();
+        auto coherenceAt = [&](double hz) {
+            int best = 0;
+            for (int b = 0; b < 40; ++b)
+                if (std::abs(std::log(ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b) / hz))
+                    < std::abs(std::log(ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, best) / hz)))
+                    best = b;
+            return ma::coherence(mid[static_cast<size_t>(best)], side[static_cast<size_t>(best)]);
+        };
+        const double expected = (1.0 - std::pow(10.0, -0.6)) / (1.0 + std::pow(10.0, -0.6));
+        std::printf("  widener: coherence %.2f at 100 Hz, %.2f at 2 kHz (expected %.2f), %.2f at 8 kHz\n", coherenceAt(100.0), coherenceAt(2000.0),
+                    expected, coherenceAt(8000.0));
+        check(coherenceAt(100.0) > 0.9, "widener: the low end stays mono");
+        checkNear(coherenceAt(2000.0), expected, 0.08, "widener: the side it makes is the set amount under the mid");
+        checkNear(10.0 * std::log10(ma::widenPowerRatio(settings, 2000.0)), -6.0, 0.1, "widener: the predicted side matches its setting (dB)");
+    }
+
+    // The planner with references: music plays at coherence 0.4, drums 0.6, vocals 0.8.
+    auto flat = [](double db) { ma::SpectrumAnalyzer::Bands b {}; b.fill(db); return b; };
+    ma::WidthTarget width;
+    width.valid = true;
+    for (int r = 2; r < ma::kStemRegions; ++r)
+    {
+        width.coherence[static_cast<size_t>(ma::StemGroup::music)][static_cast<size_t>(r)] = 0.4;
+        width.coherence[static_cast<size_t>(ma::StemGroup::drums)][static_cast<size_t>(r)] = 0.6;
+        width.coherence[static_cast<size_t>(ma::StemGroup::vocals)][static_cast<size_t>(r)] = 0.8;
+        for (int g = 0; g < ma::kStemGroups; ++g)
+            width.known[static_cast<size_t>(g)][static_cast<size_t>(r)] = true;
+    }
+    auto channel = [&](ma::Role role, int priority, double midDb, double sideDb) {
+        ma::StereoChannel c { role, priority, true, flat(midDb), flat(sideDb) };
+        c.group = ma::stemGroupForRole(role);
+        return c;
+    };
+    std::vector<ma::StereoChannel> mix { channel(ma::Role::kick, 1, -20.0, -200.0), channel(ma::Role::bass, 2, -22.0, -200.0),
+                                         channel(ma::Role::vocal, 2, -24.0, -200.0), channel(ma::Role::pad, 6, -30.0, -200.0),
+                                         channel(ma::Role::lead, 4, -28.0, -38.0), channel(ma::Role::percussion, 5, -32.0, -200.0) };
+    ma::StereoMaster master;
+    const auto plans = ma::planStereo(mix, master, &width);
+    for (size_t i = 0; i < plans.size(); ++i)
+        for (const auto& fix : plans[i].fixes)
+            std::printf("  width: channel %zu %s %+.1f dB from %.0f Hz (reference %.2f)\n", i, fix.widener ? "widener" : "side lift", fix.gainDb,
+                        fix.lowHz, fix.referenceCoherence);
+    check(plans[0].fixes.empty() && plans[1].fixes.empty(), "width: kick and bass stay in the centre");
+    check(plans[2].fixes.empty(), "width: a mono vocal gets no widener");
+    check(ma::widenOn(plans[3].settings) && ma::widenOn(plans[5].settings), "width: the mono pad and percussion get the widener");
+    check(!ma::widenOn(plans[4].settings) && ma::isOn(plans[4].settings), "width: the lead that has side gets it lifted instead");
+
+    auto bandCoherence = [&](size_t i, int b) {
+        const auto& c = mix[i];
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        const double side = std::pow(10.0, (c.sideDb[static_cast<size_t>(b)] + ma::sideResponseDb(plans[i].settings, hz)) / 10.0)
+                            + std::pow(10.0, c.midDb[static_cast<size_t>(b)] / 10.0) * ma::widenPowerRatio(plans[i].settings, hz);
+        return ma::coherence(c.midDb[static_cast<size_t>(b)], 10.0 * std::log10(std::max(side, 1e-30)));
+    };
+    double lowest = 1.0, padAt2k = 1.0, sumLowest = 1.0;
+    for (int b = 0; b < 40; ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        if (hz < 150.0)
+        {
+            for (size_t i = 0; i < mix.size(); ++i)
+                check(std::abs(bandCoherence(i, b) - ma::coherence(mix[i].midDb[static_cast<size_t>(b)], mix[i].sideDb[static_cast<size_t>(b)])) < 0.05,
+                      "width: nothing below 150 Hz gets wider");
+            continue;
+        }
+        double mid = 0.0, side = 0.0;
+        for (size_t i = 0; i < mix.size(); ++i)
+        {
+            lowest = std::min(lowest, bandCoherence(i, b));
+            mid += std::pow(10.0, mix[i].midDb[static_cast<size_t>(b)] / 10.0);
+            const double c = bandCoherence(i, b);
+            side += std::pow(10.0, mix[i].midDb[static_cast<size_t>(b)] / 10.0) * (1.0 - c) / (1.0 + c);
+        }
+        sumLowest = std::min(sumLowest, ma::coherence(10.0 * std::log10(mid), 10.0 * std::log10(side)));
+        if (std::abs(hz - 2000.0) < 200.0)
+            padAt2k = bandCoherence(3, b);
+    }
+    std::printf("  width: pad at 2 kHz %.2f, lowest band of any channel %.2f, of the sum %.2f\n", padAt2k, lowest, sumLowest);
+    check(padAt2k < 0.55 && padAt2k > 0.3, "width: the pad ends near its group's width in the references");
+    check(lowest >= 0.2 - 1e-6 && sumLowest >= 0.2 - 1e-6, "width: no band of a channel or of the sum under 0.2");
+
+    // References that play everything near uncorrelated: the margin still holds for every band and the sum.
+    auto wide = width;
+    for (auto& g : wide.coherence)
+        g.fill(0.0);
+    const auto widest = ma::planStereo(mix, master, &wide);
+    double floor = 1.0;
+    for (size_t i = 0; i < mix.size(); ++i)
+        for (int b = 0; b < 40; ++b)
+        {
+            const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+            const double side = std::pow(10.0, (mix[i].sideDb[static_cast<size_t>(b)] + ma::sideResponseDb(widest[i].settings, hz)) / 10.0)
+                                + std::pow(10.0, mix[i].midDb[static_cast<size_t>(b)] / 10.0) * ma::widenPowerRatio(widest[i].settings, hz);
+            floor = std::min(floor, ma::coherence(mix[i].midDb[static_cast<size_t>(b)], 10.0 * std::log10(std::max(side, 1e-30))));
+        }
+    check(floor >= 0.2 - 1e-6, "width: references wider than the margin are followed only down to 0.2");
+
+    // Without references: the phase 8 plan, no widener anywhere.
+    const auto plain = ma::planStereo(mix, master);
+    bool none = true;
+    for (const auto& plan : plain)
+        none = none && !ma::widenOn(plan.settings);
+    check(none, "width: no references, no widener");
+}
+
 void testMasterPreview()
 {
     constexpr double sr = 48000.0, pi = 3.14159265358979323846;
@@ -2978,6 +3115,7 @@ int main()
     testSketch();
     testOneCorrection();
     testCentreZones();
+    testWidth();
     testSectionAutomation();
     testEnergyMap();
     testGhostNoise();

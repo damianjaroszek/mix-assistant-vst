@@ -2716,6 +2716,16 @@ bool sameCompressor(const ma::CompressorSettings& a, const ma::CompressorSetting
 juce::String stereoFixText(const ma::StereoPlan::Fix& fix)
 {
     const auto range = hzText(fix.lowHz) + pl("–") + hzText(fix.highHz);
+    if (fix.toReference)
+    {
+        const auto widths = pl(" (korelacja ") + juce::String(fix.coherenceBefore, 2) + pl(" → ") + juce::String(fix.coherenceAfter, 2)
+                            + pl(", grupa w referencjach ") + juce::String(fix.referenceCoherence, 2) + pl("; nigdy poniżej 0,2)");
+        if (fix.widener)
+            return pl("poszerzenie od ") + hzText(fix.lowHz) + pl(": kanał jest prawie mono, a jego grupa gra w referencjach szerzej. "
+                                                                 "Do side idzie kopia środka opóźniona o kilka ms, ")
+                   + juce::String(fix.gainDb, 1) + pl(" dB pod środkiem; w mono nic się nie zmienia") + widths;
+        return pl("side +") + juce::String(fix.gainDb, 1) + pl(" dB w ") + range + pl(": jego grupa gra tu w referencjach szerzej") + widths;
+    }
     if (fix.lift)
         return pl("side +") + juce::String(fix.gainDb, 1) + pl(" dB w ") + range + pl(": miks jest tam prawie mono, a kanał zostaje w fazie (")
                + juce::String(fix.coherenceBefore, 2) + pl(" → ") + juce::String(fix.coherenceAfter, 2) + ")";
@@ -2813,13 +2823,16 @@ void BrainProcessor::proposeWholeMix()
         in.role = chain[c].role;
         in.priority = channel.data.priority;
         in.valid = channel.spectrumValid && channel.stereoValid;
+        in.group = ma::stemGroupForRole(in.role);
         for (int b = 0; b < ma::bus::kBands; ++b)
         {
             in.midDb[static_cast<size_t>(b)] = channel.midDb[static_cast<size_t>(b)];
             in.sideDb[static_cast<size_t>(b)] = channel.sideDb[static_cast<size_t>(b)];
         }
     }
-    const auto stereoPlans = ma::planStereo(stereoIn, mix.master);
+    // Phase 25: with stem references, every part to its group's width in them.
+    const auto width = keyedStems.valid() ? ma::widthTargetFrom(keyedStems) : ma::WidthTarget {};
+    const auto stereoPlans = ma::planStereo(stereoIn, mix.master, &width);
 
     // Collisions, kick and bass, translation: the usual proposal, made on the mix as it will
     // sound with the planned cleanup, so the solver does not cut what the high-pass removes.
@@ -3022,7 +3035,13 @@ void BrainProcessor::proposeWholeMix()
                                                 || (!offA && !offB && std::abs(a.db - b.db) < 0.1f && std::abs(a.q - b.q) < 0.1f
                                                     && std::abs(std::log2(a.hz / b.hz)) < 0.02);
                                      });
-        if (same || (stereoPlan.fixes.empty() && !ma::isOn(channel.data.stereo)))
+        const auto& want = stereoPlan.settings.widen;
+        const auto& have = channel.data.stereo.widen;
+        const bool sameWiden = ma::widenOn(stereoPlan.settings) == ma::widenOn(channel.data.stereo)
+                               && (!ma::widenOn(stereoPlan.settings)
+                                   || (std::abs(want.amountDb - have.amountDb) < 0.6f && std::abs(std::log2(want.lowHz / have.lowHz)) < 0.05f
+                                       && std::abs(want.delayMs - have.delayMs) < 0.2f));
+        if ((same && sameWiden) || (stereoPlan.fixes.empty() && !ma::isOn(channel.data.stereo)))
             continue;
         Proposal::Item item;
         item.action = Proposal::Item::Action::chain;
@@ -3346,7 +3365,7 @@ Proposal::Verdict BrainProcessor::judge(size_t index, const ma::ChainPlan& plan,
             tool = ma::bus::toolClipper;
         else if (reason.startsWith(pl("Linia basu")) && plan.evener.on > 0.5f)
             tool = ma::bus::toolEvener;
-        else if (reason.startsWith(pl("Stereo: side")))
+        else if (reason.startsWith(pl("Stereo: side")) || reason.startsWith(pl("Stereo: poszerzenie")))
             tool = ma::bus::toolStereo;
         else if (reason.startsWith(pl("Saturacja: ")) && plan.saturation.on > 0.5f)
             tool = ma::bus::toolSaturation;

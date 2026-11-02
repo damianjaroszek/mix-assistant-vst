@@ -184,7 +184,8 @@ AgentEditor::AgentEditor(AgentProcessor& p)
     styleLabel(evenRefLabel, pl("Nuta"), colours::quiet, 13.0f);
     evenRefLabel.setTooltip(pl("Typowa nuta linii basu: ta zostaje bez zmian."));
     styleLabel(stereoLabel, pl("Faza w pasmach (mid-side)"), colours::quiet);
-    stereoLabel.setTooltip(pl("Jak Correlometer: na dole przeciwfaza, która w mono znika. „Analizuj” (cały łańcuch) zdejmuje tam side."));
+    stereoLabel.setTooltip(pl("Jak Correlometer: na dole przeciwfaza, która w mono znika. „Analizuj” (cały łańcuch) zdejmuje tam side, "
+                              "a ze stemami referencji poszerza kanał do szerokości jego grupy w referencjach (nigdy poniżej korelacji 0,2)."));
     for (auto* label : { &cleanStatus, &compStatus, &clipStatus, &evenStatus, &stereoStatus })
     {
         styleLabel(*label, {}, colours::quiet, 13.0f);
@@ -522,6 +523,10 @@ void AgentEditor::updateChainStatus()
     for (const auto& bell : dynamics.stereo.side)
         if (std::abs(bell.db) > 0.01f)
             bells.add("side " + signedDb(bell.db) + " @ " + juce::String(juce::roundToInt(bell.hz)) + " Hz");
+    if (ma::widenOn(dynamics.stereo))
+        bells.add(pl("poszerzenie ") + juce::String(dynamics.stereo.widen.amountDb, 1) + pl(" dB od ")
+                  + juce::String(juce::roundToInt(dynamics.stereo.widen.lowHz)) + " Hz (" + juce::String(dynamics.stereo.widen.delayMs, 1)
+                  + pl(" ms; w mono bez zmian)"));
     stereoStatus.setText(bells.isEmpty() ? pl("Mid-side EQ wyłączony.") : bells.joinIntoString(", "), juce::dontSendNotification);
     stereoStatus.setColour(juce::Label::textColourId, bells.isEmpty() ? colours::quiet : colours::good);
 }

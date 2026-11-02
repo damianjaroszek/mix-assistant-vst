@@ -34,6 +34,23 @@ struct Biquad
         return f;
     }
 
+    // RBJ cookbook high-pass.
+    static Biquad highPass(double sampleRate, double hz, double q = 0.7071067811865476)
+    {
+        constexpr double kPi = 3.14159265358979323846;
+        const double w = 2.0 * kPi * hz / sampleRate;
+        const double alpha = std::sin(w) / (2.0 * q);
+        const double cosw = std::cos(w);
+        const double a0 = 1.0 + alpha;
+        Biquad f;
+        f.b0 = (1.0 + cosw) / 2.0 / a0;
+        f.b1 = -(1.0 + cosw) / a0;
+        f.b2 = (1.0 + cosw) / 2.0 / a0;
+        f.a1 = -2.0 * cosw / a0;
+        f.a2 = (1.0 - alpha) / a0;
+        return f;
+    }
+
     // Magnitude response at `hz`, in dB.
     double magnitudeDb(double hz, double sampleRate) const
     {

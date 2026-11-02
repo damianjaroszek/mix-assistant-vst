@@ -52,14 +52,30 @@ double sideResponseDb(const StereoSettings& settings, double hz)
     return db;
 }
 
+bool widenOn(const StereoSettings& settings)
+{
+    return settings.widen.amountDb > kWidenOffDb;
+}
+
+double widenPowerRatio(const StereoSettings& settings, double hz)
+{
+    if (!widenOn(settings))
+        return 0.0;
+    const double highPass = 2.0 * Biquad::highPass(48000.0, settings.widen.lowHz).magnitudeDb(hz, 48000.0);
+    return std::pow(10.0, (2.0 * settings.widen.amountDb + 2.0 * highPass) / 20.0);
+}
+
 bool isOn(const StereoSettings& settings)
 {
-    return std::any_of(settings.side.begin(), settings.side.end(), [](const auto& b) { return std::abs(b.db) > 0.01f; });
+    return widenOn(settings)
+           || std::any_of(settings.side.begin(), settings.side.end(), [](const auto& b) { return std::abs(b.db) > 0.01f; });
 }
 
 void StereoShaper::prepare(double newSampleRate)
 {
     sampleRate = newSampleRate;
+    delay.assign(static_cast<size_t>(std::ceil(kMaxWidenDelayMs * 0.001 * newSampleRate)) + 2, 0.0);
+    delayPos = 0;
     initialised = false;
     setSettings(settings);
     reset();
@@ -69,6 +85,10 @@ void StereoShaper::reset()
 {
     for (auto& f : bells)
         f.reset();
+    for (auto& f : widenHighPass)
+        f.reset();
+    std::fill(delay.begin(), delay.end(), 0.0);
+    delayPos = 0;
 }
 
 void StereoShaper::setSettings(const StereoSettings& next)
@@ -89,6 +109,19 @@ void StereoShaper::setSettings(const StereoSettings& next)
         bells[b].a1 = fresh.a1;
         bells[b].a2 = fresh.a2;
     }
+    widenGain = widenOn(settings) ? std::pow(10.0, settings.widen.amountDb / 20.0) : 0.0;
+    const auto size = static_cast<int>(delay.size());
+    delaySamples = std::clamp(static_cast<int>(std::lround(std::clamp(settings.widen.delayMs, 0.5f, kMaxWidenDelayMs) * 0.001 * sampleRate)), 1,
+                              std::max(1, size - 1));
+    const auto highPass = Biquad::highPass(sampleRate, std::clamp<double>(settings.widen.lowHz, 20.0, 0.45 * sampleRate));
+    for (auto& f : widenHighPass)
+    {
+        f.b0 = highPass.b0;
+        f.b1 = highPass.b1;
+        f.b2 = highPass.b2;
+        f.a1 = highPass.a1;
+        f.a2 = highPass.a2;
+    }
 }
 
 void StereoShaper::process(float* const* channels, int numChannels, int numSamples)
@@ -106,6 +139,14 @@ void StereoShaper::process(float* const* channels, int numChannels, int numSampl
         for (size_t b = 0; b < bells.size(); ++b)
             if (active[b])
                 s = bells[b].process(s);
+        if (widenGain > 0.0 && !delay.empty())
+        {
+            const auto size = static_cast<int>(delay.size());
+            delay[static_cast<size_t>(delayPos)] = m;
+            const int read = (delayPos - delaySamples + size) % size;
+            delayPos = (delayPos + 1) % size;
+            s += widenGain * widenHighPass[1].process(widenHighPass[0].process(delay[static_cast<size_t>(read)]));
+        }
         channels[0][i] = static_cast<float>(m + s);
         channels[1][i] = static_cast<float>(m - s);
     }

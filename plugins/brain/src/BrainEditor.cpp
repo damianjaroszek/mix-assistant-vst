@@ -317,7 +317,7 @@ BrainEditor::BrainEditor(BrainProcessor& p)
          { &energyView }, fill(energyView));
     page(Tab::translation, pl("Translacja"), pl("Jak miks zagra na telefonie, laptopie, słuchawkach, w aucie i w klubie."),
          { &translationView }, fill(translationView));
-    page(Tab::stereo, "Stereo", pl("Faza w pasmach sumy, jak Correlometer: na dole przeciwfaza. Kropki: zaznaczony kanał."),
+    page(Tab::stereo, "Stereo", pl("Faza w pasmach sumy, jak Correlometer: na dole przeciwfaza. Z referencjami Mózg poszerza do ich szerokości, nigdy poniżej 0,2. Kropki: zaznaczony kanał."),
          { &stereoView }, fill(stereoView));
     tabs.setCurrentTabIndex(juce::jlimit(0, tabs.getNumTabs() - 1, processor.editorTab), false);
     tabs.onChange = [this](int index) { processor.editorTab = index; };
@@ -604,9 +604,13 @@ void BrainEditor::timerCallback()
                                          [this](const auto& c) { return c.owner == selected && c.stereoValid; });
         if (chosen != mix.channels.end())
             for (size_t b = 0; b < channel.size(); ++b)
-                channel[b] = ma::coherence(chosen->midDb[b], chosen->sideDb[b]
-                                           + ma::sideResponseDb(chosen->data.stereo,
-                                                                ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, static_cast<int>(b))));
+            {
+                // What the channel sends on: its side bells, plus the widener's delayed mid (phase 25).
+                const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, static_cast<int>(b));
+                const double side = std::pow(10.0, (chosen->sideDb[b] + ma::sideResponseDb(chosen->data.stereo, hz)) / 10.0)
+                                    + ma::widenPowerRatio(chosen->data.stereo, hz) * std::pow(10.0, chosen->midDb[b] / 10.0);
+                channel[b] = ma::coherence(chosen->midDb[b], 10.0 * std::log10(side + 1e-30));
+            }
         stereoView.setBands(sum.data(), mix.master.valid, chosen != mix.channels.end() ? channel.data() : nullptr);
     }
     {

@@ -153,6 +153,12 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   the limiter's input after gain and its output); the Brain publishes it (`previewTilt`), `limiterTilt()` removes its 60 Hz-8 kHz mean and
   caps it at +-2 dB, and `tonalMasterSpectrum()` (master + tilt while `tonalAfterLimiter`, saved, default on) feeds `mix.tonal`, the
   sketch and the solver; `tonalBeforeLimiter()` is the plain comparison drawn thin. Captured references stay untilted (they are masters).
+  Phase 25 reference width: `StereoSettings::widen` (`StereoShaper`: the mid, delayed `delayMs` and high-passed twice at `lowHz`,
+  added to the side at `amountDb`; mono sum untouched; `kWidenOffDb` -40 = off, Agent params `widenAmount`/`widenFrom`/`widenDelay`,
+  packed before saturation in `brainSet`, old states get defaults). `widthTargetFrom(keyedStems)` = per stem group per region >= 300 Hz
+  the reference profiles' median coherence; `planStereo(..., &width)` lifts existing side or, on a near-mono part, sets the widener
+  (never kick, bass, bus, send; vocals lift only), each channel and the sum kept >= `kSafeCoherence` 0.2 (`keepSumInPhase` steps
+  every widening in the worst band back: widener 1 dB, lift 0.5 dB). Without stem references the phase 8 behaviour stays. `bus::kVersion` 14.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 
