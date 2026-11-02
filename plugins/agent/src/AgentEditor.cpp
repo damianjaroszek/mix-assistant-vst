@@ -330,8 +330,18 @@ void AgentEditor::showResult(const AgentProcessor::LearnResult& r)
                         + ", true peak " + ma::ui::formatDb(r.truePeakDb, "dBTP")
                         + pl(". Ustawiono trim ") + signedDb(r.trimDb) + ".";
     if (r.limitedByPeak)
-        text += pl("\nTrim ograniczony, żeby szczyt nie przekroczył limitu. Kanał ma duże szczyty: "
-                   "rozważ kompresję albo limiter przed Agentem.");
+    {
+        // Nauka ustawia tylko trim. Kompresor i clipper z zakładki „Inżynier miksu” ustawia Mózg,
+        // bo dobiera je do całego miksu (rola, priorytet, co gra obok).
+        int brain = 0, changed = 0, manual = 0;
+        processor.toolOrigins(brain, changed, manual);
+        const int peakTools = ma::bus::toolCompressor | ma::bus::toolClipper;
+        if (((brain | changed | manual) & peakTools) != 0)
+            text += pl("\nTrim ograniczony szczytem. Szczyty obrabia już kompresor albo clipper (zakładka „Inżynier miksu”).");
+        else
+            text += pl("\nTrim ograniczony szczytem. Nauka ustawia tylko trim; kompresor i clipper z zakładki „Inżynier miksu” "
+                       "ustawi Mózg: „Analizuj” (cały łańcuch), potem „Zastosuj”.");
+    }
     if (r.guess.role != ma::Role::other)
     {
         const auto roles = AgentProcessor::roleNames();

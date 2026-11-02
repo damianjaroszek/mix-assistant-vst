@@ -1803,7 +1803,8 @@ void BrainProcessor::buildReport()
         {
             if (channel.data.hasProfile == 0)
                 notLearned.add(channel.name);
-            if (channel.data.trimLimited != 0)
+            // A limited trim is only worth a warning while nothing in the chain takes the peaks.
+            if (channel.data.trimLimited != 0 && channel.data.compressor.on < 0.5f && channel.data.clipper.on < 0.5f)
                 limited.add(channel.name);
             // A channel marked for deliberate overdrive may go over: it is reported, not flagged.
             if (channel.data.intentionalDrive != 0)
@@ -1827,7 +1828,7 @@ void BrainProcessor::buildReport()
                 item.detail = pl("Bez nauki poziomu: ") + joinNames(notLearned) + ".";
             if (!limited.isEmpty())
                 item.detail << (item.detail.isEmpty() ? "" : "\n") << pl("Trim ograniczony szczytami: ")
-                            << joinNames(limited) << pl(". Rozważ kompresję przed Agentem.");
+                            << joinNames(limited) << pl(". Kompresor albo clipper ustawi im „Analizuj” (cały łańcuch), potem „Zastosuj”.");
         }
         else
         {
