@@ -68,6 +68,7 @@ struct ChainPlan
     bool percussive = false;        // compression left to the clipper: hits are kept
     bool overCompressed = false;    // already squashed before the Agent: nothing more
     double crestDb = 0.0;           // true peak over the loud parts' RMS
+    bool peakKnown = false;         // phase 23: the learn pass's true peak is there; without it crest and clipping are unknown
     double maxCrestDb = 0.0;
     double clipDb = 0.0;
 

@@ -15,6 +15,8 @@ namespace
 const juce::Identifier profileProperty { "profile" };
 const juce::Identifier nameProperty { "name" };
 const juce::Identifier statsProperty { "stats" };
+const juce::Identifier learnedProperty { "learned" };
+const juce::Identifier brainSetProperty { "brainSet" }; // phase 23: what the Brain last set // phase 22: the learn pass's level and true peak
 const juce::Identifier resonancesProperty { "resonances" };
 
 float toShared(double db)
@@ -74,6 +76,73 @@ AgentProcessor::DynamicState unpackDynamics(const std::array<float, 59>& v)
     take(in, s.stereo);
     take(in, s.saturation);
     return s;
+}
+
+// Phase 23: two settings the same, within what a parameter round trip changes.
+template <typename Settings>
+bool sameSettings(const Settings& a, const Settings& b)
+{
+    static_assert(sizeof(Settings) % sizeof(float) == 0, "settings are plain floats");
+    constexpr size_t n = sizeof(Settings) / sizeof(float);
+    std::array<float, n> x {}, y {};
+    std::memcpy(x.data(), static_cast<const void*>(&a), sizeof(Settings));
+    std::memcpy(y.data(), static_cast<const void*>(&b), sizeof(Settings));
+    for (size_t i = 0; i < n; ++i)
+        if (std::abs(x[i] - y[i]) > 0.02f + 0.002f * std::abs(x[i]))
+            return false;
+    return true;
+}
+
+bool anyOn(const ma::EqSettings& eq)
+{
+    return std::any_of(eq.begin(), eq.end(), [](const auto& b) { return std::abs(b.gainDb) > 0.05f; });
+}
+
+bool anyOn(const ma::CleanupSettings& c)
+{
+    return c.hpfHz > 0.5f || c.monoBelowHz > 0.5f || c.mudDb < -0.05f
+           || std::any_of(c.notches.begin(), c.notches.end(), [](const auto& n) { return n.db < -0.05f; });
+}
+
+bool anyOn(const ma::StereoSettings& st)
+{
+    return std::any_of(st.side.begin(), st.side.end(), [](const auto& b) { return std::abs(b.db) > 0.05f; });
+}
+
+template <typename Settings>
+bool anyOn(const Settings& settings)
+{
+    return settings.on > 0.5f;
+}
+
+template <typename Settings>
+void compareTool(const Settings& now, const Settings& set, bool known, int bit, int& same, int& changed, int& manual)
+{
+    if (!anyOn(now) && (!known || !anyOn(set)))
+        return;
+    if (!known)
+    {
+        manual |= bit;
+        return;
+    }
+    (sameSettings(now, set) ? same : changed) |= bit;
+}
+
+void toolBits(const ma::EqSettings& eq, const AgentProcessor::DynamicState& d, bool eqBypass, bool setValid, const ma::EqSettings& setEq,
+              const AgentProcessor::DynamicState& setDynamics, int& same, int& changed, int& manual)
+{
+    same = changed = manual = 0;
+    const ma::EqSettings noEq {};
+    compareTool(eqBypass ? noEq : eq, setEq, setValid, ma::bus::toolEq, same, changed, manual);
+    compareTool(d.cleanup, setDynamics.cleanup, setValid, ma::bus::toolCleanup, same, changed, manual);
+    compareTool(d.compressor, setDynamics.compressor, setValid, ma::bus::toolCompressor, same, changed, manual);
+    compareTool(d.clipper, setDynamics.clipper, setValid, ma::bus::toolClipper, same, changed, manual);
+    compareTool(d.evener, setDynamics.evener, setValid, ma::bus::toolEvener, same, changed, manual);
+    compareTool(d.stereo, setDynamics.stereo, setValid, ma::bus::toolStereo, same, changed, manual);
+    compareTool(d.saturation, setDynamics.saturation, setValid, ma::bus::toolSaturation, same, changed, manual);
+    compareTool(d.duck, setDynamics.duck, setValid, ma::bus::toolDuck, same, changed, manual);
+    compareTool(d.harmonics, setDynamics.harmonics, setValid, ma::bus::toolHarmonics, same, changed, manual);
+    compareTool(d.transients, setDynamics.transients, setValid, ma::bus::toolTransients, same, changed, manual);
 }
 
 void storeMax(std::atomic<float>& target, float value)
@@ -697,6 +766,12 @@ void AgentProcessor::publishToBrain()
     data.compressor = dynamics.compressor;
     data.clipper = dynamics.clipper;
     data.evener = dynamics.evener;
+    {
+        int same = 0, changed = 0, manual = 0;
+        toolBits(current, dynamics, eqBypassed(), brainSet.valid, brainSet.eq, brainSet.dynamics, same, changed, manual);
+        data.brainTools = same;
+        data.changedTools = changed;
+    }
     data.stereo = dynamics.stereo;
     data.stereoValid = stereoSeen.load() && data.liveValid != 0 ? 1 : 0;
     for (int b = 0; b < ma::bus::kBands; ++b)
@@ -764,6 +839,8 @@ void AgentProcessor::handleBrainCommand(ma::bus::Region& region)
         setParam(eqBypassId, 0.0f);
         setDynamics({ command.duck, command.duckSync, command.polarityInverted != 0, command.harmonics, command.transients,
                       command.cleanup, command.compressor, command.clipper, command.evener, command.stereo, command.saturation });
+        brainSetBackup = brainSet;
+        rememberBrainSet();
     }
     else if (command.kind == ma::bus::CommandKind::adapt && !eqBypassed())
     {
@@ -771,6 +848,10 @@ void AgentProcessor::handleBrainCommand(ma::bus::Region& region)
         for (int b = 0; b < ma::kEqBands; ++b)
             next[static_cast<size_t>(b)] = command.eq[b];
         setEqParams(next);
+        if (brainSet.valid)
+            brainSet.eq = currentEq();
+        else
+            rememberBrainSet();
     }
     else if (command.kind == ma::bus::CommandKind::undo && backupValid)
     {
@@ -781,7 +862,22 @@ void AgentProcessor::handleBrainCommand(ma::bus::Region& region)
         setDynamics(backupDynamics);
         backupValid = false;
         useBackup.store(false);
+        brainSet = brainSetBackup;
+        brainSetBackup = {};
     }
+}
+
+void AgentProcessor::rememberBrainSet()
+{
+    brainSet.valid = true;
+    brainSet.eq = currentEq();
+    brainSet.dynamics = currentDynamics();
+}
+
+
+void AgentProcessor::toolOrigins(int& brain, int& changed, int& manual) const
+{
+    toolBits(currentEq(), currentDynamics(), eqBypassed(), brainSet.valid, brainSet.eq, brainSet.dynamics, brain, changed, manual);
 }
 
 void AgentProcessor::setParam(const juce::String& id, float value)
@@ -1106,6 +1202,25 @@ void AgentProcessor::getStateInformation(juce::MemoryBlock& destData)
                                              + juce::String(result.tailPitchHz, 2) + " " + juce::String(inputShiftDb, 2), nullptr);
     else
         state.removeProperty(statsProperty, nullptr);
+    // Phase 23: the learned level and true peak as well; without them the Brain read a peak of -200 dB
+    // after reopening and took every channel for squashed at its source.
+    if (result.applied)
+        state.setProperty(learnedProperty, juce::String(result.measuredDb, 2) + " " + juce::String(result.truePeakDb, 2) + " "
+                                               + juce::String(result.trimDb, 2) + " " + (result.limitedByPeak ? "1" : "0"), nullptr);
+    else
+        state.removeProperty(learnedProperty, nullptr);
+    if (brainSet.valid)
+    {
+        juce::StringArray values;
+        for (const float v : packDynamics(brainSet.dynamics))
+            values.add(juce::String(v, 3));
+        for (const auto& band : brainSet.eq)
+            for (const float v : { band.hz, band.gainDb, band.q })
+                values.add(juce::String(v, 3));
+        state.setProperty(brainSetProperty, values.joinIntoString(" "), nullptr);
+    }
+    else
+        state.removeProperty(brainSetProperty, nullptr);
     juce::StringArray resonances;
     for (const auto& r : result.resonances)
         if (r.hz > 0.0f)
@@ -1142,6 +1257,29 @@ void AgentProcessor::setStateInformation(const void* data, int sizeInBytes)
         result.lowNoteHz = stats[3].getDoubleValue();
         result.tailPitchHz = stats.size() > 4 ? stats[4].getDoubleValue() : 0.0;
         inputShiftDb = stats.size() > 5 ? stats[5].getDoubleValue() : 0.0;
+    }
+    const auto setValues = juce::StringArray::fromTokens(state.getProperty(brainSetProperty).toString(), " ", {});
+    brainSet = {};
+    brainSetBackup = {};
+    if (setValues.size() == 59 + 3 * ma::kEqBands)
+    {
+        std::array<float, 59> packed {};
+        for (size_t i = 0; i < packed.size(); ++i)
+            packed[i] = setValues[static_cast<int>(i)].getFloatValue();
+        brainSet.dynamics = unpackDynamics(packed);
+        for (int b = 0; b < ma::kEqBands; ++b)
+            brainSet.eq[static_cast<size_t>(b)] = { setValues[59 + b * 3].getFloatValue(), setValues[60 + b * 3].getFloatValue(),
+                                                    setValues[61 + b * 3].getFloatValue() };
+        brainSet.valid = true;
+    }
+    const auto learned = juce::StringArray::fromTokens(state.getProperty(learnedProperty).toString(), " ", {});
+    if (learned.size() == 4)
+    {
+        result.applied = true;
+        result.measuredDb = learned[0].getDoubleValue();
+        result.truePeakDb = learned[1].getDoubleValue();
+        result.trimDb = learned[2].getDoubleValue();
+        result.limitedByPeak = learned[3] == "1";
     }
     const auto found = juce::StringArray::fromTokens(state.getProperty(resonancesProperty).toString(), " ", {});
     result.resonances = {};

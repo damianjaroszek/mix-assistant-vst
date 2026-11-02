@@ -124,7 +124,7 @@ ChainPlan::BusContent busContentOf(const ChainChannel& c)
             return ChainPlan::BusContent::vocals;
         return ChainPlan::BusContent::music;
     }
-    return c.truePeakDb - c.levelP95 >= 14.0 ? ChainPlan::BusContent::drums : ChainPlan::BusContent::music;
+    return c.truePeakDb > -100.0 && c.truePeakDb - c.levelP95 >= 14.0 ? ChainPlan::BusContent::drums : ChainPlan::BusContent::music;
 }
 
 double power(double db)
@@ -367,10 +367,11 @@ std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& input, const 
         plan.dynamicsKnown = true;
         plan.spreadDb = c.levelP95 - c.levelP10;
         plan.spreadAfterDb = plan.spreadDb;
-        plan.crestDb = c.truePeakDb - c.levelP95;
+        plan.peakKnown = c.truePeakDb > -100.0;
+        plan.crestDb = plan.peakKnown ? c.truePeakDb - c.levelP95 : 0.0;
         plan.maxCrestDb = profile.maxCrestDb;
         plan.percussive = c.role == Role::kick || c.role == Role::percussion;
-        plan.overCompressed = !c.intentionalDrive && profile.minCrestDb > 0.0 && plan.crestDb < profile.minCrestDb;
+        plan.overCompressed = plan.peakKnown && !c.intentionalDrive && profile.minCrestDb > 0.0 && plan.crestDb < profile.minCrestDb;
 
         // In the mix: do its quiet moments sink under everything else in its own best bands?
         if (profile.compress && !plan.percussive)
@@ -432,7 +433,7 @@ std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& input, const 
         double maxClip = profile.maxClipDb;
         if (plan.percussive && context.headroomShortDb > 0.0)
             maxClip += 1.0;
-        if (!c.intentionalDrive && !plan.overCompressed && maxClip > 0.0 && excess >= 1.0)
+        if (plan.peakKnown && !c.intentionalDrive && !plan.overCompressed && maxClip > 0.0 && excess >= 1.0)
         {
             plan.clipDb = std::min(excess, maxClip);
             plan.clipper.on = 1.0f;
@@ -606,12 +607,13 @@ std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& input, const 
         plan.dynamicsKnown = true;
         plan.spreadDb = c.levelP95 - c.levelP10;
         plan.spreadAfterDb = plan.spreadDb;
-        plan.crestDb = c.truePeakDb - c.levelP95;
+        plan.peakKnown = c.truePeakDb > -100.0;
+        plan.crestDb = plan.peakKnown ? c.truePeakDb - c.levelP95 : 0.0;
         plan.busContent = busContentOf(c);
         const auto glue = glueFor(plan.busContent);
         plan.glueTargetDb = glue.reductionDb;
         // Already squashed before the bus (a limiter on the sources): glue would only flatten it.
-        plan.overCompressed = !c.intentionalDrive && plan.crestDb < glue.minCrestDb;
+        plan.overCompressed = plan.peakKnown && !c.intentionalDrive && plan.crestDb < glue.minCrestDb;
         if (plan.overCompressed || c.intentionalDrive)
             continue;
         auto& comp = plan.compressor;

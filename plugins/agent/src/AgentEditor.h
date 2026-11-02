@@ -70,6 +70,11 @@ private:
 
     // Phase 7: the engineer's chain.
     juce::Label chainTitle, cleanLabel, compLabel, clipLabel, evenLabel;
+    // Phase 23: per tool (bit order of ma::bus::ToolBit) whether the Brain set it, it was changed by hand
+    // since, or it was set by hand only.
+    std::array<juce::Label, 10> origins;
+    juce::Label& origin(int bit);
+    void updateOrigins();
     juce::Label hpfLabel, monoLabel, mudFreqLabel, mudGainLabel;
     juce::Slider hpfSlider, monoSlider, mudFreqSlider, mudGainSlider;
     juce::ToggleButton compOnButton, clipOnButton, evenOnButton;

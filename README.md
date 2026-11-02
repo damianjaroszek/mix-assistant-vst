@@ -135,6 +135,24 @@ zamiast „pierwszy drop: takt 1”. W „Aranżu” pasmo 90–250 Hz basu to �
 sinusowym basie Mózg najpierw radzi saturację albo „Harmoniczne” na kanale basu. Szkic liczy już to, co dodaje
 łańcuch kanału (saturacja, harmoniczne), więc po zastosowaniu saturacji duch znika, jeśli pasmo się wypełniło.
 
+### Co działa w auto, a co nie (faza 23)
+
+- „Propozycja” oznacza na zielono jako „Już działa” to, co Agent już ma tak, jak Mózg chce. Licznik „Zastosuj (N)”
+  liczy tylko nowe zmiany, a odznaczenie czegoś, co działa, usuwa to z Agenta. Cięcia z poprzednich rund zostają,
+  zamiast znikać i wracać w innym paśmie, więc kolejne „Analizuj” po „Zastosuj” dają coraz mniej nowych zmian.
+- „Kolizje”: zielone są rozwiązane, niebieskie to te, przy których miks zrobił, ile mógł (EQ na limicie albo żadne
+  cięcie nie pomaga). Gdy wystarczy ściszyć kanał o najwyżej 3 dB, propozycja ma taką zmianę (do 2 dB zaznaczoną).
+  Gdy trzeba więcej, Mózg pisze, że to rejestr albo brzmienie. Pomarańczowe i czerwone są tylko wtedy, gdy jest coś do zrobienia.
+- „Werdykt” zostaje po „Zastosuj”, a każda linia o narzędziu ma stan: [działa], [do zastosowania], [odznaczone],
+  [zmienione ręcznie] albo [nie działa: nie zastosowano]. W Agencie przy każdej sekcji jest „od Mózgu”,
+  „zmienione ręcznie” albo „ręcznie”.
+- Raport ma pozycję „Z czego korzysta Mózg”: nauka poziomu, cel tonalny, referencje, sidechain stopy, przebieg utworu
+  i pomiar dropu, przy każdej, do czego służy.
+- Poprawki błędów: „Porządki” (HPF, mono w dole, muł, rezonanse) od fazy 9 nie trafiały do propozycji, choć werdykt
+  je opisywał, więc nigdy się nie włączały. Agent nie zapisywał w projekcie zmierzonego szczytu, więc po ponownym
+  otwarciu Mózg widział „szczyt -182 dB” i uznawał kanały za przekompresowane. Projekty zapisane wcześniej potrzebują
+  jednego „Naucz poziom” na kanale, do tego czasu werdykt pisze „szczyty nieznane”.
+
 ### Przed masteringiem (Ozone)
 
 „Cel mastera” w Mózgu to głośność, do której Ozone podciągnie master (domyślnie -8 LUFS). Mózg w tle robi

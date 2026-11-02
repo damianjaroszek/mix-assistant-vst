@@ -758,6 +758,7 @@ public:
         bool involvesSelected = false;
         bool ducked = false;     // dealt with on every kick hit
         bool cutAtLimit = false; // what is left after the deepest cut
+        bool settled = false;    // phase 23: the mix has done what it can (or a small level step is proposed)
     };
 
     void setLines(std::vector<Line> newLines)
@@ -792,7 +793,9 @@ public:
                 g.setColour(colours::accent.withAlpha(0.18f));
                 g.fillRect(row);
             }
-            g.setColour(line.ducked ? colours::good : line.cutAtLimit || line.score < 0.5f ? colours::warning : colours::critical);
+            g.setColour(line.ducked ? colours::good
+                        : line.settled ? colours::accent
+                        : line.cutAtLimit || line.score < 0.5f ? colours::warning : colours::critical);
             g.fillEllipse(row.getX(), row.getCentreY() - 4.0f, 8.0f, 8.0f);
             g.setColour(colours::text);
             g.drawText(line.text, row.withTrimmedLeft(16.0f), juce::Justification::centredLeft, true);
@@ -909,7 +912,7 @@ public:
     {
         items.clear();
         for (const auto& item : proposal.items)
-            items.push_back({ item.text, item.selected, item.advisory, {} });
+            items.push_back({ item.text, item.selected, item.advisory, {}, item.inPlace });
         made = proposal.made;
         layoutRows();
         repaint();
@@ -957,11 +960,13 @@ public:
                 g.drawRoundedRectangle(box, 2.0f, 1.2f);
                 if (item.selected)
                 {
-                    g.setColour(colours::accent);
+                    g.setColour(item.inPlace ? colours::good.withAlpha(0.6f) : colours::accent);
                     g.fillRoundedRectangle(box.reduced(2.5f), 1.5f);
                 }
             }
-            const auto colour = item.advisory ? colours::warning : item.selected ? colours::text : colours::quiet;
+            const auto colour = item.advisory ? colours::warning
+                                : item.inPlace ? (item.selected ? colours::good.withAlpha(0.8f) : colours::critical.withAlpha(0.8f))
+                                : item.selected ? colours::text : colours::quiet;
             layoutFor(item.text, colour, textWidth()).draw(g, item.bounds.withTrimmedLeft(textIndent));
         }
     }
@@ -980,6 +985,7 @@ private:
         bool selected = true;
         bool advisory = false;
         juce::Rectangle<float> bounds;
+        bool inPlace = false; // phase 23: already in the Agent
     };
 
     static constexpr float textIndent = 22.0f;
@@ -1080,7 +1086,27 @@ private:
         text.append(verdict.name, juce::FontOptions(14.0f, juce::Font::bold), colours::text);
         text.append("  " + verdict.role + "\n", juce::FontOptions(12.5f), colours::quiet);
         text.append(verdict.summary + "\n", juce::FontOptions(13.0f), statusColour(verdict.status));
-        text.append(verdict.reasons.joinIntoString("\n"), juce::FontOptions(12.5f), colours::quiet);
+        // Phase 23: each line about a tool says where it stands in the Agent now.
+        for (int r = 0; r < verdict.reasons.size(); ++r)
+        {
+            const auto at = static_cast<size_t>(r);
+            const int state = at < verdict.reasonStates.size() ? verdict.reasonStates[at] : 0;
+            using State = Proposal::VerdictState;
+            juce::String tag;
+            juce::Colour colour = colours::quiet;
+            switch (static_cast<State>(state))
+            {
+                case State::running: tag = ma::ui::pl("[działa] "); colour = colours::good; break;
+                case State::pending: tag = ma::ui::pl("[do zastosowania] "); colour = colours::warning; break;
+                case State::unticked: tag = ma::ui::pl("[odznaczone] "); break;
+                case State::changed: tag = ma::ui::pl("[zmienione ręcznie] "); colour = colours::accent; break;
+                case State::notApplied: tag = ma::ui::pl("[nie działa: nie zastosowano] "); colour = colours::critical; break;
+                case State::none: break;
+            }
+            if (tag.isNotEmpty())
+                text.append(tag, juce::FontOptions(12.5f, juce::Font::bold), colour);
+            text.append(verdict.reasons[r] + (r + 1 < verdict.reasons.size() ? "\n" : ""), juce::FontOptions(12.5f), colours::quiet);
+        }
         text.setWordWrap(juce::AttributedString::byWord);
         juce::TextLayout layout;
         layout.createLayout(text, juce::jmax(50.0f, width));

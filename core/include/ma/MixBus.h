@@ -27,7 +27,7 @@ namespace ma::bus
 {
 
 constexpr std::uint32_t kMagic = 0x4D414255; // "MABU"
-constexpr std::uint32_t kVersion = 12;
+constexpr std::uint32_t kVersion = 13;
 constexpr int kMaxSlots = 128;
 constexpr int kNameLength = 48;
 constexpr int kBands = 40;            // ERB bands, as SpectrumAnalyzer with BandScale::erb
@@ -93,6 +93,25 @@ struct AgentData
     std::int32_t stereoValid;
     float midDb[kBands];
     float sideDb[kBands];
+    // Phase 23: which tools the Brain set and still are as it left them, and which the user changed
+    // since (bits of ToolBit). A tool both off is in neither.
+    std::int32_t brainTools;
+    std::int32_t changedTools;
+};
+
+// Phase 23: the tools of an Agent, for AgentData::brainTools / changedTools.
+enum ToolBit : std::int32_t
+{
+    toolEq = 1 << 0,
+    toolCleanup = 1 << 1,
+    toolCompressor = 1 << 2,
+    toolClipper = 1 << 3,
+    toolEvener = 1 << 4,
+    toolStereo = 1 << 5,
+    toolSaturation = 1 << 6,
+    toolDuck = 1 << 7,
+    toolHarmonics = 1 << 8,
+    toolTransients = 1 << 9
 };
 
 // Note lengths for a tempo-synced duck release, indexed by AgentData::duckSync.
