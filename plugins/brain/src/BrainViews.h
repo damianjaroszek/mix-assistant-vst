@@ -480,8 +480,10 @@ public:
     // Phase 17: `withGhosts` (a sketch's master with its ghosts in) is drawn dashed, its regions are
     // the mix's; the plain comparison's regions the arrangement explains are grey.
     void setData(const ma::TonalTarget& newTarget, const ma::TonalComparison& newComparison, const juce::String& newStatus,
-                 const ma::TonalComparison& newWithGhosts = {}, const std::vector<bool>& newArrangement = {})
+                 const ma::TonalComparison& newWithGhosts = {}, const std::vector<bool>& newArrangement = {},
+                 const ma::TonalComparison& newPlain = {})
     {
+        plain = newPlain;
         target = newTarget;
         comparison = newComparison;
         status = newStatus;
@@ -562,6 +564,12 @@ public:
             g.strokePath(line(target.centre, n, xOf, yOf, hz), juce::PathStrokeType(1.0f, juce::PathStrokeType::curved),
                          juce::AffineTransform());
         }
+        if (plain.valid)
+        {
+            // Phase 24: the mix as it plays, under the curve as a limiter would leave it.
+            g.setColour(colours::quiet.brighter(0.5f));
+            g.strokePath(line(plain.mixDb, n, xOf, yOf, hz), juce::PathStrokeType(1.4f));
+        }
         if (comparison.valid)
         {
             g.setColour(colours::text);
@@ -574,6 +582,33 @@ public:
             juce::PathStrokeType(1.6f).createDashedStroke(dashed, line(withGhosts.mixDb, n, xOf, yOf, hz), dashes, 2);
             g.setColour(colours::text.withAlpha(0.7f));
             g.fillPath(dashed);
+        }
+
+        // Phase 24: TBC's four ranges, each with where the mix sits against the corridor's centre.
+        if (comparison.valid && target.valid())
+        {
+            static const char* names[ma::kTonalZones] { "Low", "Low-Mid", "High-Mid", "High" };
+            const auto zones = ma::zoneOffsets(comparison, target);
+            g.setFont(juce::FontOptions(11.0f));
+            for (int z = 0; z < ma::kTonalZones; ++z)
+            {
+                const auto& zone = zones[static_cast<size_t>(z)];
+                const float left = xOf(ma::tonalZoneEdgeHz(z)), right = xOf(ma::tonalZoneEdgeHz(z + 1));
+                if (z > 0)
+                {
+                    g.setColour(colours::quiet.withAlpha(0.35f));
+                    g.drawVerticalLine(juce::roundToInt(left), plot.getY(), plot.getBottom());
+                }
+                juce::String text = names[z];
+                juce::Colour colour = colours::quiet;
+                if (zone.valid)
+                {
+                    text << "  " << (zone.offsetDb >= 0.05 ? "+" : "") << juce::String(zone.offsetDb, 1) << " dB";
+                    colour = std::abs(zone.offsetDb) > 0.75 ? colours::accent : colours::good;
+                }
+                g.setColour(colour);
+                g.drawText(text, juce::Rectangle<float>(left, plot.getY() + 18.0f, right - left, 14.0f), juce::Justification::centred);
+            }
         }
 
         g.setColour(colours::quiet);
@@ -612,7 +647,7 @@ private:
     }
 
     ma::TonalTarget target;
-    ma::TonalComparison comparison, withGhosts;
+    ma::TonalComparison comparison, withGhosts, plain;
     std::vector<bool> arrangement;
     juce::String status;
 };

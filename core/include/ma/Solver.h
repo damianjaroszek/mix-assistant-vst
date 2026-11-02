@@ -57,6 +57,14 @@ struct SolverOptions
     // gainDb, measured again after each fix. `tonal` is then only a fallback.
     const TonalTarget* tonalTarget = nullptr;
     Curve tonalMasterDb {};
+    // Phase 24: with the target, also pull each of TBC's four broad ranges towards the corridor's
+    // centre once the mix is inside it: a range further than the dead zone from the centre gets one
+    // broad bell (or the range's existing tonal bell grows), moving the range by at most
+    // maxCentreMoveDb and never pushing a band out of the corridor.
+    bool centreZones = false;
+    double centreDeadZoneDb = 0.75;
+    double maxCentreMoveDb = 1.5;
+    double maxCentreBellDb = 3.0; // a range's balance is several parts': no one channel gets reshaped for it
     // Phase 9: each group's shape (drums, bass, vocals, the rest) against stem references,
     // measured over the drop. Broad bells on the group's channel that carries the region.
     const StemShapeInput* stems = nullptr;
@@ -88,6 +96,11 @@ struct SolverChange
     double scoreBefore = 0.0, scoreAfter = 0.0;
     double gainDb = 0.0;    // globalGain, tonalBoost, tonalCut, stem*
     int group = -1;         // stem*: which StemGroup
+    // Phase 24: a tonal bell (new or grown) that pulls one of TBC's ranges towards the centre.
+    bool centre = false;
+    int zone = -1;              // which TonalZone
+    double zoneOffsetDb = 0.0;  // where the range sat against the centre before
+    double zoneAfterDb = 0.0;   // ... and where the proposal leaves it
 };
 
 struct SolverResult

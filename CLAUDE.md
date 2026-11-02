@@ -144,6 +144,15 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   Collisions: `IssueHandling` pending / levelStep / settled from the last analysis (`collisionSteps`, kept after apply); `planCollisionSteps`
   adds `Action::channelLevel` (masker quieter by <= 3 dB). Verdicts are kept (`lastVerdicts`), lines tagged with a tool, `verdictsNow()` gives
   their state. `proposeWholeMix` compares cleanup with `saved` (the mix carries the planned cleanup for the solver).
+  Phase 24 corridor centre: `ma::zoneOffsets` (TonalBalance) gives TBC's four ranges (`tonalZoneEdgeHz` 40/250/2000/9000/16000) as the
+  mean of mix minus the corridor centre. `SolverOptions::centreZones` (Brain: always with a target) runs after the corridor stage in the
+  predicting branch: largest offset beyond `centreDeadZoneDb` (0.75) first, ranges still outside the corridor skipped; grows the range's
+  existing same-direction tonal bell or puts one broad bell on a free band (cut: least important carrier >= 25%, boost: most important
+  >= 15% with the masking check), 0.5 dB steps, range moved <= 1.5 dB, bell <= 3 dB, no crossing the centre, never more outside the
+  corridor (`outsideCorridorDb`); `SolverChange::centre/zone/zoneOffsetDb/zoneAfterDb`. `MasterPreview::limiterTiltDb` (ERB analysers on
+  the limiter's input after gain and its output); the Brain publishes it (`previewTilt`), `limiterTilt()` removes its 60 Hz-8 kHz mean and
+  caps it at +-2 dB, and `tonalMasterSpectrum()` (master + tilt while `tonalAfterLimiter`, saved, default on) feeds `mix.tonal`, the
+  sketch and the solver; `tonalBeforeLimiter()` is the plain comparison drawn thin. Captured references stay untilted (they are masters).
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

@@ -277,6 +277,184 @@ void solveStemShape(const std::vector<SolverChannel>& channels, const SolverOpti
         ++fixes;
     }
 }
+// Phase 24: once the mix sits inside the corridor, pull each of TBC's broad ranges towards its
+// centre. Largest offset first, each range once, on the master as the proposal leaves it.
+// A tonal bell this proposal already has in the range, the same way, grows instead of a second
+// one joining it (one correction per problem); otherwise one broad bell on a free EQ band of the
+// carrier: an excess off the least important channel holding a quarter of the range, a lack on
+// the most important holding 15%, as long as that raises no collision with a more important part.
+template <typename Predict>
+void centreZones(const std::vector<SolverChannel>& channels, const SolverOptions& options, Predict predict, SolverResult& result)
+{
+    const auto& target = *options.tonalTarget;
+    std::array<bool, kTonalZones> done {};
+    for (int round = 0; round < kTonalZones; ++round)
+    {
+        const auto before = predict();
+        const auto zones = zoneOffsets(before, target);
+        int z = -1;
+        for (int k = 0; k < kTonalZones; ++k)
+        {
+            const auto& zone = zones[static_cast<size_t>(k)];
+            if (done[static_cast<size_t>(k)] || !zone.valid || std::abs(zone.offsetDb) <= options.centreDeadZoneDb)
+                continue;
+            // Still outside the corridor there (the corridor fix is at its limit): not a centring job.
+            const bool outside = std::any_of(before.regions.begin(), before.regions.end(), [&](const TonalRegion& region) {
+                return region.lowHz < zone.highHz && region.highHz > zone.lowHz;
+            });
+            if (outside)
+                continue;
+            if (z < 0 || std::abs(zone.offsetDb) > std::abs(zones[static_cast<size_t>(z)].offsetDb))
+                z = k;
+        }
+        if (z < 0)
+            break;
+        done[static_cast<size_t>(z)] = true;
+        const auto start = zones[static_cast<size_t>(z)];
+        const bool cut = start.offsetDb > 0.0;
+        const auto kind = cut ? SolverChange::Kind::tonalCut : SolverChange::Kind::tonalBoost;
+
+        int index = -1;
+        for (size_t i = 0; i < result.changes.size() && index < 0; ++i)
+        {
+            const auto& change = result.changes[i];
+            if (change.kind != kind || change.channel < 0 || change.eqSlot < 0)
+                continue;
+            const auto& band = result.eq[static_cast<size_t>(change.channel)][static_cast<size_t>(change.eqSlot)];
+            if (band.hz >= start.lowHz && band.hz < start.highHz)
+                index = static_cast<int>(i);
+        }
+
+        const auto eqBefore = result.eq;
+        int channel = -1, slot = -1;
+        if (index >= 0)
+        {
+            channel = result.changes[static_cast<size_t>(index)].channel;
+            slot = result.changes[static_cast<size_t>(index)].eqSlot;
+        }
+        else
+        {
+            const auto current = withEq(channels, result.eq);
+            std::vector<double> power(channels.size(), 0.0);
+            double total = 0.0;
+            for (size_t c = 0; c < channels.size(); ++c)
+            {
+                if (!channels[c].valid)
+                    continue;
+                const auto& levels = current[c].rawDb;
+                const double peak = *std::max_element(levels.begin(), levels.begin() + SpectrumAnalyzer::numBandsFor(BandScale::erb));
+                double inZone = -200.0;
+                for (int b = start.firstBand; b <= start.lastBand; ++b)
+                    inZone = std::max(inZone, levels[static_cast<size_t>(b)]);
+                if (inZone < peak - kContentRangeDb || inZone < -100.0)
+                    continue;
+                for (int b = start.firstBand; b <= start.lastBand; ++b)
+                    power[c] += std::pow(10.0, levels[static_cast<size_t>(b)] / 10.0);
+                total += power[c];
+            }
+            for (size_t c = 0; c < channels.size(); ++c)
+            {
+                if (total <= 0.0 || channels[c].ghost || power[c] / total < (cut ? 0.25 : 0.15))
+                    continue;
+                bool free = false;
+                for (const auto& band : result.eq[c])
+                    free = free || !isOn(band);
+                if (!free)
+                    continue;
+                const bool better = channel < 0
+                                    || (channels[c].priority != channels[static_cast<size_t>(channel)].priority
+                                            ? (cut ? channels[c].priority > channels[static_cast<size_t>(channel)].priority
+                                                   : channels[c].priority < channels[static_cast<size_t>(channel)].priority)
+                                            : power[c] > power[static_cast<size_t>(channel)]);
+                if (better)
+                    channel = static_cast<int>(c);
+            }
+            if (channel < 0)
+                continue;
+            for (int b = 0; b < kEqBands && slot < 0; ++b)
+                if (!isOn(result.eq[static_cast<size_t>(channel)][static_cast<size_t>(b)]))
+                    slot = b;
+            result.eq[static_cast<size_t>(channel)][static_cast<size_t>(slot)]
+                = { static_cast<float>(std::sqrt(start.lowHz * start.highHz)), 0.0f, static_cast<float>(qForRange(start.lowHz, start.highHz)) };
+        }
+
+        // Half a dB at a time while the range is still off the centre, without crossing it, moving
+        // it more than allowed, or pushing anything out of the corridor.
+        auto& band = result.eq[static_cast<size_t>(channel)][static_cast<size_t>(slot)];
+        const float original = band.gainDb;
+        const double outsideBefore = outsideCorridorDb(before);
+        double after = start.offsetDb;
+        for (int step = 0; step < 16 && std::abs(after) > 0.5 * options.centreDeadZoneDb; ++step)
+        {
+            const float saved = band.gainDb;
+            const double next = band.gainDb + (cut ? -0.5 : 0.5);
+            if (cut ? next < -options.maxCutDb : next > options.maxBoostDb)
+                break;
+            if (std::abs(next - original) > options.maxCentreBellDb + 0.01)
+                break;
+            band.gainDb = static_cast<float>(next);
+            const auto now = predict();
+            const double offset = zoneOffsets(now, target)[static_cast<size_t>(z)].offsetDb;
+            const bool crossed = cut ? offset < -0.25 : offset > 0.25;
+            if (crossed || std::abs(start.offsetDb - offset) > options.maxCentreMoveDb + 0.01
+                || outsideCorridorDb(now) > outsideBefore + 0.25)
+            {
+                band.gainDb = saved;
+                break;
+            }
+            after = offset;
+        }
+
+        // A lift must not bury a more important part.
+        if (!cut && band.gainDb > original)
+        {
+            const auto masked = analyseMasking(withEq(channels, eqBefore), options.minimumScore);
+            while (band.gainDb > original)
+            {
+                const auto now = analyseMasking(withEq(channels, result.eq), options.minimumScore);
+                bool collision = false;
+                for (size_t k = 0; k < channels.size(); ++k)
+                {
+                    if (static_cast<int>(k) == channel || channels[k].priority > channels[static_cast<size_t>(channel)].priority)
+                        continue;
+                    const double was = masked.amount[static_cast<size_t>(channel)][k];
+                    const double is = now.amount[static_cast<size_t>(channel)][k];
+                    collision = collision || (is >= options.minimumScore && is - was > 0.05);
+                }
+                if (!collision)
+                    break;
+                band.gainDb = std::max(original, band.gainDb - 0.5f);
+            }
+            after = zoneOffsets(predict(), target)[static_cast<size_t>(z)].offsetDb;
+        }
+
+        // Under 1 dB a new bell is not worth a band; a grown one keeps whatever it gained.
+        if ((index < 0 && std::abs(band.gainDb) < 1.0f) || band.gainDb == original)
+        {
+            result.eq = eqBefore;
+            continue;
+        }
+        SolverChange change = index >= 0 ? result.changes[static_cast<size_t>(index)] : SolverChange {};
+        if (index < 0)
+        {
+            change.kind = kind;
+            change.channel = channel;
+            change.eqSlot = slot;
+            change.lowHz = start.lowHz;
+            change.highHz = start.highHz;
+        }
+        change.gainDb = band.gainDb;
+        change.centre = true;
+        change.zone = z;
+        change.zoneOffsetDb = start.offsetDb;
+        change.zoneAfterDb = after;
+        if (index >= 0)
+            result.changes[static_cast<size_t>(index)] = change;
+        else
+            result.changes.push_back(change);
+    }
+}
+
 } // namespace
 
 SolverResult solve(const std::vector<SolverChannel>& channels, const SolverOptions& options)
@@ -642,6 +820,8 @@ SolverResult solve(const std::vector<SolverChannel>& channels, const SolverOptio
                 change.gainDb = smaller;
             }
         }
+        if (options.centreZones)
+            centreZones(channels, options, predict, result);
     }
     else if (options.tonal != nullptr && options.tonal->valid)
     {

@@ -153,6 +153,25 @@ sinusowym basie Mózg najpierw radzi saturację albo „Harmoniczne” na kanale
   otwarciu Mózg widział „szczyt -182 dB” i uznawał kanały za przekompresowane. Projekty zapisane wcześniej potrzebują
   jednego „Naucz poziom” na kanale, do tego czasu werdykt pisze „szczyty nieznane”.
 
+### Środek korytarza (faza 24)
+
+Miks może mieścić się w korytarzu celu i nadal leżeć przy jego krawędzi w całym zakresie: tak wyglądał w Tonal Balance
+low-mid i high-mid przy dolnej krawędzi, który Ozone potem dociągał do środka. Widok „Balans tonalny” dzieli pasmo na
+cztery zakresy jak TBC (Low 40–250 Hz, Low-Mid 250 Hz–2 kHz, High-Mid 2–9 kHz, High 9–16 kHz) i przy każdym pisze, ile
+dB miks leży nad albo pod środkiem korytarza (medianą referencji). Na zielono jest to, co mieści się w 0,75 dB.
+„Analizuj” dociąga zakresy dalej niż 0,75 dB od środka: jeden szeroki bell na zakres (albo większe istniejące cięcie
+lub podbicie w tym zakresie), nadmiar zdejmuje z mniej ważnego kanału, który niesie co najmniej 1/4 zakresu, brak
+podbija na ważniejszym (co najmniej 15% zakresu, bez nowej kolizji). Rusza zakres najwyżej o 1,5 dB i kanał najwyżej
+o 3 dB, nie przechodzi na drugą stronę środka i nie wypycha żadnego pasma poza korytarz. Zakres, który jest jeszcze
+poza korytarzem, zostaje zwykłej poprawce tonalnej. Kolejne „Analizuj” daje te same bele jako „Już działa”.
+
+Referencje to gotowe mastery, a miks jeszcze nie przeszedł przez limiter. Dlatego Mózg porównuje go tak, jak zostawiłby
+go limiter z podglądu mastera do „Celu mastera” (przełącznik „Jak po limiterze (master)”, domyślnie włączony). Gruba
+linia to ten szacunek, cienka to miks tak, jak gra (to, co pokazuje Tonal Balance przed Ozone). Podgląd mierzy widmo
+przed limiterem i za nim; zostaje tylko kształt różnicy, najwyżej ±2 dB na pasmo, bo prosty limiter zjada dół mocniej
+niż maximizer w Ozone. „Raport dla Ozone” wypisuje to, co z zakresów zostanie po „Zastosuj”, jako szerokie ruchy
+(EQ albo Band Gain w Dynamics).
+
 ### Przed masteringiem (Ozone)
 
 „Cel mastera” w Mózgu to głośność, do której Ozone podciągnie master (domyślnie -8 LUFS). Mózg w tle robi
