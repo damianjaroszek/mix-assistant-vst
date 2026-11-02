@@ -33,10 +33,63 @@ inline juce::Colour statusColour(MixSnapshot::Status status)
     return colours::quiet;
 }
 
-// The correctness report: one line per check, with a coloured status dot.
+// Phase 22: where the user is in analyse, review, apply, listen again. Done steps are quiet with a tick,
+// the current one is in the accent colour, the rest are dim.
+class StepPath : public juce::Component
+{
+public:
+    void setState(int current, const juce::String& currentNote)
+    {
+        if (current == step && currentNote == note)
+            return;
+        step = current;
+        note = currentNote;
+        repaint();
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        namespace colours = ma::ui::colours;
+        using ma::ui::pl;
+        const std::array<juce::String, 4> names { pl("Analizuj"), pl("Przejrzyj i odznacz"), pl("Zastosuj"),
+                                                  pl("Puść drop jeszcze raz") };
+        g.setFont(juce::FontOptions(13.0f));
+        int x = 0;
+        for (size_t i = 0; i < names.size(); ++i)
+        {
+            const int index = static_cast<int>(i);
+            const bool done = step > index, now = step == index;
+            juce::String text = juce::String(index + 1) + ". " + names[i];
+            if (done)
+                text = pl("✓ ") + names[i];
+            if (now && note.isNotEmpty())
+                text += ": " + note;
+            const int width = juce::GlyphArrangement::getStringWidthInt(g.getCurrentFont(), text) + 4;
+            g.setColour(now ? colours::accent : done ? colours::quiet : colours::quiet.withAlpha(0.5f));
+            g.drawText(text, x, 0, width, getHeight(), juce::Justification::centredLeft, false);
+            x += width;
+            if (i + 1 < names.size())
+            {
+                g.setColour(colours::quiet.withAlpha(0.5f));
+                g.drawText(pl("›"), x, 0, 18, getHeight(), juce::Justification::centred, false);
+                x += 18;
+            }
+        }
+    }
+
+private:
+    int step = 0;
+    juce::String note;
+};
+
+// The correctness report: one line per check, with a coloured status dot. Phase 22: problems first,
+// grouped into what the mix can fix, what belongs to the arrangement and the plugin's own state;
+// what is fine folds into one line that opens on click.
 class ReportView : public juce::Component
 {
 public:
+    std::function<void()> onResize; // the editor re-lays the viewport when the folded part opens
+
     void setItems(const std::vector<MixSnapshot::ReportItem>& newItems)
     {
         items = newItems;
@@ -53,33 +106,116 @@ public:
         place(&g);
     }
 
+    void mouseUp(const juce::MouseEvent& e) override
+    {
+        if (foldArea.contains(e.position))
+        {
+            showGood = !showGood;
+            if (onResize)
+                onResize();
+            repaint();
+        }
+    }
+
+    void mouseMove(const juce::MouseEvent& e) override
+    {
+        setMouseCursor(foldArea.contains(e.position) ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
+    }
+
 private:
-    // Lays the items out in one column, or two when wide, balanced by height; draws them when given a context.
+    struct Row
+    {
+        enum class Kind { heading, item, fold } kind = Kind::item;
+        juce::String text;
+        size_t item = 0;
+        float height = 0.0f;
+    };
+
+    static int rank(MixSnapshot::Status status)
+    {
+        switch (status)
+        {
+            case MixSnapshot::Status::problem: return 0;
+            case MixSnapshot::Status::warning: return 1;
+            case MixSnapshot::Status::unknown: return 2;
+            case MixSnapshot::Status::good: break;
+        }
+        return 3;
+    }
+
+    // Lays the rows out in one column, or two when wide, balanced by height; draws them when given a context.
     // Returns the bottom of the taller column.
     float place(juce::Graphics* g) const
     {
         namespace colours = ma::ui::colours;
+        using ma::ui::pl;
         const auto area = getLocalBounds().toFloat().reduced(10.0f, 8.0f);
-        constexpr float gap = 28.0f;
+        constexpr float gap = 28.0f, headingHeight = 26.0f;
         const int columns = area.getWidth() >= 640.0f ? 2 : 1;
         const float columnWidth = (area.getWidth() - gap * static_cast<float>(columns - 1)) / static_cast<float>(columns);
 
         std::vector<juce::TextLayout> layouts(items.size());
-        float total = 0.0f;
         for (size_t i = 0; i < items.size(); ++i)
         {
             juce::AttributedString text;
             text.append(items[i].detail, juce::FontOptions(12.5f), colours::quiet);
             layouts[i].createLayout(text, columnWidth - 16.0f);
-            total += 29.0f + layouts[i].getHeight();
         }
-        size_t split = items.size();
+        const auto itemRow = [&](size_t i) {
+            return Row { Row::Kind::item, {}, i, 29.0f + layouts[i].getHeight() };
+        };
+
+        // Not fine first, worst first, in the three groups; then the folded line with what is fine.
+        std::vector<Row> rows;
+        const std::array<std::pair<MixSnapshot::ReportGroup, juce::String>, 3> groups { {
+            { MixSnapshot::ReportGroup::mix, pl("Do poprawy w miksie") },
+            { MixSnapshot::ReportGroup::arrangement, pl("Aranż i przebieg (poza miksem: dograć, zautomatyzować, podmienić brzmienie)") },
+            { MixSnapshot::ReportGroup::setup, pl("Ustawienia wtyczek") },
+        } };
+        size_t good = 0;
+        for (const auto& [group, heading] : groups)
+        {
+            std::vector<size_t> open;
+            for (size_t i = 0; i < items.size(); ++i)
+                if (items[i].group == group && items[i].status != MixSnapshot::Status::good)
+                    open.push_back(i);
+            std::stable_sort(open.begin(), open.end(), [this](size_t a, size_t b) { return rank(items[a].status) < rank(items[b].status); });
+            if (open.empty())
+                continue;
+            rows.push_back({ Row::Kind::heading, heading, 0, headingHeight });
+            for (const auto i : open)
+                rows.push_back(itemRow(i));
+        }
+        for (const auto& item : items)
+            good += item.status == MixSnapshot::Status::good ? 1 : 0;
+        if (rows.empty() && !items.empty() && good == items.size())
+            rows.push_back({ Row::Kind::heading, pl("Wszystko w porządku"), 0, headingHeight });
+        if (good > 0)
+        {
+            const auto noun = good == 1 ? pl(" rzecz") : pl(" rzeczy");
+            rows.push_back({ Row::Kind::fold,
+                             (showGood ? pl("▾ ") : pl("▸ ")) + juce::String(static_cast<int>(good)) + noun + pl(" w porządku")
+                                 + (showGood ? juce::String() : pl(" (kliknij, żeby pokazać)")),
+                             0, headingHeight });
+            if (showGood)
+                for (size_t i = 0; i < items.size(); ++i)
+                    if (items[i].status == MixSnapshot::Status::good)
+                        rows.push_back(itemRow(i));
+        }
+
+        float total = 0.0f;
+        for (const auto& row : rows)
+            total += row.height;
+        size_t split = rows.size();
         if (columns == 2)
         {
             float first = 0.0f;
             split = 0;
-            while (split < items.size() && first + (29.0f + layouts[split].getHeight()) * 0.5f < total * 0.5f)
-                first += 29.0f + layouts[split++].getHeight();
+            while (split < rows.size() && first + rows[split].height * 0.5f < total * 0.5f)
+                first += rows[split++].height;
+            // A heading never ends a column.
+            while (split > 0 && split < rows.size() && rows[split - 1].kind == Row::Kind::heading)
+                --split;
         }
 
         float bottom = area.getY();
@@ -87,19 +223,30 @@ private:
         {
             const float x = area.getX() + static_cast<float>(column) * (columnWidth + gap);
             float y = area.getY();
-            for (size_t i = column == 0 ? 0 : split; i < (column == 0 ? split : items.size()); ++i)
+            for (size_t r = column == 0 ? 0 : split; r < (column == 0 ? split : rows.size()); ++r)
             {
-                juce::Rectangle<float> row(x, y, columnWidth, 19.0f + layouts[i].getHeight());
-                y = row.getBottom() + 10.0f;
+                const auto& entry = rows[r];
+                juce::Rectangle<float> row(x, y, columnWidth, entry.height - 10.0f);
+                y += entry.height;
+                if (entry.kind == Row::Kind::fold)
+                    foldArea = row;
                 if (g == nullptr)
                     continue;
-                g->setColour(statusColour(items[i].status));
+                if (entry.kind != Row::Kind::item)
+                {
+                    g->setColour(entry.kind == Row::Kind::fold ? colours::good : colours::accent);
+                    g->setFont(juce::FontOptions(13.0f, juce::Font::bold));
+                    g->drawText(entry.text, row, juce::Justification::bottomLeft, true);
+                    continue;
+                }
+                const auto& item = items[entry.item];
+                g->setColour(statusColour(item.status));
                 g->fillEllipse(row.getX(), row.getY() + 5.0f, 9.0f, 9.0f);
                 row.removeFromLeft(16.0f);
                 g->setColour(colours::text);
                 g->setFont(juce::FontOptions(14.0f, juce::Font::bold));
-                g->drawText(items[i].title, row.removeFromTop(19.0f), juce::Justification::centredLeft);
-                layouts[i].draw(*g, row);
+                g->drawText(item.title, row.removeFromTop(19.0f), juce::Justification::centredLeft);
+                layouts[entry.item].draw(*g, row);
             }
             bottom = std::max(bottom, y);
         }
@@ -107,6 +254,8 @@ private:
     }
 
     std::vector<MixSnapshot::ReportItem> items;
+    bool showGood = false;
+    mutable juce::Rectangle<float> foldArea;
 };
 
 // Table of connected Agents. Clicking a row highlights that channel everywhere.
@@ -788,7 +937,7 @@ public:
         {
             g.setColour(colours::quiet);
             g.drawText(made ? pl("Nic do poprawienia: brak kolizji, które warto ciąć, i zapas na mastering jest OK.")
-                            : pl("Puść najgęstszy fragment utworu (drop) i kliknij „Zaproponuj”."),
+                            : pl("Puść najgęstszy fragment utworu (drop) i kliknij „Analizuj”."),
                        area, juce::Justification::topLeft);
             return;
         }
@@ -863,7 +1012,7 @@ private:
     bool made = false;
 };
 
-// The engineer's verdict per channel ("Ustaw cały miks"): a status dot, the one-line summary
+// The engineer's verdict per channel ("Analizuj", whole chain): a status dot, the one-line summary
 // and why, wrapped to the width. Lives in a viewport, like the proposal.
 class VerdictView : public juce::Component
 {
@@ -894,8 +1043,8 @@ public:
         {
             g.setColour(colours::quiet);
             g.setFont(juce::FontOptions(13.0f));
-            g.drawFittedText(wholeMix ? pl("Żaden kanał nie gra. Puść najgęstszy fragment i kliknij „Ustaw cały miks” jeszcze raz.")
-                                      : pl("Kliknij „Ustaw cały miks”: Mózg ustawi porządki, kompresję, clipper i bas na każdym kanale, "
+            g.drawFittedText(wholeMix ? pl("Żaden kanał nie gra. Puść najgęstszy fragment i kliknij „Analizuj” (cały łańcuch) jeszcze raz.")
+                                      : pl("Kliknij „Analizuj” (cały łańcuch): Mózg ustawi porządki, kompresję, clipper i bas na każdym kanale, "
                                            "patrząc na cały miks, i powie tu, co i dlaczego. Najpierw naucz poziom w Agentach."),
                              area.toNearestInt(), juce::Justification::topLeft, 4);
             return;

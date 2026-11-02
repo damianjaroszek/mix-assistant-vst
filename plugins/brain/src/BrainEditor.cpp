@@ -74,7 +74,7 @@ BrainEditor::BrainEditor(BrainProcessor& p)
 
     sketchButton.setButtonText(pl("Tryb szkicu: brakujące partie jako duchy"));
     sketchButton.setTooltip(pl("Gdy dropowi brakuje partii, które mają referencje (albo typowy drop house'u), Mózg wstawia za nie "
-                               "partie-duchy: balans tonalny, proporcje i kolizje liczy z nimi, a „Ustaw cały miks” zostawia im miejsce "
+                               "partie-duchy: balans tonalny, proporcje i kolizje liczy z nimi, a „Analizuj” (cały łańcuch) zostawia im miejsce "
                                "i nie łata EQ-em dziur aranżu. Wyłączony: miks oceniany tak, jak gra."));
     sketchButton.setColour(juce::ToggleButton::textColourId, colours::text);
     sketchButton.setToggleState(processor.sketchMode(), juce::dontSendNotification);
@@ -94,39 +94,51 @@ BrainEditor::BrainEditor(BrainProcessor& p)
         button.setColour(juce::TextButton::buttonColourId, colours::panel);
         button.setColour(juce::TextButton::buttonOnColourId, colours::warning.darker(0.3f));
     };
-    styleButton(proposeButton, pl("Zaproponuj"));
-    styleButton(wholeMixButton, pl("Ustaw cały miks"));
-    wholeMixButton.setColour(juce::TextButton::buttonColourId, colours::accent.darker(0.5f));
-    wholeMixButton.setTooltip(pl("Inżynier miksu: porządki w dole i środku, kompresja, clipper i wyrównanie basu na każdym "
-                                 "kanale, ustawione względem całego miksu, plus zwykła propozycja i werdykt dla każdego kanału."));
-    styleButton(applyButton, pl("Zastosuj zaznaczone"));
+    scopeBox.addItem(pl("Cały łańcuch"), 2);
+    scopeBox.addItem(pl("Tylko korekty"), 1);
+    scopeBox.setColour(juce::ComboBox::backgroundColourId, colours::panel);
+    scopeBox.setSelectedId(processor.analysisScope + 1, juce::dontSendNotification);
+    scopeBox.setTooltip(pl("Cały łańcuch: inżynier miksu ustawia każdy kanał (porządki w dole i środku, kompresja, clipper, "
+                           "bas, stereo, poziomy grup) względem całego miksu, plus korekty i werdykt dla każdego kanału.\n"
+                           "Tylko korekty: cięcia EQ, ustępowanie, polaryzacja i translacja, bez ruszania łańcucha."));
+    scopeBox.onChange = [this] { processor.analysisScope = scopeBox.getSelectedId() - 1; };
+    styleButton(analyseButton, pl("Analizuj"));
+    analyseButton.setTooltip(pl("Liczy propozycję na tym, co gra (najlepiej drop). Niczego nie zmienia, dopóki nie klikniesz „Zastosuj”."));
+    styleButton(applyButton, pl("Zastosuj"));
+    applyButton.setTooltip(pl("Wysyła zaznaczone zmiany do Agentów. Potem puść drop jeszcze raz: Mózg zmierzy efekt."));
     styleButton(undoButton, pl("Cofnij"));
     styleButton(compareButton, pl("Przed / po"));
     compareButton.setClickingTogglesState(true);
     compareButton.setTooltip(pl("Słuchaj wersji sprzed „Zastosuj”, z wyrównaną głośnością."));
 
-    proposeButton.onClick = [this] {
-        processor.propose();
+    analyseButton.onClick = [this] {
+        const bool chain = processor.analysisScope == 1;
+        if (chain)
+            processor.proposeWholeMix();
+        else
+            processor.propose();
+        measuringEffect = false;
         proposalStatus.setText({}, juce::dontSendNotification);
-        tabs.setCurrentTabIndex(static_cast<int>(Tab::proposal));
-        timerCallback();
-    };
-    wholeMixButton.onClick = [this] {
-        processor.proposeWholeMix();
-        proposalStatus.setText({}, juce::dontSendNotification);
-        tabs.setCurrentTabIndex(static_cast<int>(Tab::verdict));
+        tabs.setCurrentTabIndex(static_cast<int>(chain ? Tab::verdict : Tab::proposal));
         timerCallback();
     };
     applyButton.onClick = [this] {
         const int sent = processor.applySelected();
-        proposalStatus.setText(sent > 0 ? pl("Zastosowano na ") + juce::String(sent) + pl(" kanałach. Pomiar sumy wyzerowany.")
-                                        : pl("Nic nie zaznaczono."),
-                               juce::dontSendNotification);
+        if (sent > 0)
+        {
+            measuringEffect = true;
+            effectReset = false;
+            effectNote = pl("Zastosowano na ") + juce::String(sent) + pl(" kanałach.");
+        }
+        proposalStatus.setText(sent > 0 ? effectNote : pl("Nic nie zaznaczono."), juce::dontSendNotification);
         timerCallback();
     };
     undoButton.onClick = [this] {
         const int sent = processor.undoLast();
-        proposalStatus.setText(pl("Cofnięto na ") + juce::String(sent) + pl(" kanałach."), juce::dontSendNotification);
+        measuringEffect = sent > 0;
+        effectReset = false;
+        effectNote = pl("Cofnięto na ") + juce::String(sent) + pl(" kanałach.");
+        proposalStatus.setText(effectNote, juce::dontSendNotification);
         timerCallback();
     };
     compareButton.onClick = [this] { processor.setComparing(compareButton.getToggleState()); };
@@ -235,6 +247,7 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     table.onSelect = [this](std::uint64_t owner) { select(owner); };
     issues.onSelect = [this](std::uint64_t owner) { select(owner == selected ? 0 : owner); };
     reportViewport.setViewedComponent(&report, false);
+    report.onResize = [this] { layoutReport(); };
     reportViewport.setScrollBarsShown(true, false);
 
     // One fixed-size window: the header, the meters and the proposal's buttons stay, the rest sits on tabs.
@@ -242,8 +255,8 @@ BrainEditor::BrainEditor(BrainProcessor& p)
              &title, &previewLabel, &previewBox, &agentsLabel, &masteringReportButton, &resetButton, &integratedLabel,
              &integratedValue, &shortTermLabel, &shortTermValue, &truePeakLabel, &truePeakValue, &plrLabel, &plrValue,
              &lowCorrelationLabel, &lowCorrelationValue, &fullCorrelationLabel, &fullCorrelationValue, &ceilingLabel,
-             &ceilingSlider, &targetLabel, &targetSlider, &tabs, &wholeMixButton, &proposeButton, &applyButton, &undoButton,
-             &compareButton, &proposalStatus, &adaptiveButton })
+             &ceilingSlider, &targetLabel, &targetSlider, &tabs, &scopeBox, &analyseButton, &applyButton, &undoButton,
+             &compareButton, &proposalStatus, &adaptiveButton, &stepPath })
         addAndMakeVisible(c);
     const auto page = [this](Tab tab, const juce::String& name, const juce::String& tooltip,
                              std::initializer_list<juce::Component*> children, std::function<void(juce::Rectangle<int>)> layout) {
@@ -268,12 +281,12 @@ BrainEditor::BrainEditor(BrainProcessor& p)
              area.removeFromTop(4);
              issues.setBounds(area);
          });
-    page(Tab::proposal, pl("Propozycja"), pl("Zmiany z „Zaproponuj” i „Ustaw cały miks”. Odznacz to, czego nie chcesz."),
+    page(Tab::proposal, pl("Propozycja"), pl("Zmiany z „Analizuj”. Niczego jeszcze nie zmieniają: odznacz to, czego nie chcesz, i kliknij „Zastosuj”."),
          { &proposalViewport }, [this](juce::Rectangle<int> area) {
              proposalViewport.setBounds(area.reduced(10));
              layoutProposal();
          });
-    page(Tab::verdict, pl("Werdykt"), pl("Co „Ustaw cały miks” ustawił na każdym kanale i dlaczego."), { &verdictViewport },
+    page(Tab::verdict, pl("Werdykt"), pl("Co „Analizuj” (cały łańcuch) proponuje na każdym kanale i dlaczego."), { &verdictViewport },
          fill(verdictViewport));
     page(Tab::tonal, pl("Balans tonalny"), pl("Balans tonalny sumy wobec celu z referencji."),
          { &targetBox, &newTargetButton, &captureButton, &removeReferenceButton, &tonalView }, [this](auto area) { layoutTonal(area); });
@@ -477,7 +490,7 @@ void BrainEditor::timerCallback()
                 if (collision.ghost < mix.sketch.analysis.ghosts.size())
                     briefs.add(pl("Zasłoni: ") + mix.channels[collision.masker].name + pl(" → ")
                                + BrainProcessor::ghostName(mix.sketch.analysis.ghosts[collision.ghost]) + " ("
-                               + juce::String(juce::roundToInt(collision.score * 100.0)) + pl("%). „Ustaw cały miks” zrobi miejsce."));
+                               + juce::String(juce::roundToInt(collision.score * 100.0)) + pl("%). „Analizuj” (cały łańcuch) zrobi miejsce."));
         }
         arrangementView.setData(mix.sketch, status, briefs);
         sketchButton.setToggleState(processor.sketchMode(), juce::dontSendNotification);
@@ -616,12 +629,50 @@ void BrainEditor::timerCallback()
     const auto& proposal = processor.proposal();
     proposalView.setProposal(proposal);
     layoutProposal();
-    const bool anySelected = std::any_of(proposal.items.begin(), proposal.items.end(), [](const auto& i) { return i.selected; });
-    applyButton.setEnabled(anySelected);
+    const auto toApply = std::count_if(proposal.items.begin(), proposal.items.end(),
+                                       [](const auto& i) { return i.selected && !i.advisory; });
+    applyButton.setButtonText(toApply > 0 ? pl("Zastosuj (") + juce::String(static_cast<int>(toApply))
+                                                + (toApply == 1 ? pl(" zmiana)") : toApply < 5 ? pl(" zmiany)") : pl(" zmian)"))
+                                          : pl("Zastosuj"));
+    applyButton.setEnabled(toApply > 0);
     const bool undoable = processor.canUndo();
     undoButton.setEnabled(undoable);
     compareButton.setEnabled(undoable || processor.isComparing());
     compareButton.setToggleState(processor.isComparing(), juce::dontSendNotification);
+    if (processor.analysisScope + 1 != scopeBox.getSelectedId())
+        scopeBox.setSelectedId(processor.analysisScope + 1, juce::dontSendNotification);
+
+    // Phase 22: which step is next. After apply or undo, the drop has to play again before the
+    // numbers mean anything; then the next step is a fresh analysis.
+    if (measuringEffect && mix.dropSeconds < 1.0)
+        effectReset = true;
+    const double measured = effectReset ? std::min(mix.dropSeconds, BrainProcessor::kMinimumDropSeconds) : 0.0;
+    if (measuringEffect && effectReset && mix.dropSeconds >= BrainProcessor::kMinimumDropSeconds)
+    {
+        measuringEffect = false;
+        proposalStatus.setText(effectNote + pl(" Efekt zmierzony: zajrzyj do raportu albo kliknij „Analizuj” jeszcze raz."),
+                               juce::dontSendNotification);
+        proposalStatus.setColour(juce::Label::textColourId, colours::good);
+    }
+    int step = 0;
+    juce::String stepNote;
+    if (measuringEffect)
+    {
+        step = 3;
+        stepNote = pl("mierzę efekt ") + juce::String(juce::roundToInt(measured)) + " / "
+                   + juce::String(juce::roundToInt(BrainProcessor::kMinimumDropSeconds)) + " s";
+    }
+    else if (proposal.made && toApply > 0)
+        step = 1;
+    stepPath.setState(step, stepNote);
+    const int next = step == 1 ? 1 : step == 3 ? -1 : 0; // 0 = Analizuj, 1 = Zastosuj
+    if (next != highlighted)
+    {
+        highlighted = next;
+        analyseButton.setColour(juce::TextButton::buttonColourId, next == 0 ? colours::accent.darker(0.5f) : colours::panel);
+        applyButton.setColour(juce::TextButton::buttonColourId, next == 1 ? colours::accent.darker(0.5f) : colours::panel);
+    }
+
     if (processor.isComparing())
     {
         const double gain = processor.compareGainDb();
@@ -630,11 +681,23 @@ void BrainEditor::timerCallback()
                                juce::dontSendNotification);
         proposalStatus.setColour(juce::Label::textColourId, colours::warning);
     }
-    else if (proposal.made && !proposal.items.empty() && proposalStatus.getText().isEmpty())
+    else if (measuringEffect)
+    {
+        proposalStatus.setText(effectNote + pl(" Puść drop, mierzę efekt: ") + juce::String(juce::roundToInt(measured)) + " / "
+                                   + juce::String(juce::roundToInt(BrainProcessor::kMinimumDropSeconds)) + " s.",
+                               juce::dontSendNotification);
+        proposalStatus.setColour(juce::Label::textColourId, colours::accent);
+    }
+    else if (proposal.made && toApply > 0 && proposalStatus.getText().isEmpty())
     {
         proposalStatus.setText(pl("Kolizje: ") + juce::String(proposal.crowdingBefore, 2) + pl(" → ")
-                                   + juce::String(proposal.crowdingAfter, 2) + pl(". Odznacz to, czego nie chcesz."),
+                                   + juce::String(proposal.crowdingAfter, 2) + pl(". Odznacz to, czego nie chcesz, i kliknij „Zastosuj”."),
                                juce::dontSendNotification);
+        proposalStatus.setColour(juce::Label::textColourId, colours::quiet);
+    }
+    else if (proposal.made && proposal.items.size() > 0 && toApply == 0 && proposalStatus.getText().isEmpty())
+    {
+        proposalStatus.setText(pl("Nic do zastosowania: zostały tylko rady (do zrobienia w aranżu albo w FL)."), juce::dontSendNotification);
         proposalStatus.setColour(juce::Label::textColourId, colours::quiet);
     }
     else if (!processor.isComparing() && proposalStatus.getText().startsWith(pl("Słychać")))
@@ -688,9 +751,16 @@ void BrainEditor::resized()
     area.removeFromTop(8);
 
     auto actions = area.removeFromBottom(28);
-    for (auto* button : { &wholeMixButton, &proposeButton, &applyButton, &undoButton, &compareButton })
+    stepPath.setBounds(area.removeFromBottom(20));
+    scopeBox.setBounds(actions.removeFromLeft(130));
+    actions.removeFromLeft(4);
+    analyseButton.setBounds(actions.removeFromLeft(100));
+    actions.removeFromLeft(12);
+    applyButton.setBounds(actions.removeFromLeft(160));
+    actions.removeFromLeft(6);
+    for (auto* button : { &undoButton, &compareButton })
     {
-        button->setBounds(actions.removeFromLeft(button == &applyButton || button == &wholeMixButton ? 150 : 100));
+        button->setBounds(actions.removeFromLeft(90));
         actions.removeFromLeft(6);
     }
     adaptiveButton.setBounds(actions.removeFromRight(150));

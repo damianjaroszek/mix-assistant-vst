@@ -153,7 +153,7 @@ AgentEditor::AgentEditor(AgentProcessor& p)
         slider->setTextBoxStyle(juce::Slider::TextBoxRight, false, 70, 20);
     }
 
-    styleLabel(chainTitle, pl("Ustawia je przycisk „Ustaw cały miks” w Mózgu, patrząc na cały miks. Można też ręcznie."),
+    styleLabel(chainTitle, pl("Ustawia je „Analizuj” (cały łańcuch) i „Zastosuj” w Mózgu, patrząc na cały miks. Można też ręcznie."),
                colours::quiet, 13.0f);
     styleLabel(cleanLabel, pl("Porządki"), colours::quiet);
     styleLabel(compLabel, pl("Kompresor"), colours::quiet);
@@ -178,7 +178,7 @@ AgentEditor::AgentEditor(AgentProcessor& p)
     styleLabel(evenRefLabel, pl("Nuta"), colours::quiet, 13.0f);
     evenRefLabel.setTooltip(pl("Typowa nuta linii basu: ta zostaje bez zmian."));
     styleLabel(stereoLabel, pl("Faza w pasmach (mid-side)"), colours::quiet);
-    stereoLabel.setTooltip(pl("Jak Correlometer: na dole przeciwfaza, która w mono znika. „Ustaw cały miks” zdejmuje tam side."));
+    stereoLabel.setTooltip(pl("Jak Correlometer: na dole przeciwfaza, która w mono znika. „Analizuj” (cały łańcuch) zdejmuje tam side."));
     for (auto* label : { &cleanStatus, &compStatus, &clipStatus, &evenStatus, &stereoStatus })
     {
         styleLabel(*label, {}, colours::quiet, 13.0f);

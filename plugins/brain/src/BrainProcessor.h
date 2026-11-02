@@ -62,9 +62,17 @@ struct MixSnapshot
         bool stereoValid = false;
     };
 
+    // Phase 22: the report shows what to fix in the mix first, then the arrangement's part, then the rest.
+    enum class ReportGroup
+    {
+        mix,         // something the mix (EQ, levels, chain) can fix
+        arrangement, // the arrangement, the song's course or the sounds themselves (outside the mix)
+        setup        // the plugin's own state: Agents, roles, adaptive mode
+    };
     struct ReportItem
     {
         Status status = Status::unknown;
+        ReportGroup group = ReportGroup::mix;
         juce::String title;
         juce::String detail;
     };
@@ -154,7 +162,7 @@ struct Proposal
             chain,
             level // phase 9: a stem group's level, on every channel of the group
         };
-        // Phase 7: the engineer pass ("Ustaw cały miks") sets the channel's chain.
+        // Phase 7: the engineer pass ("Analizuj", whole chain) sets the channel's chain.
         enum class ChainTool
         {
             none,
@@ -185,7 +193,7 @@ struct Proposal
     std::vector<Item> items;
     std::vector<std::pair<std::uint64_t, ma::EqSettings>> eq; // complete proposed EQ per channel
 
-    // The engineer's verdict per channel, made with "Ustaw cały miks".
+    // The engineer's verdict per channel, made with "Analizuj" (whole chain).
     struct Verdict
     {
         std::uint64_t owner = 0;
@@ -299,6 +307,8 @@ public:
     // Phase 7: every channel's chain (cleanup, compression, clipper, bass notes) planned with the
     // whole mix in view, then the usual proposal on top of it, plus a verdict per channel.
     void proposeWholeMix();
+    // Phase 22: what "Analizuj" runs (0 = corrections only, the old "Zaproponuj"; 1 = the whole chain).
+    int analysisScope = 1;
     void toggleProposalItem(int index);
     int applySelected(); // returns how many Agents got a command
     int undoLast();
@@ -365,6 +375,7 @@ public:
     static juce::String ghostName(const ma::SketchGhost& ghost);
     // What to add: level, range, width, key and the sections it plays in.
     juce::String ghostBrief(const ma::SketchGhost& ghost) const;
+    juce::String overtoneSource(const ma::SketchGhost& ghost, bool& saturated) const; // phase 22
 
     // Phase 10: the track's key, heard on the master (kept with the project) or set by hand.
     // The stem references are moved to it.
@@ -559,7 +570,7 @@ private:
         return s == ma::StemSection::intro ? introSums : s == ma::StemSection::build ? buildSums : breakSums;
     }
     bool sketchOn = true;
-    std::vector<std::uint64_t> plannedOwners; // the channels "Ustaw cały miks" last planned, to notice new ones
+    std::vector<std::uint64_t> plannedOwners; // the channels "Analizuj" (whole chain) last planned, to notice new ones
     ma::MusicalKey keyedTo;
     // Key heard before this session (from the project) plus what the master plays now.
     std::array<double, 12> savedChroma {}, savedBass {};
