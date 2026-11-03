@@ -41,9 +41,13 @@ void take(const float*& in, Settings& settings)
     in += sizeof(Settings) / sizeof(float);
 }
 
-std::array<float, 59> packDynamics(const AgentProcessor::DynamicState& s)
+// Phase 25: 62 since the stereo settings carry the widener (3 floats after the side bells).
+constexpr size_t kPackedDynamics = 62;
+constexpr size_t kPackedBeforeWidener = 59;
+
+std::array<float, kPackedDynamics> packDynamics(const AgentProcessor::DynamicState& s)
 {
-    std::array<float, 59> v {};
+    std::array<float, kPackedDynamics> v {};
     float* out = v.data();
     put(out, s.duck);
     *out++ = static_cast<float>(s.sync);
@@ -60,7 +64,7 @@ std::array<float, 59> packDynamics(const AgentProcessor::DynamicState& s)
     return v;
 }
 
-AgentProcessor::DynamicState unpackDynamics(const std::array<float, 59>& v)
+AgentProcessor::DynamicState unpackDynamics(const std::array<float, kPackedDynamics>& v)
 {
     AgentProcessor::DynamicState s;
     const float* in = v.data();
@@ -106,7 +110,7 @@ bool anyOn(const ma::CleanupSettings& c)
 
 bool anyOn(const ma::StereoSettings& st)
 {
-    return std::any_of(st.side.begin(), st.side.end(), [](const auto& b) { return std::abs(b.db) > 0.05f; });
+    return ma::widenOn(st) || std::any_of(st.side.begin(), st.side.end(), [](const auto& b) { return std::abs(b.db) > 0.05f; });
 }
 
 template <typename Settings>
@@ -377,6 +381,16 @@ juce::AudioProcessorValueTreeState::ParameterLayout AgentProcessor::createLayout
         add(1, " gain", Range { -12.0f, 6.0f, 0.1f }, 0.0f, "dB");
         add(2, " Q", Range { 0.5f, 10.0f, 0.1f }, 2.0f, "");
     }
+    // Phase 25: the widener (side made from a delayed copy of the mid); at the bottom of its range it is off.
+    const auto widenParam = [&layout](const char* id, const char* name, Range range, float value, const char* label) {
+        layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { id, 10 }, name, range, value,
+                                                               juce::AudioParameterFloatAttributes().withLabel(label)));
+    };
+    widenParam(widenAmountId, "Widener amount", Range { -40.0f, 0.0f, 0.5f }, -40.0f, "dB");
+    Range widenFrom { 150.0f, 2000.0f, 1.0f };
+    widenFrom.setSkewForCentre(400.0f);
+    widenParam(widenLowId, "Widener from", widenFrom, 300.0f, "Hz");
+    widenParam(widenDelayId, "Widener delay", Range { 1.0f, 20.0f, 0.1f }, 8.0f, "ms");
 
     return layout;
 }
@@ -953,6 +967,9 @@ void AgentProcessor::setDynamics(const DynamicState& state)
         setParam(sideBellIds[n][1], bell.db);
         setParam(sideBellIds[n][2], bell.q);
     }
+    setParam(widenAmountId, std::max(ma::kWidenOffDb, state.stereo.widen.amountDb));
+    setParam(widenLowId, state.stereo.widen.lowHz);
+    setParam(widenDelayId, state.stereo.widen.delayMs);
     setParam(satOnId, state.saturation.on);
     setParam(satModeId, state.saturation.mode);
     setParam(satDriveId, state.saturation.driveDb);
@@ -1011,6 +1028,9 @@ AgentProcessor::DynamicState AgentProcessor::currentDynamics() const
         bell.db = value(sideBellIds[n][1]);
         bell.q = value(sideBellIds[n][2]);
     }
+    state.stereo.widen.amountDb = value(widenAmountId) <= ma::kWidenOffDb + 0.01f ? -60.0f : value(widenAmountId);
+    state.stereo.widen.lowHz = value(widenLowId);
+    state.stereo.widen.delayMs = value(widenDelayId);
     state.saturation = currentSaturation();
     return state;
 }
@@ -1261,15 +1281,24 @@ void AgentProcessor::setStateInformation(const void* data, int sizeInBytes)
     const auto setValues = juce::StringArray::fromTokens(state.getProperty(brainSetProperty).toString(), " ", {});
     brainSet = {};
     brainSetBackup = {};
-    if (setValues.size() == 59 + 3 * ma::kEqBands)
+    const int dynamicCount = setValues.size() - 3 * ma::kEqBands;
+    if (dynamicCount == static_cast<int>(kPackedDynamics) || dynamicCount == static_cast<int>(kPackedBeforeWidener))
     {
-        std::array<float, 59> packed {};
-        for (size_t i = 0; i < packed.size(); ++i)
-            packed[i] = setValues[static_cast<int>(i)].getFloatValue();
+        std::vector<float> floats;
+        for (int i = 0; i < dynamicCount; ++i)
+            floats.push_back(setValues[i].getFloatValue());
+        if (dynamicCount == static_cast<int>(kPackedBeforeWidener))
+        {
+            // Saved before phase 25: the widener (off) goes between the side bells and the saturation.
+            const ma::StereoSettings::Widener off {};
+            floats.insert(floats.end() - 4, { off.amountDb, off.lowHz, off.delayMs });
+        }
+        std::array<float, kPackedDynamics> packed {};
+        std::copy(floats.begin(), floats.end(), packed.begin());
         brainSet.dynamics = unpackDynamics(packed);
         for (int b = 0; b < ma::kEqBands; ++b)
-            brainSet.eq[static_cast<size_t>(b)] = { setValues[59 + b * 3].getFloatValue(), setValues[60 + b * 3].getFloatValue(),
-                                                    setValues[61 + b * 3].getFloatValue() };
+            brainSet.eq[static_cast<size_t>(b)] = { setValues[dynamicCount + b * 3].getFloatValue(), setValues[dynamicCount + 1 + b * 3].getFloatValue(),
+                                                    setValues[dynamicCount + 2 + b * 3].getFloatValue() };
         brainSet.valid = true;
     }
     const auto learned = juce::StringArray::fromTokens(state.getProperty(learnedProperty).toString(), " ", {});

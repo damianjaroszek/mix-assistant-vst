@@ -320,7 +320,7 @@ public:
             const float y = yOf(c);
             g.setColour(!heard[static_cast<size_t>(b)] ? colours::quiet.withAlpha(0.25f)
                         : c < 0.0                    ? colours::critical
-                        : c < 0.3                    ? colours::warning
+                        : c < 0.15                   ? colours::warning // phase 25 widens down to 0.2 on purpose
                                                      : colours::good);
             g.fillRect(juce::Rectangle<float>(x + 1.0f, std::min(y, zero), width - 2.0f, std::max(1.5f, std::abs(zero - y))));
             if (hasOverlay)

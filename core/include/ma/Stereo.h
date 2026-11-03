@@ -4,6 +4,7 @@
 #include "SpectrumAnalyzer.h"
 
 #include <array>
+#include <vector>
 
 namespace ma
 {
@@ -46,9 +47,26 @@ struct StereoSettings
     };
     static constexpr int kBells = 4;
     std::array<Bell, kBells> side {};
+
+    // Phase 25: width for a part that has (almost) none. A copy of the mid, delayed by a few ms and
+    // high-passed, goes into the side at `amountDb` under the mid (the way Ozone's Stereoize works):
+    // L and R get complementary combs, the mono sum (the mid) stays exactly as it was.
+    struct Widener
+    {
+        float amountDb = -60.0f; // <= kWidenOffDb = off
+        float lowHz = 300.0f;    // the generated side starts here (24 dB/oct)
+        float delayMs = 8.0f;
+    };
+    Widener widen {};
 };
 
+constexpr float kWidenOffDb = -40.0f;
+constexpr float kMaxWidenDelayMs = 20.0f;
+
 double sideResponseDb(const StereoSettings& settings, double hz);
+// Side power the widener adds per unit of mid power at `hz` (0 when off).
+double widenPowerRatio(const StereoSettings& settings, double hz);
+bool widenOn(const StereoSettings& settings);
 bool isOn(const StereoSettings& settings);
 
 class StereoShaper
@@ -64,6 +82,11 @@ private:
     StereoSettings settings {};
     bool initialised = false;
     std::array<Biquad, StereoSettings::kBells> bells {};
+    // Phase 25: the widener's delay line (allocated in prepare) and its high-pass.
+    std::vector<double> delay;
+    int delayPos = 0, delaySamples = 0;
+    double widenGain = 0.0;
+    std::array<Biquad, 2> widenHighPass {};
 };
 
 } // namespace ma

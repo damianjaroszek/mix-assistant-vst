@@ -172,6 +172,22 @@ przed limiterem i za nim; zostaje tylko kształt różnicy, najwyżej ±2 dB na 
 niż maximizer w Ozone. „Raport dla Ozone” wypisuje to, co z zakresów zostanie po „Zastosuj”, jako szerokie ruchy
 (EQ albo Band Gain w Dynamics).
 
+### Szerokość jak w referencjach (faza 25)
+
+Z wczytanymi stemami referencji Mózg porównuje szerokość każdej grupy (perkusja, wokal, reszta) od 300 Hz w górę z tym,
+jak gra ta grupa w referencjach (mediana korelacji w każdym zakresie), i dociąga kanały do tej szerokości w „Analizuj”
+(cały łańcuch). Kanał, który już ma side, dostaje podbicie side'u w tym zakresie. Kanał prawie mono dostaje poszerzenie:
+do side'u idzie kopia środka opóźniona o kilka ms i przepuszczona przez filtr od 300 Hz (albo od miejsca, gdzie
+referencje są szersze). Środek się nie zmienia, więc w mono kanał gra dokładnie tak samo. Każdy kanał ma inne
+opóźnienie, żeby poszerzenia nie składały się w jedno.
+
+Granica: korelacja żadnego pasma, ani kanału, ani sumy, nie spada poniżej 0,2. Gdy suma by spadła, Mózg cofa
+krokami wszystkie poszerzenia grające w tym paśmie, aż suma wróci do 0,2. Stopa, bas, bus i send nigdy nie są poszerzane, a wokal dostaje
+tylko podbicie istniejącego side'u (bez sztucznego poszerzenia). Bez stemów referencji zostaje to, co było: cięcie side'u
+tam, gdzie pasmo wpada w przeciwfazę, i najwyżej +1 dB side'u na szerokich rolach. W Agencie na zakładce „Stereo” są trzy
+pokrętła poszerzenia (ile dB pod środkiem, od ilu Hz, opóźnienie); -40 dB znaczy wyłączone. W widoku „Stereo” Mózgu
+pomarańczowe są dopiero pasma poniżej 0,15, bo 0,2 to zamierzona granica.
+
 ### Przed masteringiem (Ozone)
 
 „Cel mastera” w Mózgu to głośność, do której Ozone podciągnie master (domyślnie -8 LUFS). Mózg w tle robi
