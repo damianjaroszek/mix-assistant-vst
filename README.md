@@ -229,6 +229,17 @@ proponuje mu zmian stereo i pisze w werdykcie, że szerokość jest ustawiona r�
   raport mówi wprost, że reszta to gęstość dropu albo niższy cel.
 - Werdykt, Raport i Propozycja nie wracają już same na górę przy przewijaniu.
 
+### Proporcje bez referencji (faza 29)
+
+- „Naucz poziom” ustawia kanał względem celu według roli: stopa na celu, bas 2 dB niżej, wokal 4, lead i perkusja 6, pad
+  8, efekty i powroty 10 dB niżej (rola „Inny” i bus zostają na celu). Stopa ma niskie RMS jak na to, jak głośno brzmi
+  (krótkie uderzenia, głównie sub), a pad czy lead grają bez przerwy w paśmie, które ucho słyszy najlepiej, więc ten
+  sam poziom RMS stawiał pad nad stopą. Przełącznik „Poziom według roli” obok przycisku nauki to wyłącza.
+- Bez referencji ze stemów „Analizuj” (cały łańcuch) wyrównuje grupy (perkusja, bas, wokal, reszta) do typowych proporcji
+  house'u (korytarz ±1,5 dB, uszny udział w całości). Perkusja zostaje tam, gdzie postawiła ją nauka, reszta przesuwa
+  się względem niej, najwyżej 3 dB na analizę. Głośność całości dopasuje cel mastera. Po wgraniu referencji ze stemów
+  proporcje biorą się z nich.
+
 ### Przed masteringiem (Ozone)
 
 „Cel mastera” w Mózgu to głośność, do której Ozone podciągnie master (domyślnie -8 LUFS). Mózg w tle robi

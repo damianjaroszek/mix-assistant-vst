@@ -1649,6 +1649,28 @@ void testStems()
         settled[g] = bandsOf(applied[g], second.gainDb[g]);
     check(!ma::planStemLevels(settled, all, simple).any, "planning again once it is in the corridor changes nothing");
 
+    // Phase 29: no references, the typical house balance. The corridors of the groups that play
+    // add up to the whole; a music group (pads) far too loud is turned down.
+    {
+        const std::array<bool, 4> noVocal { true, true, false, true };
+        const auto typical = ma::typicalLevelTarget(noVocal);
+        double sum = 0.0;
+        for (size_t g = 0; g < 4; ++g)
+            if (typical.level[g].valid)
+                sum += std::pow(10.0, typical.level[g].centre / 10.0);
+        check(!typical.valid() && typical.level[0].valid && !typical.level[2].valid && std::abs(10.0 * std::log10(sum)) < 0.01,
+              "typical corridors only for the groups that play, adding up to the whole");
+        auto loudPads = ref;
+        loudPads[2].fill(-200.0);
+        loudPads[3] = bandsOf(ref[3], 14.0);
+        auto plan = ma::planStemLevels(loudPads, noVocal, typical);
+        ma::anchorStemLevels(plan, static_cast<int>(ma::StemGroup::drums));
+        std::printf("      typical: music %.1f dB of the sum (corridor %.1f..%.1f), gain %.1f, drums %+.1f\n", plan.before[3],
+                    typical.level[3].low, typical.level[3].high, plan.gainDb[3], plan.gainDb[0]);
+        check(plan.any && plan.gainDb[3] < -1.0 && plan.gainDb[3] < plan.gainDb[0], "without references loud pads are turned down against the drums");
+        check(plan.gainDb[0] == 0.0, "the drums stay where Learn put them");
+    }
+
     // The solver gives the vocal its presence back on its own channel.
     auto thin = ref;
     for (int b = 0; b < 40; ++b)
