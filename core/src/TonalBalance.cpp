@@ -149,6 +149,55 @@ TonalComparison compareToTarget(const Curve& mixLevelsDb, const TonalTarget& tar
     return result;
 }
 
+double tonalZoneEdgeHz(int edge)
+{
+    // Where TBC draws its range lines; the extremes stop where references disagree most.
+    static constexpr double edges[kTonalZones + 1] { 40.0, 250.0, 2000.0, 9000.0, 16000.0 };
+    return edges[std::clamp(edge, 0, kTonalZones)];
+}
+
+std::array<TonalZone, kTonalZones> zoneOffsets(const TonalComparison& comparison, const TonalTarget& target)
+{
+    std::array<TonalZone, kTonalZones> zones {};
+    if (!comparison.valid || !target.valid())
+        return zones;
+    for (int z = 0; z < kTonalZones; ++z)
+    {
+        auto& zone = zones[static_cast<size_t>(z)];
+        zone.lowHz = tonalZoneEdgeHz(z);
+        zone.highHz = tonalZoneEdgeHz(z + 1);
+        zone.firstBand = numBands();
+        int bands = 0, playing = 0;
+        double sum = 0.0;
+        for (int b = 0; b < numBands(); ++b)
+        {
+            const double hz = hzOf(b);
+            if (hz < zone.lowHz || hz >= zone.highHz)
+                continue;
+            zone.firstBand = std::min(zone.firstBand, b);
+            zone.lastBand = std::max(zone.lastBand, b);
+            ++bands;
+            const auto i = static_cast<size_t>(b);
+            if (comparison.mixDb[i] > kFloorDb + 1.0)
+            {
+                sum += comparison.mixDb[i] - target.centre[i];
+                ++playing;
+            }
+        }
+        zone.valid = playing >= 2 && 2 * playing > bands;
+        zone.offsetDb = playing > 0 ? sum / playing : 0.0;
+    }
+    return zones;
+}
+
+double outsideCorridorDb(const TonalComparison& comparison)
+{
+    double sum = 0.0;
+    for (int b = 0; b < numBands(); ++b)
+        sum += std::abs(comparison.deviationDb[static_cast<size_t>(b)]);
+    return sum;
+}
+
 std::string serialiseTarget(const TonalTarget& target)
 {
     std::ostringstream out;

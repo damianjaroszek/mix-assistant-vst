@@ -26,9 +26,16 @@ void MasterPreview::prepare(double rate, int numChannels)
     queueIndex.assign(static_cast<size_t>(lookahead + 1), 0);
     averageRing.assign(static_cast<size_t>(lookahead), 1.0);
     chunk.assign(static_cast<size_t>(channelCount), std::vector<float>(kChunk, 0.0f));
+    chunkIn.assign(static_cast<size_t>(channelCount), std::vector<float>(kChunk, 0.0f));
     chunkPointers.resize(static_cast<size_t>(channelCount));
+    chunkInPointers.resize(static_cast<size_t>(channelCount));
     for (int c = 0; c < channelCount; ++c)
+    {
         chunkPointers[static_cast<size_t>(c)] = chunk[static_cast<size_t>(c)].data();
+        chunkInPointers[static_cast<size_t>(c)] = chunkIn[static_cast<size_t>(c)].data();
+    }
+    spectrumIn.prepare(rate, BandScale::erb);
+    spectrumOut.prepare(rate, BandScale::erb);
     meter.prepare(rate, channelCount);
     frameLength = std::max(1, static_cast<int>(std::lround(0.1 * rate)));
     gain = targetGain;
@@ -48,6 +55,8 @@ void MasterPreview::reset()
     limiterGain = 1.0;
     chunkFill = 0;
     meter.reset();
+    spectrumIn.reset();
+    spectrumOut.reset();
     frameFill = 0;
     frameMaxReduction = frameInputPower = 0.0;
     frames = heavyFrames = 0;
@@ -102,8 +111,10 @@ void MasterPreview::process(const float* const* channels, int numChannels, int n
         for (int c = 0; c < channelCount; ++c)
         {
             auto& d = delay[static_cast<size_t>(c)];
-            const double out = d[static_cast<size_t>(delayPos)] * limiterGain;
+            const double in = d[static_cast<size_t>(delayPos)];
+            const double out = in * limiterGain;
             outputPeak = std::max(outputPeak, std::abs(out));
+            chunkIn[static_cast<size_t>(c)][static_cast<size_t>(chunkFill)] = static_cast<float>(in);
             d[static_cast<size_t>(delayPos)] = c < used ? channels[c][i] * gain : 0.0;
             chunk[static_cast<size_t>(c)][static_cast<size_t>(chunkFill)] = static_cast<float>(out);
         }
@@ -111,6 +122,8 @@ void MasterPreview::process(const float* const* channels, int numChannels, int n
         if (++chunkFill == kChunk)
         {
             meter.process(chunkPointers.data(), channelCount, kChunk);
+            spectrumIn.process(chunkInPointers.data(), channelCount, kChunk);
+            spectrumOut.process(chunkPointers.data(), channelCount, kChunk);
             chunkFill = 0;
         }
 
@@ -157,6 +170,21 @@ PreviewStats MasterPreview::stats() const
     s.outputLufs = meter.integratedLufs();
     s.outputPeakDb = outputPeak > 0.0 ? 20.0 * std::log10(outputPeak) : -INFINITY;
     return s;
+}
+
+SpectrumAnalyzer::Bands MasterPreview::limiterTiltDb() const
+{
+    SpectrumAnalyzer::Bands tilt {};
+    if (spectrumIn.framesAnalysed() == 0)
+        return tilt;
+    const auto in = spectrumIn.averageDb();
+    const auto out = spectrumOut.averageDb();
+    for (int b = 0; b < spectrumIn.numBands(); ++b)
+    {
+        const auto i = static_cast<size_t>(b);
+        tilt[i] = std::isfinite(in[i]) && std::isfinite(out[i]) && in[i] > -120.0 && out[i] > -120.0 ? out[i] - in[i] : 0.0;
+    }
+    return tilt;
 }
 
 } // namespace ma

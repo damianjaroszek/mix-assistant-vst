@@ -1,6 +1,7 @@
 #pragma once
 
 #include "LoudnessMeter.h"
+#include "SpectrumAnalyzer.h"
 
 #include <array>
 #include <cmath>
@@ -37,6 +38,10 @@ public:
     void setGainDb(double gainDb) { targetGain = std::pow(10.0, gainDb / 20.0); }
     void process(const float* const* channels, int numChannels, int numSamples);
     PreviewStats stats() const;
+    // Phase 24: what the limiter does to the long-term spectrum (ERB bands): its output minus its
+    // input (after the gain), per band, over the same time. Pushed hard, it takes most off where
+    // the peaks are, usually the kick and the bass. 0 where either side has nothing.
+    SpectrumAnalyzer::Bands limiterTiltDb() const;
 
 private:
     static constexpr int kHistogramBins = 400; // 0..40 dB in 0.1 dB steps
@@ -65,8 +70,9 @@ private:
 
     // Output for the loudness meter, in chunks.
     static constexpr int kChunk = 256;
-    std::vector<std::vector<float>> chunk;
-    std::vector<const float*> chunkPointers;
+    std::vector<std::vector<float>> chunk, chunkIn;
+    std::vector<const float*> chunkPointers, chunkInPointers;
+    SpectrumAnalyzer spectrumIn, spectrumOut;
     int chunkFill = 0;
     LoudnessMeter meter;
 

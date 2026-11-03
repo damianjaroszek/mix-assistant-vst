@@ -73,6 +73,14 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     profilesButton.setToggleState(processor.usesLearnedProfiles(), juce::dontSendNotification);
     profilesButton.onClick = [this] { processor.setUseLearnedProfiles(profilesButton.getToggleState()); };
 
+    afterLimiterButton.setButtonText(pl("Jak po limiterze (master)"));
+    afterLimiterButton.setTooltip(pl("Referencje to gotowe mastery, więc Mózg porównuje miks tak, jak zostawiłby go limiter do celu "
+                                     "głośności z zakładki pre-mastera (szacunek; limiter zjada głównie dół). Cienka linia: miks tak, "
+                                     "jak gra teraz, czyli to, co pokazuje Tonal Balance przed Ozone."));
+    afterLimiterButton.setColour(juce::ToggleButton::textColourId, colours::text);
+    afterLimiterButton.setToggleState(processor.tonalAfterLimiter(), juce::dontSendNotification);
+    afterLimiterButton.onClick = [this] { processor.setTonalAfterLimiter(afterLimiterButton.getToggleState()); };
+
     sketchButton.setButtonText(pl("Tryb szkicu: brakujące partie jako duchy"));
     sketchButton.setTooltip(pl("Gdy dropowi brakuje partii, które mają referencje (albo typowy drop house'u), Mózg wstawia za nie "
                                "partie-duchy: balans tonalny, proporcje i kolizje liczy z nimi, a „Analizuj” (cały łańcuch) zostawia im miejsce "
@@ -290,7 +298,7 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     page(Tab::verdict, pl("Werdykt"), pl("Co Mózg zaplanował na każdym kanale i dlaczego. Przy każdym narzędziu: działa, do zastosowania, zmienione ręcznie albo nie działa."), { &verdictViewport },
          fill(verdictViewport));
     page(Tab::tonal, pl("Balans tonalny"), pl("Balans tonalny sumy wobec celu z referencji."),
-         { &targetBox, &newTargetButton, &captureButton, &removeReferenceButton, &tonalView }, [this](auto area) { layoutTonal(area); });
+         { &targetBox, &newTargetButton, &captureButton, &removeReferenceButton, &afterLimiterButton, &tonalView }, [this](auto area) { layoutTonal(area); });
     page(Tab::stems, pl("Referencje"), pl("Perkusja, bas, wokal i reszta wobec stemów referencji, drop do dropu: poziom, barwa, szerokość."),
          { &stemBox, &newStemsButton, &loadStemsButton, &removeStemsButton, &keyBox, &redetectKeyButton, &introSectionButton,
            &buildSectionButton, &dropSectionButton, &breakSectionButton, &stemView },
@@ -466,10 +474,16 @@ void BrainEditor::timerCallback()
     else
         tonalStatus = pl("Cel „") + targetName + "\" (" + juce::String(static_cast<int>(target.references.size()))
                       + pl(" ref.), miks z ") + juce::String(juce::roundToInt(processor.secondsAnalysed())) + " s";
+    const bool afterLimiter = processor.tonalAfterLimiter() && processor.limiterTiltKnown();
+    if (mix.tonal.valid && afterLimiter)
+        tonalStatus += pl(". Gruba: jak po limiterze do ") + juce::String(processor.masterTargetLufs(), 1) + pl(" LUFS, cienka: jak gra");
+    else if (mix.tonal.valid && processor.tonalAfterLimiter())
+        tonalStatus += pl(". Podgląd limitera jeszcze słucha, krzywa bez niego");
     if (mix.sketch.active() && mix.sketch.tonal.valid)
         tonalStatus += pl(". Przerywana: z partiami-duchami, szare: dziury aranżu (nie EQ)");
     tonalView.setData(target, mix.tonal, tonalStatus, mix.sketch.active() ? mix.sketch.tonal : ma::TonalComparison {},
-                      mix.sketch.arrangementRegion);
+                      mix.sketch.arrangementRegion, afterLimiter ? processor.tonalBeforeLimiter() : ma::TonalComparison {});
+    afterLimiterButton.setToggleState(processor.tonalAfterLimiter(), juce::dontSendNotification);
     {
         juce::String status;
         juce::StringArray briefs;
@@ -804,6 +818,7 @@ void BrainEditor::layoutTonal(juce::Rectangle<int> area)
     captureButton.setBounds(controls.removeFromLeft(160));
     controls.removeFromLeft(6);
     removeReferenceButton.setBounds(controls.removeFromLeft(120));
+    afterLimiterButton.setBounds(controls.removeFromRight(230));
     area.removeFromTop(6);
     tonalView.setBounds(area);
 }

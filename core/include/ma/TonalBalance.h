@@ -2,6 +2,7 @@
 
 #include "SpectrumAnalyzer.h"
 
+#include <array>
 #include <string>
 #include <vector>
 
@@ -50,6 +51,24 @@ struct TonalComparison
 };
 
 TonalComparison compareToTarget(const Curve& mixLevelsDb, const TonalTarget& target);
+
+// Phase 24: the four broad ranges Tonal Balance Control shows (Low, Low-Mid, High-Mid, High)
+// and where the mix sits in each against the corridor's centre (the references' median).
+// A mix can be inside the corridor and still lean on one of its edges over a whole range.
+constexpr int kTonalZones = 4;
+double tonalZoneEdgeHz(int edge); // 0..kTonalZones
+
+struct TonalZone
+{
+    int firstBand = 0, lastBand = -1;
+    double lowHz = 0.0, highHz = 0.0;
+    double offsetDb = 0.0; // mean of the mix minus the centre over the bands it plays in; > 0 = above
+    bool valid = false;    // the mix plays in most of the range
+};
+
+std::array<TonalZone, kTonalZones> zoneOffsets(const TonalComparison& comparison, const TonalTarget& target);
+// Sum over the bands of the distance outside the corridor.
+double outsideCorridorDb(const TonalComparison& comparison);
 
 // Plain-text file: name on the first line, then one line of band levels per reference.
 std::string serialiseTarget(const TonalTarget& target);

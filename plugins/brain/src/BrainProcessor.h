@@ -400,6 +400,19 @@ public:
     // mix as it is, as before.
     bool sketchMode() const { return sketchOn; }
     void setSketchMode(bool on);
+    // Phase 24: the tonal balance as a limiter to the master target would leave it (on by default,
+    // kept with the project): the references are mastered tracks, so this is the fair comparison.
+    // Off, the mix is compared as it plays, like Tonal Balance Control in front of Ozone.
+    bool tonalAfterLimiter() const { return afterLimiterOn; }
+    void setTonalAfterLimiter(bool on);
+    bool limiterTiltKnown() const;
+    // What the limiter does to each ERB band (0 while the preview has heard too little), and the
+    // master spectrum the tonal balance and the solver work on.
+    ma::Curve limiterTilt() const;
+    ma::Curve tonalMasterSpectrum() const;
+    // The comparison of the mix as it plays, for the thin line when the main one is after the limiter.
+    const ma::TonalComparison& tonalBeforeLimiter() const { return tonalPlain; }
+    static constexpr double kMaxTiltDb = 2.0;
     // "brakujący wokal", "pad lub akordy w dolnym środku": what a ghost stands for.
     static juce::String ghostName(const ma::SketchGhost& ghost);
     // What to add: level, range, width, key and the sections it plays in.
@@ -521,6 +534,7 @@ private:
     ma::MasterPreview masterPreview;
     std::atomic<double> previewGainDb { 0.0 };
     std::atomic<bool> previewResetRequested { false };
+    std::array<std::atomic<float>, ma::SpectrumAnalyzer::kMaxBands> previewTilt {};
     std::atomic<double> previewSeconds { 0.0 }, previewAverage { 0.0 }, previewTypical { 0.0 }, previewMax { 0.0 },
         previewHeavy { 0.0 }, previewLufs { -INFINITY }, previewPeak { -INFINITY };
 
@@ -599,6 +613,8 @@ private:
         return s == ma::StemSection::intro ? introSums : s == ma::StemSection::build ? buildSums : breakSums;
     }
     bool sketchOn = true;
+    bool afterLimiterOn = true;
+    ma::TonalComparison tonalPlain;
     std::vector<CollisionStep> collisionSteps; // phase 23
     std::vector<Proposal::Verdict> lastVerdicts; // phase 23
     std::vector<std::uint64_t> plannedOwners; // the channels "Analizuj" (whole chain) last planned, to notice new ones

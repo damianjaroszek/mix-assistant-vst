@@ -1834,6 +1834,104 @@ void testKey()
 }
 
 // Phase 11: the master preview's limiter.
+// Phase 24: a mix inside the corridor but leaning on its edges over whole TBC ranges.
+void testCentreZones()
+{
+    const int bands = ma::SpectrumAnalyzer::numBandsFor(ma::BandScale::erb);
+    // Kick, bass, a lead and hats, every range carried.
+    std::vector<ma::SolverChannel> channels { solverBand(45.0, 120.0, -14.0, 1), solverBand(40.0, 250.0, -18.0, 3),
+                                              solverBand(250.0, 6000.0, -22.0, 2), solverBand(2000.0, 15000.0, -30.0, 4) };
+    const auto mix = mixOf(channels);
+    // The references: 1.4 dB less Low and 1.3 dB more High-Mid than the mix, inside a 2 dB corridor.
+    auto targetWith = [&](double lowDb, double highMidDb) {
+        ma::Curve reference = mix;
+        for (int b = 0; b < bands; ++b)
+        {
+            const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+            if (hz >= 40.0 && hz < 250.0)
+                reference[static_cast<size_t>(b)] += lowDb;
+            if (hz >= 2000.0 && hz < 9000.0)
+                reference[static_cast<size_t>(b)] += highMidDb;
+        }
+        ma::TonalTarget target;
+        target.references.push_back(ma::normaliseCurve(reference));
+        target.rebuild();
+        return target;
+    };
+    const auto target = targetWith(-1.4, 1.3);
+    const auto comparison = ma::compareToTarget(mix, target);
+    check(comparison.valid && comparison.regions.empty(), "centre: the mix is inside the corridor");
+    const auto zones = ma::zoneOffsets(comparison, target);
+    std::printf("  zones: Low %+.2f, Low-Mid %+.2f, High-Mid %+.2f, High %+.2f dB\n", zones[0].offsetDb, zones[1].offsetDb,
+                zones[2].offsetDb, zones[3].offsetDb);
+    check(zones[0].offsetDb > 0.75 && zones[2].offsetDb < -0.75, "centre: Low reads above the centre, High-Mid below");
+
+    auto solveWith = [&](const std::vector<ma::SolverChannel>& in, const ma::Curve& master, const ma::TonalTarget& t, bool centre) {
+        ma::SolverOptions options;
+        options.tonalTarget = &t;
+        options.tonalMasterDb = master;
+        options.centreZones = centre;
+        return ma::solve(in, options);
+    };
+    auto heardOf = [&](const std::vector<ma::SolverChannel>& in, const std::vector<ma::EqSettings>& eq) {
+        ma::Curve heard {};
+        for (int b = 0; b < bands; ++b)
+        {
+            const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+            double p = 0.0;
+            for (size_t c = 0; c < in.size(); ++c)
+                p += std::pow(10.0, (in[c].rawDb[static_cast<size_t>(b)] + ma::eqResponseDb(eq[c], hz)) / 10.0);
+            heard[static_cast<size_t>(b)] = 10.0 * std::log10(p);
+        }
+        return heard;
+    };
+
+    check(solveWith(channels, mix, target, false).changes.empty(), "centre: off, a mix inside the corridor gets nothing");
+    const auto first = solveWith(channels, mix, target, true);
+    int cuts = 0, boosts = 0;
+    for (const auto& change : first.changes)
+    {
+        check(change.centre, "centre: every change is a centring one");
+        const auto& band = first.eq[static_cast<size_t>(change.channel)][static_cast<size_t>(change.eqSlot)];
+        std::printf("  centre: channel %d %+.1f dB at %.0f Hz (Q %.2f), range %d %+.2f -> %+.2f dB\n", change.channel, band.gainDb,
+                    band.hz, band.q, change.zone, change.zoneOffsetDb, change.zoneAfterDb);
+        if (change.kind == ma::SolverChange::Kind::tonalCut && change.zone == 0)
+        {
+            ++cuts;
+            check(change.channel == 1, "centre: the Low excess comes off the bass, not the more important kick");
+        }
+        if (change.kind == ma::SolverChange::Kind::tonalBoost && change.zone == 2)
+            ++boosts;
+        check(std::abs(change.zoneOffsetDb - change.zoneAfterDb) <= 1.51, "centre: a range moves 1.5 dB at most");
+        check(std::abs(change.zoneAfterDb) < std::abs(change.zoneOffsetDb), "centre: the range ends nearer the centre");
+    }
+    check(cuts == 1 && boosts <= 1, "centre: one cut for Low (and High-Mid at most one boost)");
+    const auto after = ma::compareToTarget(heardOf(channels, first.eq), target);
+    check(after.regions.empty(), "centre: nothing is pushed out of the corridor");
+    const auto zonesAfter = ma::zoneOffsets(after, target);
+    std::printf("  after: Low %+.2f, Low-Mid %+.2f, High-Mid %+.2f, High %+.2f dB\n", zonesAfter[0].offsetDb, zonesAfter[1].offsetDb,
+                zonesAfter[2].offsetDb, zonesAfter[3].offsetDb);
+    bool near = true;
+    for (const auto& zone : zonesAfter)
+        near = near && std::abs(zone.offsetDb) <= 0.8;
+    check(near, "centre: every range ends within the dead zone of the centre");
+
+    // Applied and measured again: the same bells, not a second pair.
+    auto applied = channels;
+    for (size_t c = 0; c < applied.size(); ++c)
+        applied[c].currentEq = first.eq[c];
+    const auto second = solveWith(applied, heardOf(channels, first.eq), target, true);
+    bool same = true;
+    for (size_t c = 0; c < channels.size(); ++c)
+        for (int k = 0; k < ma::kEqBands; ++k)
+            same = same && std::abs(second.eq[c][static_cast<size_t>(k)].gainDb - first.eq[c][static_cast<size_t>(k)].gainDb) < 0.01f;
+    check(same, "centre: solving again after applying gives the same EQ");
+
+    // Within the dead zone nothing moves.
+    const auto close = targetWith(-0.5, 0.5);
+    check(solveWith(channels, mix, close, true).changes.empty(), "centre: half a dB off the centre is left alone");
+}
+
 void testMasterPreview()
 {
     constexpr double sr = 48000.0, pi = 3.14159265358979323846;
@@ -1873,6 +1971,43 @@ void testMasterPreview()
     // The kick peaks at 0.9 + 12 dB = 3.6 against a 0.89 ceiling: about 12 dB off them.
     checkNear(loud.maxReductionDb, 12.1, 0.6, "the kick is limited by what it is over the ceiling (dB)");
     check(loud.typicalReductionDb > 6.0 && loud.heavyShare >= 0.15, "a peaky kick pushed loud shows as heavy limiting");
+
+    // Phase 24: the limiter takes its reduction where the peaks are, so the kick's band loses more
+    // of its long-term level than the steady tone's.
+    {
+        ma::MasterPreview preview;
+        preview.setGainDb(12.0);
+        preview.prepare(sr, 2);
+        const int n = 480;
+        std::vector<float> l(static_cast<size_t>(n));
+        long t = 0;
+        for (int block = 0; block < static_cast<int>(8.0 * sr / n); ++block)
+        {
+            for (int i = 0; i < n; ++i, ++t)
+            {
+                const double time = t / sr;
+                const double beat = std::fmod(time, 0.5);
+                double x = 0.1 * std::sin(2 * pi * 1000.0 * time);
+                if (beat < 0.1)
+                    x += 0.8 * std::exp(-beat / 0.04) * std::sin(2 * pi * 60.0 * beat);
+                l[static_cast<size_t>(i)] = static_cast<float>(x);
+            }
+            const float* channels[] { l.data(), l.data() };
+            preview.process(channels, 2, n);
+        }
+        const auto tilt = preview.limiterTiltDb();
+        double kick = 0.0, tone = 0.0, kickHz = 1e9, toneHz = 1e9;
+        for (int b = 0; b < ma::SpectrumAnalyzer::numBandsFor(ma::BandScale::erb); ++b)
+        {
+            const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+            if (std::abs(std::log(hz / 60.0)) < std::abs(std::log(kickHz / 60.0)))
+                kickHz = hz, kick = tilt[static_cast<size_t>(b)];
+            if (std::abs(std::log(hz / 1000.0)) < std::abs(std::log(toneHz / 1000.0)))
+                toneHz = hz, tone = tilt[static_cast<size_t>(b)];
+        }
+        std::printf("  limiter tilt: %.2f dB at %.0f Hz, %.2f dB at %.0f Hz\n", kick, kickHz, tone, toneHz);
+        check(kick < 0.0 && kick < tone - 1.0, "the limiter takes more off the kick's band than the tone's");
+    }
 }
 
 // Phase 12: the break, found from the drums stem, measured beside the drop.
@@ -2842,6 +2977,7 @@ int main()
     testStemSections();
     testSketch();
     testOneCorrection();
+    testCentreZones();
     testSectionAutomation();
     testEnergyMap();
     testGhostNoise();
