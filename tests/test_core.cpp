@@ -2538,6 +2538,105 @@ void testOneCorrection()
               + std::to_string(some.second) + " vs " + std::to_string(none.second) + " dB)");
 }
 
+// Phase 19: volume automation for a section against the references' own section.
+void testSectionAutomation()
+{
+    std::array<ma::SpectrumAnalyzer::Bands, 4> ref {}, side {};
+    for (int g = 0; g < 4; ++g)
+    {
+        ref[static_cast<size_t>(g)].fill(-200.0);
+        side[static_cast<size_t>(g)].fill(-200.0);
+    }
+    for (int b = 0; b < 40; ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        const auto at = static_cast<size_t>(b);
+        ref[1][at] = hz < 400.0 ? -34.0 - 20.0 * std::max(0.0, std::log2(hz / 120.0)) : -200.0;
+        ref[3][at] = hz > 200.0 && hz < 14000.0 ? -38.0 : -200.0;
+        side[3][at] = ref[3][at] - 3.0;
+    }
+    // The references' break: bass and the rest, no drums, 6..10 dB under the drop.
+    ma::StemTarget breaks;
+    {
+        ma::StemProfile p;
+        p.name = "ref";
+        p.measure = ma::measureStemGroups(ref, side, { false, true, false, true });
+        p.dropSeconds = 20.0;
+        breaks.profiles.push_back(p);
+    }
+    breaks.rebuild();
+    ma::StemCorridor contrast;
+    contrast.valid = true;
+    contrast.low = 6.0;
+    contrast.centre = 8.0;
+    contrast.high = 10.0;
+
+    auto shifted = [](const ma::SpectrumAnalyzer::Bands& in, double db) {
+        auto out = in;
+        for (auto& v : out)
+            if (v > -150.0)
+                v += db;
+        return out;
+    };
+    // Ours: the drums keep playing, the bass 6 dB too loud, the whole break only 3 dB under the drop.
+    auto ours = ref;
+    for (int b = 0; b < 40; ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        ours[0][static_cast<size_t>(b)] = -36.0 - 6.0 * std::abs(std::log2(hz / 80.0));
+    }
+    ours[1] = shifted(ref[1], 6.0);
+    const std::array<bool, 4> present { true, true, false, true };
+    const auto plan = ma::planSectionAutomation(ours, present, breaks, contrast, 3.0);
+    check(plan.valid && plan.any, "a break far from the references' plans automation");
+    check(plan.mute[0], "drums the references' break does not have are muted");
+    check(plan.gainDb[1] < plan.gainDb[3] - 3.0, "the bass comes down against the rest");
+    check(plan.belowDropAfter >= 6.0 && plan.belowDropAfter <= 10.0, "the break ends up as much under the drop as the references'");
+    check(plan.gainDb[3] < 0.0, "the whole break comes down to its contrast");
+
+    // Measured again with the automation in: nothing more to do.
+    auto applied = ours;
+    for (auto& v : applied[0])
+        v = -200.0;
+    for (size_t g = 1; g < 4; ++g)
+        applied[g] = shifted(ours[g], plan.gainDb[g]);
+    const auto again = ma::planSectionAutomation(applied, { false, true, false, true }, breaks, contrast, plan.belowDropAfter);
+    check(again.valid && !again.any, "planning the automated break again changes nothing");
+    // A break inside its corridor is left alone.
+    const auto fine = ma::planSectionAutomation(ref, { false, true, false, true }, breaks, contrast, 8.0);
+    check(fine.valid && !fine.any, "a break like the references' needs no automation");
+
+    // An intro of drums alone in the references, 3 dB under the drop; ours has the drums 6 dB
+    // under their drop level and a vocal on top, 10 dB under: the vocal goes, the drums come up,
+    // but never above where they play in the drop.
+    ma::StemTarget intros;
+    {
+        ma::StemProfile p;
+        p.name = "ref";
+        std::array<ma::SpectrumAnalyzer::Bands, 4> drumsOnly = ours;
+        drumsOnly[1].fill(-200.0);
+        drumsOnly[2].fill(-200.0);
+        drumsOnly[3].fill(-200.0);
+        p.measure = ma::measureStemGroups(drumsOnly, side, { true, false, false, false });
+        p.dropSeconds = 20.0;
+        intros.profiles.push_back(p);
+    }
+    intros.rebuild();
+    ma::StemCorridor near;
+    near.valid = true;
+    near.low = 2.0;
+    near.centre = 3.0;
+    near.high = 4.0;
+    std::array<ma::SpectrumAnalyzer::Bands, 4> intro {};
+    for (auto& g : intro)
+        g.fill(-200.0);
+    intro[0] = shifted(ours[0], -6.0);
+    intro[2] = shifted(ref[3], 4.0);
+    const auto capped = ma::planSectionAutomation(intro, { true, false, true, false }, intros, near, 10.0, &ours);
+    check(capped.valid && capped.mute[2], "the vocal the references' intro lacks is muted");
+    check(capped.gainDb[0] > 0.0 && capped.gainDb[0] <= 6.0, "the drums come up, at most to their drop level");
+}
+
 int main()
 {
     testLoudness();
@@ -2574,6 +2673,7 @@ int main()
     testStemSections();
     testSketch();
     testOneCorrection();
+    testSectionAutomation();
     testMasterPreview();
     testWavRoundTrip();
 

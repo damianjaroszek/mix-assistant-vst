@@ -57,6 +57,12 @@ double energyToLufs(double energy)
 }
 } // namespace
 
+double kWeightingDb(double hz)
+{
+    constexpr double rate = 48000.0;
+    return makeShelf(rate).magnitudeDb(hz, rate) + makeHighpass(rate).magnitudeDb(hz, rate);
+}
+
 void LoudnessMeter::prepare(double sampleRate, int numChannels)
 {
     filters.assign(static_cast<size_t>(std::max(1, numChannels)), {});

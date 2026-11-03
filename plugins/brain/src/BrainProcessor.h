@@ -20,6 +20,7 @@
 
 #include <array>
 #include <map>
+#include <set>
 #include <memory>
 #include <atomic>
 #include <vector>
@@ -87,6 +88,10 @@ struct MixSnapshot
         ma::StemComparison stems;
         double seconds = 0.0;
         double belowDropDb = NAN;
+        // Phase 19: the volume automation that brings it to the references' own, and where it
+        // plays in the song (seconds, from the host's position).
+        ma::SectionAutomation automation;
+        std::vector<std::pair<double, double>> ranges;
     };
     std::array<Section, ma::kStemSections> sections {};
     const Section& section(ma::StemSection s) const { return sections[static_cast<size_t>(s)]; }
@@ -311,6 +316,11 @@ public:
         juce::String title, name, inReferences, waiting, fine, tooLoud, tooQuiet;
     };
     static SectionText sectionText(ma::StemSection section);
+    // Phase 19: the section's automation as advice (groups, their channels, where in the song);
+    // empty when none is needed or it is not measured yet.
+    juce::String automationText(ma::StemSection section) const;
+    // Per group: "-4.5 dB", "zgaś" or empty.
+    static juce::String automationStep(const ma::SectionAutomation& automation, int group);
     // Phase 12 and 16: the same set's intros, builds and breaks.
     const ma::StemTarget& stemSectionTarget(ma::StemSection s) const { return keyedSectionStems[static_cast<size_t>(s)]; }
     bool selectStemTarget(const juce::String& name);
@@ -415,6 +425,7 @@ private:
         std::map<std::uint64_t, DropSum> sums;
         long updates = 0;
         double levelSum = 0.0;
+        std::set<int> seconds; // phase 19: the song's seconds it was heard in
         void clear() { *this = {}; }
     };
     // Per stem group, what the drop (or `section`) sounds like through each channel's cleanup (and

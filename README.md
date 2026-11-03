@@ -92,6 +92,15 @@ Dlatego EQ nie dokłada drugi raz tego, co robi już ruch poziomu. Drugie „Zap
 ten sam EQ, zamiast zdejmować podbicia, które właśnie wypełniły dziurę. Podbicie, które przestrzeliłoby
 na drugą stronę korytarza, jest zmniejszane.
 
+Automatyka sekcji (faza 19): dla intro, buildu i breaku Mózg podaje gotową automatykę głośności każdej
+grupy względem dropu, np. „Bas zgaś (BASS), Reszta -7 dB (LEAD, PAD), wtedy break będzie 7,4 dB ciszej niż
+drop. Gdzie: takty 25–31”. Liczy ją tak, żeby proporcje grup w sekcji i jej głośność względem dropu weszły
+w korytarz referencji; grupę, której referencje w tej sekcji nie mają, każe zgasić, a żadnej nie podnosi
+głośniej, niż gra w dropie. Pojawia się w raporcie, w raporcie HTML i w kolumnie „automatyka” na zakładce
+„Referencje” (przyciski Intro / Build / Break). Wpisz ją w głośność kanału w Channel Rack (albo w gain
+przed Agentem), nie w suwak miksera: wtedy Agent ją słyszy i po ponownym odsłuchu sekcja nie potrzebuje
+już zmian. W buildzie to wartość średnia (build zwykle narasta do dropu). Takty liczone są w 4/4 z tempa FL.
+
 ### Przed masteringiem (Ozone)
 
 „Cel mastera” w Mózgu to głośność, do której Ozone podciągnie master (domyślnie -8 LUFS). Mózg w tle robi
