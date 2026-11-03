@@ -79,6 +79,8 @@ public:
         double measuredDb = 0.0;
         double truePeakDb = 0.0;
         double trimDb = 0.0;
+        double roleOffsetDb = 0.0; // phase 29: the role's place under the target
+        double targetDb = 0.0;     // what the trim aimed at (target plus that)
         // Role recognised from the same passage; set on the channel when it still had none.
         ma::RoleGuess guess {};
         bool roleSet = false, prioritySet = false;
@@ -151,6 +153,7 @@ public:
     static constexpr const char* satDriveId = "satDrive";
     static constexpr const char* satMixId = "satMix";
     static constexpr const char* intentionalDriveId = "intentionalDrive";
+    static constexpr const char* roleLevelId = "roleLevel"; // phase 29: Learn sets the trim by the role
     // The mix engineer's chain (phase 7), set by "Analizuj" (whole chain) in the Brain or by hand.
     static constexpr const char* hpfId = "cleanHpf";
     static constexpr const char* monoBelowId = "cleanMono";
@@ -282,6 +285,7 @@ private:
     std::atomic<bool> widthWanted { false };
     WidthStatus width;
     int widthTick = 0;
+    float widthPlannedFor = -1.0f, widthFromPlannedFor = -1.0f;
     std::atomic<float> compHold { 0.0f }, clipHold { 0.0f }; // dB, max since the timer last read them
     std::atomic<double> evenerGain { 0.0 }, evenerNote { 0.0 };
     std::array<float, 10> compHistory {}, clipHistory {};    // message thread: last second of maxima

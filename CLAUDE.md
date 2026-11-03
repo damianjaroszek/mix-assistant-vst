@@ -168,6 +168,25 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   < 0.25 with >= 2 side sources (< 0.2 always). The stereo analyser runs while any slot uses a slider (`widthWanted`). AgentData carries
   the request and result (`bus::kVersion` 15); the Brain's `StereoChannel::userWidth` channels get no stereo proposal and count in
   the sum as they play (`processedSidePower`).
+  Phase 27 stability: `propose` runs `proposeOnce` and, when the translation steps (`translationDelta`, from `proposeHarmonics`'
+  trial minus base) move any band of the sum by >= 0.5 dB, once more with them as `SolverChannel::extraDb` (counted only in the
+  tonal prediction); every translation step needs `tonalOk` (sum of distances outside the corridor grows by <= 1 dB), harmonics
+  grow only while it holds. `planStereo` keeps an existing side cut (`StereoChannel::current`, as deep) while the band's own
+  coherence < 0.15. `planWidth` precomputes per-channel tables (`SideModel`); Agents plan every 0.5 s or when their slider moves.
+  Phase 28 closing the loop: `planCollisionSteps` judges collisions on `predictedHeard` (heard + proposal gain, cleanup and
+  EQ deltas, `proposedEqFor` shared with apply), so one analysis adds `channelLevel` items for collisions its own cuts will not
+  clear; `CollisionStep::clearedByProposal` / `applied` (set on apply). After apply an applied step reads settled; issues without a
+  usable step get `liveLevelStep` (cached 2 s): amber `cutAtLimit` only when a step <= 3 dB would clear it, else settled.
+  Loud master: `ChainContext::limiterReductionDb` (preview P95, >= `kMinimumPreviewSeconds`), `ChainChannel::carriesMasterPeaks`
+  (kick/percussion within 6 dB of the highest unclipped peak: max(held output, learned true peak + trim)) and `currentClipDb`;
+  planner step 3b adds `loudMasterClipDb` (applied extra + measured - 2.5, dead zone 1.5-3 dB, total <= 6 dB). `peakHold` only
+  fills once the preview reset is consumed and 1 s measured. Editor viewports re-lay without shrinking (`fitToViewport`).
+  Phase 29 balance without references: `ma::roleLevelOffsetDb` (Instrument.h: kick 0, bass -2, vocal -4, lead/percussion -6,
+  pad -8, effects/send -10) is added to the Learn target when the Agent's `roleLevel` param is on (default; the role is recognised
+  before the trim is planned; `LearnResult::roleOffsetDb/targetDb`). Without stem references (`typicalLevelsReady`) `proposeWholeMix`
+  plans group levels against `typicalLevelTarget(present)` (Sketch.h: typicalArrangement levels +-1.5 dB, shifted so the present
+  groups sum to the whole; level corridors only, no profiles: `planStemLevels` now needs only valid level corridors) and
+  `anchorStemLevels` keeps the drums at 0 dB.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

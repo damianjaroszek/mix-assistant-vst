@@ -1,6 +1,8 @@
 #pragma once
 
 #include "SharedSession.h"
+
+#include <map>
 #include "ma/ChainPlanner.h"
 #include "ma/StereoPlanner.h"
 #include "ma/StemReference.h"
@@ -314,10 +316,34 @@ public:
     {
         std::uint64_t masker = 0, masked = 0;
         double levelDb = 0.0; // how much quieter the masker must be; 0 = more than kMaxCollisionLevelDb
+        bool clearedByProposal = false; // phase 28: the proposal's own changes were predicted to clear it
+        bool applied = false;           // phase 28: its level step went in with "Zastosuj"
     };
     static constexpr double kMaxCollisionLevelDb = 3.0;
     IssueHandling issueHandling(const ma::MaskingIssue& issue) const;
     void planCollisionSteps(); // phase 23, at the end of propose()
+    // Phase 28: the mix after the ticked proposal, for the collision steps.
+    ma::EqSettings proposedEqFor(const MixSnapshot::Channel& channel, bool& changes) const;
+    std::array<double, ma::bus::kBands> predictedHeard(const MixSnapshot::Channel& channel) const;
+    std::vector<ma::MaskingChannel> maskingInput(bool afterProposal) const;
+    // Phase 28: clipping on the percussion for a loud master, from the master preview.
+    void markMasterPeakCarriers(std::vector<ma::ChainChannel>& chain, ma::ChainContext& context);
+    static constexpr double kPeakCarrierRangeDb = 6.0;
+    static constexpr double kPeakSettleSeconds = 1.0;
+    struct LoudMasterPlan
+    {
+        bool made = false;          // the last whole-mix analysis had the preview measured
+        juce::StringArray carriers; // the percussion carrying the master's peaks
+        std::vector<std::uint64_t> owners;
+        double clipDb = 0.0;        // what it planned beyond the crest rule
+        bool capped = false;        // and that none of them could give more
+        juce::String loudest;       // the channel with the highest peaks then (without the clippers)
+    };
+    LoudMasterPlan loudMasterPlan;
+    bool duckedCollision(int maskerIndex, int maskedIndex, double lowHz, double highHz) const;
+    double liveLevelStep(const ma::MaskingIssue& issue) const;
+    static constexpr juce::uint32 kLiveStepMs = 2000;
+    mutable std::map<std::pair<std::uint64_t, std::uint64_t>, std::pair<double, juce::uint32>> liveSteps;
     static bool isPendingFor(const Proposal::Item& item, std::uint64_t masker, std::uint64_t masked, double lowHz, double highHz);
     juce::String describeIssue(const ma::MaskingIssue& issue) const;
     static juce::String glueText(const ma::ChainPlan& plan, double bpm);
@@ -465,6 +491,10 @@ private:
     void updateLoudnessMatch(std::uint64_t now);
     void sendCommand(std::uint64_t owner, const ma::bus::Command& command);
     void propose(const std::array<double, ma::kStemGroups>* groupGain);
+    void proposeOnce(const std::array<double, ma::kStemGroups>* groupGain);
+    // Phase 27: what the translation steps of the last pass add per channel (owner -> dB per band),
+    // and what the solver counts in its tonal prediction (filled for the second pass).
+    std::map<std::uint64_t, ma::SpectrumAnalyzer::Bands> translationDelta, translationExtra;
     void proposeDynamics();
     void proposeHarmonics(); // translation steps and harmonics for tonal holes
     static void applyCleanup(MixSnapshot::Channel& channel, const ma::CleanupSettings& cleanup);
@@ -515,6 +545,7 @@ private:
     // (more than 3 dB of it): the report does not ask for it back.
     bool cutOnPurpose(int group, int region) const;
     bool stemsReady() const;
+    bool typicalLevelsReady() const; // phase 29
     ma::StemShapeInput stemShapeInput() const; // per channel of mix.channels
 
     std::atomic<float>* peakCeiling = nullptr;

@@ -322,6 +322,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout AgentProcessor::createLayout
                                                            Range { 0.0f, 100.0f, 1.0f }, 100.0f,
                                                            juce::AudioParameterFloatAttributes().withLabel("%")));
     layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { intentionalDriveId, 6 }, "Intentional overdrive", false));
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { roleLevelId, 12 }, "Level by role", true));
 
     const auto floatParam = [&layout](const char* id, const char* name, Range range, float value, const char* label) {
         layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { id, 7 }, name, range, value,
@@ -842,10 +843,15 @@ void AgentProcessor::publishToBrain()
     if (slotIndex < 0)
         return;
     handleBrainCommand(*region);
-    // A third of a second is quick enough for a slider and cheap enough for many Agents.
-    if (++widthTick >= 3 || (ma::widthRequested(parameters.getRawParameterValue(widthId)->load()) != ma::widthOn(width.settings)))
+    // Every half second (every Agent runs the whole plan, so with many sliders this adds up), and at
+    // once when this slider moves.
+    const float widthNow = parameters.getRawParameterValue(widthId)->load();
+    const float widthFromNow = parameters.getRawParameterValue(widthFromId)->load();
+    if (++widthTick >= 5 || std::abs(widthNow - widthPlannedFor) > 1e-4f || std::abs(widthFromNow - widthFromPlannedFor) > 1e-4f)
     {
         widthTick = 0;
+        widthPlannedFor = widthNow;
+        widthFromPlannedFor = widthFromNow;
         planWidthNow(*region, now);
     }
 
@@ -1232,9 +1238,13 @@ void AgentProcessor::applyLearned()
         profileValid.store(true);
     }
 
+    // The role first (the passage tells what it is), then the trim for that role.
+    recogniseRole();
     const double measured = learnMeasured.load();
     const double peak = learnTruePeak.load();
-    const double target = parameters.getRawParameterValue(targetId)->load();
+    const auto role = static_cast<ma::Role>(juce::jlimit(0, ma::kRoles - 1, juce::roundToInt(parameters.getRawParameterValue(roleId)->load())));
+    const double offset = parameters.getRawParameterValue(roleLevelId)->load() > 0.5f ? ma::roleLevelOffsetDb(role) : 0.0;
+    const double target = parameters.getRawParameterValue(targetId)->load() + offset;
     // A channel meant to distort may peak where it likes: only the level target counts.
     const double ceiling = intentionalDrive() ? 100.0 : parameters.getRawParameterValue(peakCeilingId)->load();
     const auto plan = ma::planTrim(measured, peak, target, ceiling);
@@ -1246,7 +1256,8 @@ void AgentProcessor::applyLearned()
     result.measuredDb = measured;
     result.truePeakDb = peak;
     result.trimDb = plan.trimDb;
-    recogniseRole();
+    result.roleOffsetDb = offset;
+    result.targetDb = target;
 
     if (!plan.valid)
         return;

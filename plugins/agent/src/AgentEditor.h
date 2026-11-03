@@ -38,6 +38,7 @@ private:
     juce::Slider targetSlider, trimSlider, ceilingSlider, learnTimeSlider;
 
     juce::TextButton learnButton;
+    juce::ToggleButton roleLevelButton; // phase 29
     juce::Label status;
 
     juce::Label eqLabel, eqStatus;
@@ -66,7 +67,7 @@ private:
     juce::ToggleButton satOnButton, intentionalButton;
     juce::ComboBox satModeBox;
     juce::Slider satDriveSlider, satMixSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> satOnAttachment, intentionalAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> satOnAttachment, intentionalAttachment, roleLevelAttachment;
 
     // Phase 7: the engineer's chain.
     juce::Label chainTitle, cleanLabel, compLabel, clipLabel, evenLabel;

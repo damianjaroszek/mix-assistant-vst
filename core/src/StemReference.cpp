@@ -1161,7 +1161,8 @@ StemLevelPlan planStemLevels(const std::array<SpectrumAnalyzer::Bands, kStemGrou
 
     double totalBefore = 0.0;
     plan.before = levels({}, &totalBefore);
-    if (totalBefore <= 0.0 || !target.valid())
+    // Phase 29: a target with level corridors alone (the typical balance) plans as well.
+    if (totalBefore <= 0.0 || std::none_of(target.level.begin(), target.level.end(), [](const auto& c) { return c.valid; }))
         return plan;
 
     std::array<bool, kStemGroups> active {};

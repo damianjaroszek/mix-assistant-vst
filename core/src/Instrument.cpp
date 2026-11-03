@@ -332,6 +332,24 @@ RoleGuess recogniseRole(const InstrumentFeatures::Summary& f, const SpectrumAnal
     return guess;
 }
 
+double roleLevelOffsetDb(Role role)
+{
+    switch (role)
+    {
+    case Role::kick: return 0.0;
+    case Role::vocal: return -4.0;
+    case Role::bass: return -2.0;
+    case Role::lead: return -6.0;
+    case Role::percussion: return -6.0;
+    case Role::pad: return -8.0;
+    case Role::effects: return -10.0;
+    case Role::send: return -10.0;
+    case Role::other:
+    case Role::bus: break;
+    }
+    return 0.0;
+}
+
 int defaultPriority(Role role)
 {
     switch (role)
