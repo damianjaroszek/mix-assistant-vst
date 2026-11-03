@@ -35,7 +35,8 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     styleLabel(fullCorrelationLabel, pl("Korelacja całości"), colours::quiet);
     styleLabel(ceilingLabel, pl("Limit szczytu"), colours::quiet);
     styleLabel(overlayLabel, pl("Widma kanałów tak, jak słyszy je ucho (szare tło: suma)"), colours::quiet, 13.0f);
-    styleLabel(issuesLabel, pl("Kto kogo zasłania. Kliknij wiersz, żeby zaznaczyć kanał."), colours::quiet, 13.0f);
+    styleLabel(issuesLabel, pl("Kto kogo zasłania. Zielone: rozwiązane. Niebieskie: miks zrobił, ile mógł (albo mały krok czeka w propozycji). "
+                                     "Pomarańczowe i czerwone: jest coś do zrobienia. Kliknij wiersz, żeby zaznaczyć kanał."), colours::quiet, 13.0f);
     for (auto* value : { &integratedValue, &shortTermValue, &truePeakValue, &plrValue, &lowCorrelationValue, &fullCorrelationValue })
     {
         styleLabel(*value, {}, colours::text);
@@ -286,7 +287,7 @@ BrainEditor::BrainEditor(BrainProcessor& p)
              proposalViewport.setBounds(area.reduced(10));
              layoutProposal();
          });
-    page(Tab::verdict, pl("Werdykt"), pl("Co „Analizuj” (cały łańcuch) proponuje na każdym kanale i dlaczego."), { &verdictViewport },
+    page(Tab::verdict, pl("Werdykt"), pl("Co Mózg zaplanował na każdym kanale i dlaczego. Przy każdym narzędziu: działa, do zastosowania, zmienione ręcznie albo nie działa."), { &verdictViewport },
          fill(verdictViewport));
     page(Tab::tonal, pl("Balans tonalny"), pl("Balans tonalny sumy wobec celu z referencji."),
          { &targetBox, &newTargetButton, &captureButton, &removeReferenceButton, &tonalView }, [this](auto area) { layoutTonal(area); });
@@ -596,7 +597,8 @@ void BrainEditor::timerCallback()
     }
     {
         const auto& made = processor.proposal();
-        verdictView.setVerdicts(made.verdicts, made.wholeMix, selected);
+        const auto verdicts = processor.verdictsNow();
+        verdictView.setVerdicts(verdicts, made.wholeMix || !verdicts.empty(), selected);
         const int width = verdictViewport.getMaximumVisibleWidth();
         verdictView.setSize(width, 10);
         verdictView.setSize(width, std::max(verdictViewport.getHeight(), verdictView.contentHeight()));
@@ -619,6 +621,7 @@ void BrainEditor::timerCallback()
         const auto handling = processor.issueHandling(issue);
         line.ducked = handling == BrainProcessor::IssueHandling::ducked;
         line.cutAtLimit = handling == BrainProcessor::IssueHandling::cutAtLimit;
+        line.settled = handling == BrainProcessor::IssueHandling::levelStep || handling == BrainProcessor::IssueHandling::settled;
         line.masker = mix.channels[static_cast<size_t>(issue.masker)].owner;
         line.involvesSelected = selected != 0
                                 && (line.masker == selected || mix.channels[static_cast<size_t>(issue.masked)].owner == selected);
@@ -629,8 +632,10 @@ void BrainEditor::timerCallback()
     const auto& proposal = processor.proposal();
     proposalView.setProposal(proposal);
     layoutProposal();
+    // Phase 23: what already runs in the Agents is no change; unticking it is (it goes away).
     const auto toApply = std::count_if(proposal.items.begin(), proposal.items.end(),
-                                       [](const auto& i) { return i.selected && !i.advisory; });
+                                       [](const auto& i) { return !i.advisory && i.selected != i.inPlace; });
+    const auto running = std::count_if(proposal.items.begin(), proposal.items.end(), [](const auto& i) { return i.inPlace && i.selected; });
     applyButton.setButtonText(toApply > 0 ? pl("Zastosuj (") + juce::String(static_cast<int>(toApply))
                                                 + (toApply == 1 ? pl(" zmiana)") : toApply < 5 ? pl(" zmiany)") : pl(" zmian)"))
                                           : pl("Zastosuj"));
@@ -691,13 +696,20 @@ void BrainEditor::timerCallback()
     else if (proposal.made && toApply > 0 && proposalStatus.getText().isEmpty())
     {
         proposalStatus.setText(pl("Kolizje: ") + juce::String(proposal.crowdingBefore, 2) + pl(" → ")
-                                   + juce::String(proposal.crowdingAfter, 2) + pl(". Odznacz to, czego nie chcesz, i kliknij „Zastosuj”."),
+                                   + juce::String(proposal.crowdingAfter, 2)
+                                   + (running > 0 ? pl(". Już działa: ") + juce::String(static_cast<int>(running)) + pl(", nowe: ")
+                                                        + juce::String(static_cast<int>(toApply))
+                                                  : juce::String())
+                                   + pl(". Odznacz to, czego nie chcesz, i kliknij „Zastosuj”."),
                                juce::dontSendNotification);
         proposalStatus.setColour(juce::Label::textColourId, colours::quiet);
     }
     else if (proposal.made && proposal.items.size() > 0 && toApply == 0 && proposalStatus.getText().isEmpty())
     {
-        proposalStatus.setText(pl("Nic do zastosowania: zostały tylko rady (do zrobienia w aranżu albo w FL)."), juce::dontSendNotification);
+        proposalStatus.setText(running > 0 ? pl("Nic nowego: ") + juce::String(static_cast<int>(running))
+                                                 + pl(" zmian Mózgu już działa w Agentach. Zostały tylko rady.")
+                                           : pl("Nic do zastosowania: zostały tylko rady (do zrobienia w aranżu albo w FL)."),
+                               juce::dontSendNotification);
         proposalStatus.setColour(juce::Label::textColourId, colours::quiet);
     }
     else if (!processor.isComparing() && proposalStatus.getText().startsWith(pl("Słychać")))

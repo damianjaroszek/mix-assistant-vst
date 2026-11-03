@@ -150,6 +150,7 @@ struct Proposal
         juce::String text;
         bool selected = true;
         bool advisory = false; // advice only, nothing to apply
+        bool inPlace = false;  // phase 23: the Agent already has it; kept on apply, not counted as a change
 
         // Phase 4: besides the solver's EQ changes, a dynamic give-way or a polarity flip.
         enum class Action
@@ -160,7 +161,8 @@ struct Proposal
             harmonics,
             transients,
             chain,
-            level // phase 9: a stem group's level, on every channel of the group
+            level, // phase 9: a stem group's level, on every channel of the group
+            channelLevel // phase 23: one channel quieter, for a collision EQ has taken as far as it goes
         };
         // Phase 7: the engineer pass ("Analizuj", whole chain) sets the channel's chain.
         enum class ChainTool
@@ -201,6 +203,18 @@ struct Proposal
         MixSnapshot::Status status = MixSnapshot::Status::unknown;
         juce::String summary;
         juce::StringArray reasons;
+        // Phase 23: per reason the tool it is about (ma::bus::ToolBit, 0 = none) and, filled by
+        // verdictsNow(), where that stands now (VerdictState).
+        std::vector<int> reasonTools, reasonStates;
+    };
+    enum class VerdictState
+    {
+        none,       // the line is not about a tool the Brain sets
+        running,    // the Agent has it as the Brain set it
+        pending,    // in the proposal, not applied yet
+        unticked,   // in the proposal, but unticked
+        changed,    // the Brain set it, then it was changed by hand
+        notApplied  // planned, but the Agent does not have it (proposal applied without it, or undone)
     };
     std::vector<Verdict> verdicts;
     bool wholeMix = false;
@@ -288,10 +302,23 @@ public:
     enum class IssueHandling
     {
         open,
-        ducked,    // the masker gives way to the kick in that band, on every hit
-        cutAtLimit // the masker already carries the deepest cut the solver sets there
+        ducked,     // the masker gives way to the kick in that band, on every hit
+        cutAtLimit, // the masker already carries the deepest cut the solver sets there
+        // Phase 23, from the last analysis:
+        pending,    // the proposal has a change for it that is not applied yet
+        levelStep,  // EQ has done what it can; the proposal makes the masker a little quieter
+        settled     // EQ has done what it can and only a big level change would help: register / sound
     };
+    // Phase 23: for collisions EQ cannot take further, what the last analysis found (kept after apply).
+    struct CollisionStep
+    {
+        std::uint64_t masker = 0, masked = 0;
+        double levelDb = 0.0; // how much quieter the masker must be; 0 = more than kMaxCollisionLevelDb
+    };
+    static constexpr double kMaxCollisionLevelDb = 3.0;
     IssueHandling issueHandling(const ma::MaskingIssue& issue) const;
+    void planCollisionSteps(); // phase 23, at the end of propose()
+    static bool isPendingFor(const Proposal::Item& item, std::uint64_t masker, std::uint64_t masked, double lowHz, double highHz);
     juce::String describeIssue(const ma::MaskingIssue& issue) const;
     static juce::String glueText(const ma::ChainPlan& plan, double bpm);
     juce::String saturationText(const ma::ChainPlan& plan) const;
@@ -303,6 +330,8 @@ public:
 
     // Phase 3: propose, apply, undo, compare.
     const Proposal& proposal() const { return currentProposal; }
+    // Phase 23: the last whole-mix verdicts (kept after apply), each line with where it stands now.
+    std::vector<Proposal::Verdict> verdictsNow() const;
     void propose() { propose(nullptr); }
     // Phase 7: every channel's chain (cleanup, compression, clipper, bass notes) planned with the
     // whole mix in view, then the usual proposal on top of it, plus a verdict per channel.
@@ -570,6 +599,8 @@ private:
         return s == ma::StemSection::intro ? introSums : s == ma::StemSection::build ? buildSums : breakSums;
     }
     bool sketchOn = true;
+    std::vector<CollisionStep> collisionSteps; // phase 23
+    std::vector<Proposal::Verdict> lastVerdicts; // phase 23
     std::vector<std::uint64_t> plannedOwners; // the channels "Analizuj" (whole chain) last planned, to notice new ones
     ma::MusicalKey keyedTo;
     // Key heard before this session (from the project) plus what the master plays now.

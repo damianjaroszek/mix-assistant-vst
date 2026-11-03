@@ -206,6 +206,10 @@ public:
         ma::SaturationSettings saturation {};
     };
     DynamicState currentDynamics() const;
+    // Phase 23: tools the Brain set that are still as it left them, and tools changed by hand since
+    // (ma::bus::ToolBit), for the Brain's verdict and this editor's section headers.
+    // `manual`: on, but never set by the Brain.
+    void toolOrigins(int& brain, int& changed, int& manual) const;
     bool sidechainConnected() const { return sidechainSeen; }
     double sidechainLevelDb() const { return sidechainShownDb; }
     double duckReductionDb() const { return reductionShownDb; }
@@ -310,6 +314,15 @@ private:
     ma::EqSettings backupEq {};
     bool backupBypass = false;
     DynamicState backupDynamics {};
+    // Phase 23: what the Brain last set (as the parameters read right after), and the one before for undo.
+    struct BrainSet
+    {
+        bool valid = false;
+        ma::EqSettings eq {};
+        DynamicState dynamics {};
+    };
+    BrainSet brainSet, brainSetBackup;
+    void rememberBrainSet();
     std::uint32_t lastCommand = 0;
     // Audio thread copy of the backup, used while the Brain compares before/after.
     std::atomic<bool> useBackup { false };

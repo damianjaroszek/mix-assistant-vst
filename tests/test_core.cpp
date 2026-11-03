@@ -1279,6 +1279,15 @@ void testChainPlanner()
     check(ma::planChains(squashed)[3].overCompressed && ma::planChains(squashed)[3].compressor.on < 0.5f,
           "an already squashed lead is left alone");
 
+    // Phase 23: a peak that was never stored (a project saved before it) is unknown, not a squashed source.
+    auto unknownPeak = mix;
+    unknownPeak[3].truePeakDb = -200.0 + 3.0;
+    unknownPeak[4].truePeakDb = -200.0;
+    const auto unknownPlans = ma::planChains(unknownPeak);
+    check(!unknownPlans[3].overCompressed && !unknownPlans[3].peakKnown && unknownPlans[3].dynamicsKnown,
+          "an unknown peak does not read as over-compressed");
+    check(unknownPlans[4].clipper.on < 0.5f, "and plans no clipper");
+
     // Spiky percussion: the clipper shaves only the excess.
     auto spiky = mix;
     spiky[4].truePeakDb = spiky[4].levelP95 + 16.0;

@@ -153,8 +153,14 @@ AgentEditor::AgentEditor(AgentProcessor& p)
         slider->setTextBoxStyle(juce::Slider::TextBoxRight, false, 70, 20);
     }
 
-    styleLabel(chainTitle, pl("Ustawia je „Analizuj” (cały łańcuch) i „Zastosuj” w Mózgu, patrząc na cały miks. Można też ręcznie."),
+    styleLabel(chainTitle, pl("Ustawia je Mózg („Analizuj”, potem „Zastosuj”), patrząc na cały miks. Można też ręcznie. Przy każdej sekcji: "
+                                  "„od Mózgu” (tak, jak Mózg ustawił), „zmienione ręcznie” albo „ręcznie”."),
                colours::quiet, 13.0f);
+    for (auto& label : origins)
+    {
+        styleLabel(label, {}, colours::quiet, 12.5f);
+        label.setJustificationType(juce::Justification::centredRight);
+    }
     styleLabel(cleanLabel, pl("Porządki"), colours::quiet);
     styleLabel(compLabel, pl("Kompresor"), colours::quiet);
     styleLabel(clipLabel, "Clipper", colours::quiet);
@@ -265,26 +271,26 @@ AgentEditor::AgentEditor(AgentProcessor& p)
            &showProfileButton, &spectrumView },
          [this](auto area) { layoutLevel(area); });
     page(eqPage, pl("EQ i ustępowanie"),
-         { &eqLabel, &eqStatus, &eqCurve, &eqBypassButton, &eqClearButton, &duckLabel, &duckOnButton, &duckModeBox,
+         { &eqLabel, &origins[0], &origins[7], &eqStatus, &eqCurve, &eqBypassButton, &eqClearButton, &duckLabel, &duckOnButton, &duckModeBox,
            &polarityButton, &duckFreqLabel, &duckFreqSlider, &duckDepthLabel, &duckDepthSlider, &duckThresholdLabel,
            &duckThresholdSlider, &duckAttackLabel, &duckAttackSlider, &duckReleaseLabel, &duckReleaseSlider, &duckSyncBox,
            &duckStatus },
          [this](auto area) { layoutEq(area); });
     page(tonePage, pl("Barwa"),
-         { &harmonicsLabel, &harmonicsOnButton, &harmonicsFreqLabel, &harmonicsFreqSlider, &harmonicsAmountLabel,
+         { &harmonicsLabel, &origins[8], &origins[9], &origins[6], &harmonicsOnButton, &harmonicsFreqLabel, &harmonicsFreqSlider, &harmonicsAmountLabel,
            &harmonicsAmountSlider, &attackLabel, &attackOnButton, &attackFreqLabel, &attackFreqSlider, &attackAmountLabel,
            &attackAmountSlider, &satLabel, &satOnButton, &satModeBox, &intentionalButton, &satDriveLabel, &satDriveSlider,
            &satMixLabel, &satMixSlider },
          [this](auto area) { layoutTone(area); });
     page(chainPage, pl("Inżynier miksu"),
-         { &chainTitle, &cleanLabel, &hpfLabel, &hpfSlider, &monoLabel, &monoSlider, &mudFreqLabel, &mudFreqSlider,
+         { &chainTitle, &origins[1], &origins[2], &origins[3], &origins[4], &cleanLabel, &hpfLabel, &hpfSlider, &monoLabel, &monoSlider, &mudFreqLabel, &mudFreqSlider,
            &mudGainLabel, &mudGainSlider, &cleanStatus, &compLabel, &compOnButton, &compThresholdLabel, &compThresholdSlider,
            &compRatioLabel, &compRatioSlider, &compAttackLabel, &compAttackSlider, &compReleaseLabel, &compReleaseSlider,
            &compKneeLabel, &compKneeSlider, &compMakeupLabel, &compMakeupSlider, &compStatus, &clipLabel, &clipOnButton,
            &clipCeilingLabel, &clipCeilingSlider, &clipSoftnessLabel, &clipSoftnessSlider, &clipStatus, &evenLabel,
            &evenOnButton, &evenAmountLabel, &evenAmountSlider, &evenRefLabel, &evenRefSlider, &evenStatus },
          [this](auto area) { layoutChain(area); });
-    page(stereoPage, "Stereo", { &stereoLabel, &stereoView, &stereoStatus }, [this](auto area) { layoutStereo(area); });
+    page(stereoPage, "Stereo", { &stereoLabel, &origins[5], &stereoView, &stereoStatus }, [this](auto area) { layoutStereo(area); });
     tabs.setCurrentTabIndex(juce::jlimit(0, tabs.getNumTabs() - 1, processor.editorTab), false);
     tabs.onChange = [this](int index) { processor.editorTab = index; };
 
@@ -324,8 +330,18 @@ void AgentEditor::showResult(const AgentProcessor::LearnResult& r)
                         + ", true peak " + ma::ui::formatDb(r.truePeakDb, "dBTP")
                         + pl(". Ustawiono trim ") + signedDb(r.trimDb) + ".";
     if (r.limitedByPeak)
-        text += pl("\nTrim ograniczony, żeby szczyt nie przekroczył limitu. Kanał ma duże szczyty: "
-                   "rozważ kompresję albo limiter przed Agentem.");
+    {
+        // Nauka ustawia tylko trim. Kompresor i clipper z zakładki „Inżynier miksu” ustawia Mózg,
+        // bo dobiera je do całego miksu (rola, priorytet, co gra obok).
+        int brain = 0, changed = 0, manual = 0;
+        processor.toolOrigins(brain, changed, manual);
+        const int peakTools = ma::bus::toolCompressor | ma::bus::toolClipper;
+        if (((brain | changed | manual) & peakTools) != 0)
+            text += pl("\nTrim ograniczony szczytem. Szczyty obrabia już kompresor albo clipper (zakładka „Inżynier miksu”).");
+        else
+            text += pl("\nTrim ograniczony szczytem. Nauka ustawia tylko trim; kompresor i clipper z zakładki „Inżynier miksu” "
+                       "ustawi Mózg: „Analizuj” (cały łańcuch), potem „Zastosuj”.");
+    }
     if (r.guess.role != ma::Role::other)
     {
         const auto roles = AgentProcessor::roleNames();
@@ -344,6 +360,7 @@ void AgentEditor::showResult(const AgentProcessor::LearnResult& r)
 
 void AgentEditor::timerCallback()
 {
+    updateOrigins();
     const bool connected = processor.isConnectedToBrain();
     connection.setText(connected ? pl("Połączony z Mózgiem") : pl("Brak Mózgu na masterze"), juce::dontSendNotification);
     connection.setColour(juce::Label::textColourId, connected ? colours::good : colours::quiet);
@@ -590,6 +607,7 @@ void AgentEditor::layoutEq(juce::Rectangle<int> area)
     eqClearButton.setBounds(row.removeFromRight(80));
     row.removeFromRight(6);
     eqBypassButton.setBounds(row.removeFromRight(80));
+    origin(ma::bus::toolEq).setBounds(row.removeFromRight(170));
     eqLabel.setBounds(row);
     area.removeFromTop(4);
     auto eqRow = area.removeFromTop(200);
@@ -603,6 +621,7 @@ void AgentEditor::layoutEq(juce::Rectangle<int> area)
     duckModeBox.setBounds(row.removeFromLeft(120).reduced(0, 1));
     row.removeFromLeft(12);
     polarityButton.setBounds(row.removeFromLeft(200));
+    origin(ma::bus::toolDuck).setBounds(row);
     area.removeFromTop(6);
     const auto halfRow = [&](juce::Rectangle<int> r, juce::Label& label, juce::Component& control) {
         label.setBounds(r.removeFromLeft(80));
@@ -645,15 +664,43 @@ void AgentEditor::layoutTone(juce::Rectangle<int> area)
         area.removeFromTop(28);
     };
 
-    header(harmonicsLabel, harmonicsOnButton);
+    origin(ma::bus::toolHarmonics).setBounds(header(harmonicsLabel, harmonicsOnButton).removeFromRight(170));
     pairRow(harmonicsFreqLabel, harmonicsFreqSlider, harmonicsAmountLabel, harmonicsAmountSlider);
-    header(attackLabel, attackOnButton);
+    origin(ma::bus::toolTransients).setBounds(header(attackLabel, attackOnButton).removeFromRight(170));
     pairRow(attackFreqLabel, attackFreqSlider, attackAmountLabel, attackAmountSlider);
     auto row = header(satLabel, satOnButton);
+    origin(ma::bus::toolSaturation).setBounds(row.removeFromRight(170));
     satModeBox.setBounds(row.removeFromLeft(130).reduced(0, 1));
     row.removeFromLeft(16);
     intentionalButton.setBounds(row.removeFromLeft(200));
     pairRow(satDriveLabel, satDriveSlider, satMixLabel, satMixSlider);
+}
+
+juce::Label& AgentEditor::origin(int bit)
+{
+    size_t index = 0;
+    while (index + 1 < origins.size() && (1 << index) != bit)
+        ++index;
+    return origins[index];
+}
+
+void AgentEditor::updateOrigins()
+{
+    int brain = 0, changed = 0, manual = 0;
+    processor.toolOrigins(brain, changed, manual);
+    for (size_t i = 0; i < origins.size(); ++i)
+    {
+        const int bit = 1 << i;
+        auto& label = origins[i];
+        const auto text = (brain & bit) != 0 ? pl("od Mózgu") : (changed & bit) != 0 ? pl("zmienione ręcznie") : (manual & bit) != 0 ? pl("ręcznie") : juce::String();
+        if (label.getText() == text)
+            continue;
+        label.setText(text, juce::dontSendNotification);
+        label.setColour(juce::Label::textColourId, (brain & bit) != 0 ? colours::good : (changed & bit) != 0 ? colours::accent : colours::quiet);
+        label.setTooltip((brain & bit) != 0 ? pl("Tak, jak Mózg ustawił przy ostatnim „Zastosuj”. Nikt tego od tamtej pory nie ruszał.")
+                         : (changed & bit) != 0 ? pl("Mózg to ustawił, potem zmieniono ręcznie. Następne „Analizuj” liczy od tego, co jest teraz.")
+                                                : pl("Włączone ręcznie, Mózg tego nie ustawiał."));
+    }
 }
 
 void AgentEditor::layoutChain(juce::Rectangle<int> area)
@@ -670,11 +717,12 @@ void AgentEditor::layoutChain(juce::Rectangle<int> area)
         slider.setBounds(row);
         column.removeFromTop(4);
     };
-    const auto header = [](juce::Rectangle<int>& column, juce::Label& label, juce::ToggleButton* button) {
+    const auto header = [](juce::Rectangle<int>& column, juce::Label& label, juce::ToggleButton* button, juce::Label& from) {
         auto row = column.removeFromTop(24);
-        label.setBounds(row.removeFromLeft(200));
+        label.setBounds(row.removeFromLeft(180));
         if (button != nullptr)
             button->setBounds(row.removeFromLeft(72));
+        from.setBounds(row);
         column.removeFromTop(4);
     };
     const auto statusRow = [](juce::Rectangle<int>& column, juce::Label& label) {
@@ -683,25 +731,25 @@ void AgentEditor::layoutChain(juce::Rectangle<int> area)
     };
 
     // Left: cleanup and clipper, right: compressor and evener (the chain runs cleanup, clipper, compressor, evener).
-    header(area, cleanLabel, nullptr);
+    header(area, cleanLabel, nullptr, origin(ma::bus::toolCleanup));
     for (auto [label, slider] : { std::pair { &hpfLabel, &hpfSlider }, std::pair { &monoLabel, &monoSlider },
                                   std::pair { &mudFreqLabel, &mudFreqSlider }, std::pair { &mudGainLabel, &mudGainSlider } })
         sliderRow(area, *label, *slider);
     statusRow(area, cleanStatus);
 
-    header(area, clipLabel, &clipOnButton);
+    header(area, clipLabel, &clipOnButton, origin(ma::bus::toolClipper));
     sliderRow(area, clipCeilingLabel, clipCeilingSlider);
     sliderRow(area, clipSoftnessLabel, clipSoftnessSlider);
     statusRow(area, clipStatus);
 
-    header(right, compLabel, &compOnButton);
+    header(right, compLabel, &compOnButton, origin(ma::bus::toolCompressor));
     for (auto [label, slider] : { std::pair { &compThresholdLabel, &compThresholdSlider }, std::pair { &compRatioLabel, &compRatioSlider },
                                   std::pair { &compAttackLabel, &compAttackSlider }, std::pair { &compReleaseLabel, &compReleaseSlider },
                                   std::pair { &compKneeLabel, &compKneeSlider }, std::pair { &compMakeupLabel, &compMakeupSlider } })
         sliderRow(right, *label, *slider);
     statusRow(right, compStatus);
 
-    header(right, evenLabel, &evenOnButton);
+    header(right, evenLabel, &evenOnButton, origin(ma::bus::toolEvener));
     sliderRow(right, evenAmountLabel, evenAmountSlider);
     sliderRow(right, evenRefLabel, evenRefSlider);
     statusRow(right, evenStatus);
@@ -710,7 +758,11 @@ void AgentEditor::layoutChain(juce::Rectangle<int> area)
 void AgentEditor::layoutStereo(juce::Rectangle<int> area)
 {
     area.reduce(12, 12);
-    stereoLabel.setBounds(area.removeFromTop(24));
+    {
+        auto row = area.removeFromTop(24);
+        origin(ma::bus::toolStereo).setBounds(row.removeFromRight(170));
+        stereoLabel.setBounds(row);
+    }
     area.removeFromTop(4);
     stereoStatus.setBounds(area.removeFromBottom(44));
     area.removeFromBottom(8);

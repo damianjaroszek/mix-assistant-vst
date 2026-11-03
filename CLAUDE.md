@@ -136,6 +136,14 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   non-good items by group, worst first, good ones folded. Tonal balance is red/amber only for regions EQ can fix (`carriedByAChannel`:
   some channel within 24 dB of its own peak there); `chainAddsDb` (output minus heard, positive part) adds what an Agent's chain makes
   (saturation, harmonics) to the sketch's channel spectra and that check. `overtoneSource` (bass ghosts only) advises saturation first.
+  Phase 23 auto transparency: `bus::kVersion` 13, `AgentData::brainTools` / `changedTools` (`bus::ToolBit`): the Agent keeps what the
+  Brain last set (`BrainSet`, read back from the parameters after apply/adapt, restored by undo, saved as `brainSet`) and compares per tool;
+  its editor shows "od Mózgu" / "zmienione ręcznie" / "ręcznie". The Agent saves the learn pass's level and true peak (`learned`); the planner's
+  `ChainPlan::peakKnown` guards crest/clipper. `Proposal::Item::inPlace` (EQ band already in the Agent, `eqHasBand`): kept on apply, counted
+  only when unticked; `proposeHarmonics` carries the Agent's own cuts in 300 Hz-6 kHz that the new EQ lacks (one room cut per channel).
+  Collisions: `IssueHandling` pending / levelStep / settled from the last analysis (`collisionSteps`, kept after apply); `planCollisionSteps`
+  adds `Action::channelLevel` (masker quieter by <= 3 dB). Verdicts are kept (`lastVerdicts`), lines tagged with a tool, `verdictsNow()` gives
+  their state. `proposeWholeMix` compares cleanup with `saved` (the mix carries the planned cleanup for the solver).
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 
