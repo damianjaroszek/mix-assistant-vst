@@ -3255,6 +3255,52 @@ void testGhostNoise()
     check(std::abs(10.0 * std::log10(all / plain)) < 1.5, "and keeps the spectrum's average power");
 }
 
+// Phase 28: a loud master. The limiter works 5 dB at the target: the kick and percussion carrying
+// the peaks are clipped further, up to the cap; planning again with that clipper in place and the
+// limiter measured again lands on the same clipping.
+void testLoudMasterClip()
+{
+    constexpr double sr = 48000.0;
+    std::vector<ma::ChainChannel> mix = {
+        measuredChannel(ma::Role::kick, 1, 0.0, sr), measuredChannel(ma::Role::bass, 2, 0.0, sr),
+        measuredChannel(ma::Role::percussion, 4, 0.0, sr), measuredChannel(ma::Role::pad, 6, 0.0, sr),
+    };
+    mix[0].carriesMasterPeaks = mix[2].carriesMasterPeaks = true;
+    mix[1].carriesMasterPeaks = true; // not percussion: never clipped for it
+    ma::ChainContext context { 124.0, 0.0 };
+    const auto base = ma::planChains(mix, context);
+    check(base[0].loudMasterClipDb == 0.0, "no preview, no extra clipping");
+
+    context.limiterReductionDb = 5.0;
+    const auto plans = ma::planChains(mix, context);
+    std::printf("      loud master: kick %.1f dB (+%.1f), perc %.1f dB (+%.1f), bass +%.1f\n", plans[0].clipDb, plans[0].loudMasterClipDb,
+                plans[2].clipDb, plans[2].loudMasterClipDb, plans[1].loudMasterClipDb);
+    checkNear(plans[0].loudMasterClipDb, std::min(2.5, ma::kMaxLoudMasterClipDb - base[0].clipDb), 0.01, "the kick takes 2.5 dB more");
+    check(plans[0].clipper.on > 0.5f && plans[2].clipper.on > 0.5f && plans[2].loudMasterClipDb > 0.0, "kick and percussion both clipped");
+    check(plans[1].loudMasterClipDb == 0.0 && plans[3].loudMasterClipDb == 0.0, "bass and pad left alone");
+    check(plans[0].clipDb <= ma::kMaxLoudMasterClipDb + 1e-9, "within the cap");
+
+    // Applied: the Agents carry it and the limiter now works 2.6 dB. Same plan again.
+    auto after = mix;
+    for (size_t i : { size_t(0), size_t(2) })
+        after[i].currentClipDb = after[i].truePeakDb - plans[i].clipper.ceilingDb;
+    context.limiterReductionDb = 2.6;
+    const auto again = ma::planChains(after, context);
+    checkNear(again[0].clipDb, plans[0].clipDb, 0.01, "planning again keeps the kick's clipping");
+    checkNear(again[2].clipDb, plans[2].clipDb, 0.01, "and the percussion's");
+
+    // Not enough: the limiter still at 4 dB with the clippers in. More, up to the cap, then capped.
+    context.limiterReductionDb = 6.0;
+    const auto more = ma::planChains(after, context);
+    check(more[0].clipDb > plans[0].clipDb && more[0].clipDb <= ma::kMaxLoudMasterClipDb + 1e-9 && more[0].loudMasterCapped,
+          "a limiter still too busy takes the clipping to the cap (" + std::to_string(more[0].clipDb).substr(0, 4) + " dB)");
+
+    // A quiet target: what was added for a loud one comes off again.
+    context.limiterReductionDb = 0.5;
+    const auto quiet = ma::planChains(after, context);
+    check(quiet[0].loudMasterClipDb < plans[0].loudMasterClipDb, "a relaxed limiter gives the clipping back");
+}
+
 int main()
 {
     testLoudness();
@@ -3295,6 +3341,7 @@ int main()
     testWidth();
     testWidthSlider();
     testStereoHysteresis();
+    testLoudMasterClip();
     testSectionAutomation();
     testEnergyMap();
     testGhostNoise();

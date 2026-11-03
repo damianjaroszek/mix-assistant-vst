@@ -215,6 +215,20 @@ proponuje mu zmian stereo i pisze w werdykcie, że szerokość jest ustawiona r�
 - Plan szerokości (faza 26) liczy się 3–4 razy szybciej i co pół sekundy (od razu po ruchu suwaka), żeby duży projekt z
   wieloma suwakami nie obciążał FL.
 
+### Domknięcie po analizie (faza 28)
+
+- Kolizje: jedno „Analizuj” liczy kolizje na miksie takim, jaki będzie po całej propozycji. Gdzie cięcia EQ z
+  propozycji nie wystarczą, od razu dokłada ściszenie kanału (do 2 dB zaznaczone, do 3 dB do decyzji). Po „Zastosuj”
+  pomarańczowe są tylko kolizje, przy których jest jeszcze co zrobić (np. nowa kolizja, którą usunie ściszenie o kilka
+  dB). Niebieskie to rejestr albo brzmienie, czyli aranż, oraz większe ściszenie, które zmienia balans, więc zostaje
+  Twoją decyzją.
+- Głośny master: „Analizuj” (cały łańcuch) patrzy, ile limiter podglądu mastera ścina w głośnej części przy celu (np.
+  -8 LUFS). Gdy więcej niż 3 dB, dokłada clipper na stopie i perkusji, które dają najwyższe szczyty miksu (razem z
+  clipperem od szczytów najwyżej 6 dB na kanale), celując w ok. 2,5 dB pracy limitera. Kolejna analiza uwzględnia to,
+  co clipper już ścina, więc nie dokłada w kółko i oddaje clipping, gdy cel jest cichszy. Gdy clippery są na limicie,
+  raport mówi wprost, że reszta to gęstość dropu albo niższy cel.
+- Werdykt, Raport i Propozycja nie wracają już same na górę przy przewijaniu.
+
 ### Przed masteringiem (Ozone)
 
 „Cel mastera” w Mózgu to głośność, do której Ozone podciągnie master (domyślnie -8 LUFS). Mózg w tle robi

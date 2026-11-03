@@ -617,9 +617,7 @@ void BrainEditor::timerCallback()
         const auto& made = processor.proposal();
         const auto verdicts = processor.verdictsNow();
         verdictView.setVerdicts(verdicts, made.wholeMix || !verdicts.empty(), selected);
-        const int width = verdictViewport.getMaximumVisibleWidth();
-        verdictView.setSize(width, 10);
-        verdictView.setSize(width, std::max(verdictViewport.getHeight(), verdictView.contentHeight()));
+        fitToViewport(verdictViewport, verdictView, [this] { return verdictView.contentHeight(); });
     }
     if (previewBox.getSelectedId() != processor.previewSystemIndex() + 1)
         previewBox.setSelectedId(processor.previewSystemIndex() + 1, juce::dontSendNotification);
@@ -851,18 +849,27 @@ void BrainEditor::layoutStems(juce::Rectangle<int> area)
     stemView.setBounds(area);
 }
 
+// Phase 28: the editor re-lays these every tick. Shrinking the content first (to measure it at the
+// new width) made the viewport clamp its scroll to the top each time, so a long list jumped back up
+// while being read; now only a width change re-lays it, and the height goes straight to what it needs.
+void BrainEditor::fitToViewport(juce::Viewport& viewport, juce::Component& content, const std::function<int()>& contentHeight)
+{
+    const int width = viewport.getMaximumVisibleWidth();
+    if (content.getWidth() != width)
+        content.setSize(width, std::max(1, content.getHeight()));
+    const int height = std::max(viewport.getHeight(), contentHeight());
+    if (content.getHeight() != height)
+        content.setSize(width, height);
+}
+
 void BrainEditor::layoutReport()
 {
-    const int width = reportViewport.getMaximumVisibleWidth();
-    report.setSize(width, 10);
-    report.setSize(width, std::max(reportViewport.getHeight(), report.contentHeight()));
+    fitToViewport(reportViewport, report, [this] { return report.contentHeight(); });
 }
 
 void BrainEditor::layoutProposal()
 {
-    const int width = proposalViewport.getMaximumVisibleWidth();
-    proposalView.setSize(width, 10);
-    proposalView.setSize(width, std::max(proposalViewport.getHeight(), proposalView.contentHeight()));
+    fitToViewport(proposalViewport, proposalView, [this] { return proposalView.contentHeight(); });
 }
 
 void BrainEditor::updateKeyControls(juce::String& status, bool& warning)
