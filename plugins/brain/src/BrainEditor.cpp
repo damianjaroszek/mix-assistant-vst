@@ -281,6 +281,8 @@ BrainEditor::BrainEditor(BrainProcessor& p)
              area.removeFromTop(6);
              arrangementView.setBounds(area);
          });
+    page(Tab::energy, pl("Energia"), pl("Mapa energii: głośność utworu i grup sekunda po sekundzie wobec referencji, od pierwszego dropu."),
+         { &energyView }, fill(energyView));
     page(Tab::translation, pl("Translacja"), pl("Jak miks zagra na telefonie, laptopie, słuchawkach, w aucie i w klubie."),
          { &translationView }, fill(translationView));
     page(Tab::stereo, "Stereo", pl("Faza w pasmach sumy, jak Correlometer: na dole przeciwfaza. Kropki: zaznaczony kanał."),
@@ -469,6 +471,14 @@ void BrainEditor::timerCallback()
         }
         arrangementView.setData(mix.sketch, status, briefs);
         sketchButton.setToggleState(processor.sketchMode(), juce::dontSendNotification);
+    }
+    {
+        // Phase 20: the energy map.
+        const auto item = processor.energyItem();
+        std::array<std::vector<std::pair<double, double>>, ma::kStemSections> sections;
+        for (int s = 0; s < ma::kStemSections; ++s)
+            sections[static_cast<size_t>(s)] = mix.sections[static_cast<size_t>(s)].ranges;
+        energyView.setData(mix.energy, sections, item.detail, item.status == MixSnapshot::Status::warning, processor.tempoBpm());
     }
 
     const auto& stems = processor.stemTarget();

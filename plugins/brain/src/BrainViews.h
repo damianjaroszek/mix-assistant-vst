@@ -1118,4 +1118,241 @@ private:
     bool warning = false, keyWarning = false;
 };
 
+
+// Phase 20: the energy map. Our track's loudness a second at a time against the drop (white),
+// the references' corridor lined up at our first drop (blue band, dashed median), the sections
+// we know, the stretches far from the references (red), and each group's own energy below
+// (filled: ours, line: the references' median).
+class EnergyView : public juce::Component
+{
+public:
+    void setData(const MixSnapshot::Energy& newEnergy, const std::array<std::vector<std::pair<double, double>>, ma::kStemSections>& newSections,
+                 const juce::String& newStatus, bool newWarning, double newBpm)
+    {
+        energy = newEnergy;
+        sections = newSections;
+        status = newStatus;
+        warning = newWarning;
+        bpm = newBpm;
+        repaint();
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        namespace colours = ma::ui::colours;
+        using ma::ui::pl;
+        auto area = getLocalBounds().toFloat();
+        g.setColour(colours::panel);
+        g.fillRoundedRectangle(area, 4.0f);
+        area = area.reduced(8.0f, 6.0f);
+        g.setFont(juce::FontOptions(12.5f));
+        g.setColour(warning ? colours::warning : colours::quiet);
+        g.drawFittedText(status, area.removeFromTop(48.0f).toNearestInt(), juce::Justification::topLeft, 3);
+
+        const auto& ours = energy.ours;
+        const auto& refs = energy.references;
+        const bool haveOurs = ours.valid && !ours.levelDb.empty();
+        if (!haveOurs && !refs.valid)
+            return;
+        // Where the references' first drop sits on our time line.
+        const double offset = energy.comparison.valid ? std::floor(energy.comparison.firstDropSeconds)
+                                                      : (refs.firstDrop.valid ? std::floor(refs.firstDrop.centre) : 0.0);
+        double endSeconds = haveOurs ? static_cast<double>(ours.levelDb.size()) : 0.0;
+        if (refs.valid)
+            endSeconds = std::max(endSeconds, offset + refs.fromSeconds + static_cast<double>(refs.centre.size()));
+        endSeconds = std::max(endSeconds, 30.0);
+
+        constexpr float axisWidth = 64.0f;
+        auto bottomAxis = area.removeFromBottom(16.0f);
+        auto lanes = area.removeFromBottom(std::min(150.0f, area.getHeight() * 0.42f));
+        area.removeFromBottom(6.0f);
+        auto plot = area;
+        plot.removeFromLeft(axisWidth);
+        lanes.removeFromLeft(0.0f);
+        const float left = plot.getX(), width = plot.getWidth();
+        auto xOf = [&](double seconds) { return left + static_cast<float>(width * juce::jlimit(0.0, 1.0, seconds / endSeconds)); };
+        constexpr double top = 3.0, bottom = -24.0;
+        auto yOf = [&](double db) {
+            return plot.getY() + static_cast<float>(plot.getHeight() * (top - juce::jlimit(bottom, top, db)) / (top - bottom));
+        };
+
+        g.setColour(colours::background);
+        g.fillRect(plot);
+        // Sections we know.
+        static const char* const sectionNames[ma::kStemSections] { "intro", "build", "break" };
+        const juce::Colour sectionColours[ma::kStemSections] { colours::good, colours::warning, colours::accent };
+        g.setFont(juce::FontOptions(10.5f));
+        for (int s = 0; s < ma::kStemSections; ++s)
+            for (const auto& [from, to] : sections[static_cast<size_t>(s)])
+            {
+                const auto r = juce::Rectangle<float>::leftTopRightBottom(xOf(from), plot.getY(), xOf(to), plot.getBottom());
+                g.setColour(sectionColours[s].withAlpha(0.1f));
+                g.fillRect(r);
+                g.setColour(sectionColours[s].withAlpha(0.8f));
+                g.drawText(pl(sectionNames[s]), r.withHeight(14.0f).reduced(3.0f, 0.0f), juce::Justification::centredLeft, false);
+            }
+        // Stretches far from the references.
+        for (const auto& span : energy.comparison.spans)
+        {
+            g.setColour(colours::critical.withAlpha(0.18f));
+            g.fillRect(juce::Rectangle<float>::leftTopRightBottom(xOf(span.fromSeconds), plot.getY(), xOf(span.toSeconds), plot.getBottom()));
+        }
+        // Grid and the dB axis.
+        for (int db : { 0, -6, -12, -18 })
+        {
+            g.setColour(db == 0 ? colours::quiet.withAlpha(0.6f) : colours::quiet.withAlpha(0.2f));
+            g.drawHorizontalLine(juce::roundToInt(yOf(db)), plot.getX(), plot.getRight());
+            g.setColour(colours::quiet);
+            g.drawText(db == 0 ? pl("drop") : juce::String(db) + " dB",
+                       juce::Rectangle<float>(plot.getX() - axisWidth, yOf(db) - 7.0f, axisWidth - 6.0f, 14.0f), juce::Justification::centredRight);
+        }
+        // The references' corridor and median.
+        if (refs.valid)
+        {
+            juce::Path band, median;
+            std::vector<juce::Point<float>> lows;
+            bool open = false;
+            auto closeBand = [&] {
+                for (auto it = lows.rbegin(); it != lows.rend(); ++it)
+                    band.lineTo(*it);
+                if (!lows.empty())
+                    band.closeSubPath();
+                lows.clear();
+                open = false;
+            };
+            for (size_t i = 0; i < refs.centre.size(); ++i)
+            {
+                const double t = offset + refs.fromSeconds + static_cast<double>(i);
+                const bool shown = t >= 0.0 && refs.count[i] * 2 >= refs.profiles;
+                if (!shown)
+                {
+                    if (open)
+                        closeBand();
+                    continue;
+                }
+                const float x = xOf(t + 0.5);
+                if (!open)
+                {
+                    band.startNewSubPath(x, yOf(refs.high[i]));
+                    median.startNewSubPath(x, yOf(refs.centre[i]));
+                    open = true;
+                }
+                else
+                {
+                    band.lineTo(x, yOf(refs.high[i]));
+                    median.lineTo(x, yOf(refs.centre[i]));
+                }
+                lows.emplace_back(x, yOf(refs.low[i]));
+            }
+            if (open)
+                closeBand();
+            g.setColour(colours::accent.withAlpha(0.25f));
+            g.fillPath(band);
+            juce::Path dashed;
+            const float dashes[] { 5.0f, 4.0f };
+            juce::PathStrokeType(1.2f).createDashedStroke(dashed, median, dashes, 2);
+            g.setColour(colours::accent.withAlpha(0.9f));
+            g.fillPath(dashed);
+        }
+        // Ours.
+        if (haveOurs)
+        {
+            juce::Path line;
+            bool open = false;
+            for (size_t i = 0; i < ours.levelDb.size(); ++i)
+            {
+                const double v = ours.levelDb[i];
+                if (!std::isfinite(v))
+                {
+                    open = false;
+                    continue;
+                }
+                const float x = xOf(static_cast<double>(i) + 0.5), y = yOf(v);
+                if (open)
+                    line.lineTo(x, y);
+                else
+                    line.startNewSubPath(x, y);
+                open = true;
+            }
+            g.setColour(colours::text);
+            g.strokePath(line, juce::PathStrokeType(1.8f));
+        }
+
+        // Each group's energy.
+        static const char* const names[ma::kStemGroups] { "Perkusja", "Bas", "Wokal", "Reszta" };
+        static const float hues[ma::kStemGroups] { 0.08f, 0.6f, 0.9f, 0.33f };
+        const float laneHeight = lanes.getHeight() / ma::kStemGroups;
+        for (int group = 0; group < ma::kStemGroups; ++group)
+        {
+            auto lane = lanes.removeFromTop(laneHeight).reduced(0.0f, 2.0f);
+            const auto colour = juce::Colour::fromHSV(hues[group], 0.6f, 0.95f, 1.0f);
+            g.setFont(juce::FontOptions(11.5f));
+            g.setColour(colour);
+            g.drawText(pl(names[group]), lane.removeFromLeft(axisWidth).reduced(0.0f, 0.0f), juce::Justification::centredLeft);
+            g.setColour(colours::background);
+            g.fillRect(lane);
+            auto yLane = [&](double db) {
+                return lane.getBottom() - static_cast<float>(lane.getHeight() * (juce::jlimit(-30.0, 0.0, db) + 30.0) / 30.0);
+            };
+            const auto& values = haveOurs ? ours.groupDb[static_cast<size_t>(group)] : std::vector<double> {};
+            for (size_t i = 0; i < values.size(); ++i)
+            {
+                const double v = values[i];
+                if (!std::isfinite(v) || v <= -30.0)
+                    continue;
+                g.setColour(colour.withAlpha(0.55f));
+                g.fillRect(juce::Rectangle<float>::leftTopRightBottom(xOf(static_cast<double>(i)), yLane(v), xOf(static_cast<double>(i) + 1.0),
+                                                                     lane.getBottom()));
+            }
+            if (refs.valid)
+            {
+                juce::Path median;
+                bool open = false;
+                const auto& centre = refs.groupCentre[static_cast<size_t>(group)];
+                for (size_t i = 0; i < centre.size(); ++i)
+                {
+                    const double t = offset + refs.fromSeconds + static_cast<double>(i);
+                    if (t < 0.0 || refs.count[i] * 2 < refs.profiles)
+                    {
+                        open = false;
+                        continue;
+                    }
+                    const float x = xOf(t + 0.5), y = yLane(centre[i]);
+                    if (open)
+                        median.lineTo(x, y);
+                    else
+                        median.startNewSubPath(x, y);
+                    open = true;
+                }
+                g.setColour(colours::text.withAlpha(0.7f));
+                g.strokePath(median, juce::PathStrokeType(1.0f));
+            }
+        }
+
+        // Time: every 16 bars at the host's tempo, else every 30 s.
+        g.setFont(juce::FontOptions(10.5f));
+        g.setColour(colours::quiet);
+        const double step = bpm > 0.0 ? 16.0 * 240.0 / bpm : 30.0;
+        for (double t = 0.0; t <= endSeconds; t += step)
+        {
+            const float x = xOf(t);
+            g.setColour(colours::quiet.withAlpha(0.25f));
+            g.drawVerticalLine(juce::roundToInt(x), plot.getY(), plot.getBottom());
+            g.setColour(colours::quiet);
+            const int total = juce::roundToInt(t);
+            const auto label = bpm > 0.0 ? juce::String(juce::roundToInt(t * bpm / 240.0) + 1)
+                                         : juce::String(total / 60) + ":" + juce::String(total % 60).paddedLeft('0', 2);
+            g.drawText(label, juce::Rectangle<float>(x - 30.0f, bottomAxis.getY(), 60.0f, bottomAxis.getHeight()), juce::Justification::centred);
+        }
+        g.drawText(bpm > 0.0 ? pl("takt") : pl("czas"), bottomAxis.withWidth(axisWidth - 6.0f), juce::Justification::centredRight);
+    }
+
+private:
+    MixSnapshot::Energy energy;
+    std::array<std::vector<std::pair<double, double>>, ma::kStemSections> sections;
+    juce::String status;
+    bool warning = false;
+    double bpm = 0.0;
+};
+
 } // namespace brain

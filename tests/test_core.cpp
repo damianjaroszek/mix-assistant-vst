@@ -18,6 +18,7 @@
 #include "ma/StereoPlanner.h"
 #include "ma/StemReference.h"
 #include "ma/Sketch.h"
+#include "ma/EnergyMap.h"
 #include "ma/Key.h"
 #include "ma/KickTuning.h"
 #include "ma/MasterPreview.h"
@@ -2112,6 +2113,8 @@ void testStemBreak()
         }
         profiler.measureBlock(sum.data(), sum.data(), len);
         profiler.measureDrums(stems[0].data() + start, stems[0].data() + start, len);
+        for (int g = 0; g < 4; ++g)
+            profiler.measureGroup(g, stems[static_cast<size_t>(g)].data() + start, stems[static_cast<size_t>(g)].data() + start, len);
     }
     profiler.chooseDrop();
     int index = 0;
@@ -2125,6 +2128,13 @@ void testStemBreak()
         profiler.analyseBlock(index, l, l, nullptr, nullptr, std::min(n, total - start));
     }
     const auto profile = profiler.finish("with a break");
+    {
+        // Phase 20: its energy over time.
+        const auto& e = profile.energy;
+        check(e.valid && e.levelDb.size() == 34, "the profile keeps its energy a point a second");
+        check(e.levelDb[5] > -2.0 && e.levelDb[18] < e.levelDb[5] - 2.0, "the energy dips in the break");
+        check(e.groupDb[0].size() == 34 && e.groupDb[0][18] < -30.0 && e.groupDb[0][5] > -15.0, "the drums' energy is gone in the break");
+    }
     const auto& b = profile.breakdown;
     std::printf("  break %.1f s, %.1f dB under the drop, vocal %.1f dB in the break vs %.1f dB in the drop\n", b.seconds, b.belowDropDb,
                 b.measure.groups[2].levelDb, profile.measure.groups[2].levelDb);
@@ -2637,6 +2647,68 @@ void testSectionAutomation()
     check(capped.gainDb[0] > 0.0 && capped.gainDb[0] <= 6.0, "the drums come up, at most to their drop level");
 }
 
+// Phase 20: the energy map.
+void testEnergyMap()
+{
+    // intro 0-20 s at -8 dB, drop 20-40, break 40-56 at -10, drop 56-80, outro fading to -20.
+    auto track = [](double introSeconds, double introDb) {
+        ma::EnergyTimeline e;
+        e.valid = true;
+        const int length = static_cast<int>(introSeconds) + 70;
+        for (int i = 0; i < length; ++i)
+        {
+            const double rel = i - introSeconds;
+            double v = rel < 0.0 ? introDb : rel < 20.0 ? 0.0 : rel < 36.0 ? -10.0 : rel < 60.0 ? 0.0 : -20.0 * (rel - 59.0) / 10.0;
+            e.levelDb.push_back(v);
+            e.groupDb[0].push_back(rel >= 20.0 && rel < 36.0 ? ma::kEnergyFloorDb : v - 4.0);
+        }
+        return e;
+    };
+    const auto a = track(20.0, -8.0);
+    const auto entries = ma::energyEntries(a.levelDb);
+    check(entries.size() == 2 && std::abs(entries[0] - 18.5) < 0.01 && std::abs(entries[1] - 54.5) < 0.01,
+          "the drops come in where the level reaches the drop's");
+    check(std::abs(ma::deepestBetweenDrops(a.levelDb) + 10.0) < 0.01, "the deepest point between the drops is the break, not the outro");
+    auto blip = a.levelDb;
+    blip[5] = 0.0; // one loud second in the intro is no drop
+    check(ma::energyEntries(blip).size() == 2, "a short peak is no drop");
+
+    ma::StemTarget target;
+    target.name = "energy";
+    for (double intro : { 20.0, 30.0 })
+    {
+        ma::StemProfile p;
+        p.name = "ref";
+        p.dropSeconds = 40.0;
+        p.measure.valid = true;
+        p.energy = track(intro, -12.0);
+        target.profiles.push_back(p);
+    }
+    target.rebuild();
+    ma::StemTarget parsed;
+    check(ma::parseStemTarget(ma::serialiseStemTarget(target), parsed) && parsed.profiles.size() == 2 && parsed.profiles[1].energy.valid
+              && parsed.profiles[1].energy.levelDb.size() == target.profiles[1].energy.levelDb.size()
+              && parsed.profiles[1].energy.groupDb[0].size() == target.profiles[1].energy.groupDb[0].size()
+              && parsed.profiles[1].energy.groupDb[1].empty(),
+          "the energy is saved with the set");
+    const auto corridor = ma::energyCorridor(parsed);
+    check(corridor.valid && corridor.profiles == 2 && corridor.firstDrop.low <= 18.5 && corridor.firstDrop.high >= 28.5,
+          "the references' first drops make a corridor");
+    double low = 0.0, centre = 0.0, high = 0.0;
+    check(corridor.at(25.0, low, centre, high) && high < -5.0, "lined up at the first drop, both references are in the break 25 s later");
+
+    // Ours: a 60 s intro, 7 dB louder.
+    const auto ours = ma::compareEnergy(track(60.0, -5.0), corridor);
+    check(ours.valid && ours.drops == 2 && ours.firstDropOutside > 20.0, "a first drop much later than the references' shows");
+    for (const auto& span : ours.spans)
+        std::printf("  span %.0f-%.0f s %+.1f dB\n", span.fromSeconds, span.toSeconds, span.deviationDb);
+    check(!ours.spans.empty() && ours.spans.front().deviationDb > 3.0 && ours.spans.front().toSeconds <= 60.0 && ours.spans.front().fromSeconds >= 29.0,
+          "the intro louder than the references' is a span");
+    const auto same = ma::compareEnergy(track(24.0, -12.0), corridor);
+    check(same.valid && same.firstDropOutside == 0.0 && same.dropsOutside == 0.0 && same.deepestOutside == 0.0 && same.spans.empty(),
+          "a track shaped like the references has nothing outside");
+}
+
 int main()
 {
     testLoudness();
@@ -2674,6 +2746,7 @@ int main()
     testSketch();
     testOneCorrection();
     testSectionAutomation();
+    testEnergyMap();
     testMasterPreview();
     testWavRoundTrip();
 

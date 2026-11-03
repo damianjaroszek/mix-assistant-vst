@@ -101,6 +101,15 @@ głośniej, niż gra w dropie. Pojawia się w raporcie, w raporcie HTML i w kolu
 przed Agentem), nie w suwak miksera: wtedy Agent ją słyszy i po ponownym odsłuchu sekcja nie potrzebuje
 już zmian. W buildzie to wartość średnia (build zwykle narasta do dropu). Takty liczone są w 4/4 z tempa FL.
 
+Mapa energii (faza 20, zakładka „Energia”): głośność całego utworu sekunda po sekundzie względem dropu
+(biała linia) na tle referencji (niebieski korytarz i przerywana mediana), wyrównanych do Twojego pierwszego
+dropu, z zaznaczonym intro, buildem i breakiem. Pod spodem energia każdej grupy (perkusja, bas, wokal,
+reszta) i mediana referencji. Raport „Przebieg utworu” podaje, kiedy wchodzi pierwszy drop (takt i czas),
+ile jest dropów, jak głęboko utwór siada między dropami (wszystko na tle referencji) oraz dłuższe odcinki,
+w których miks gra o 3 dB lub więcej głośniej albo ciszej niż referencje w tym samym miejscu (na mapie na
+czerwono). Mózg zna przebieg z pozycji w utworze, więc puść utwór w FL w trybie Song od początku do końca.
+Zestawy referencji zapisane przed fazą 20 nie mają przebiegu: wczytaj ich stemy jeszcze raz.
+
 ### Przed masteringiem (Ozone)
 
 „Cel mastera” w Mózgu to głośność, do której Ozone podciągnie master (domyślnie -8 LUFS). Mózg w tle robi

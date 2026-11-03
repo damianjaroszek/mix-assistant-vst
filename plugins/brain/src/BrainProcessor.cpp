@@ -296,6 +296,9 @@ struct BrainProcessor::StemJob
                                   haveTonal ? tonal.getReadPointer(1) : nullptr);
             if (groups[0])
                 profiler.measureDrums(perGroup[0].getReadPointer(0), perGroup[0].getReadPointer(1), len);
+            for (int g = 0; g < ma::kStemGroups; ++g)
+                if (groups[static_cast<size_t>(g)])
+                    profiler.measureGroup(g, perGroup[static_cast<size_t>(g)].getReadPointer(0), perGroup[static_cast<size_t>(g)].getReadPointer(1), len);
             progress.store(0.5 * (b + 1) / blocks);
         }
         profiler.chooseDrop();
@@ -637,6 +640,10 @@ void BrainProcessor::timerCallback()
                                             [this](const auto& r) { return r.second <= firstDropSecond; }),
                              out.ranges.end());
     }
+    // Phase 20: the energy map.
+    mix.energy.ours = songEnergy();
+    mix.energy.references = ma::energyCorridor(keyedStems);
+    mix.energy.comparison = ma::compareEnergy(mix.energy.ours, mix.energy.references);
     updateLoudnessMatch(now);
     adaptStep(now);
     buildReport();
@@ -1098,6 +1105,71 @@ void BrainProcessor::updateSongSections()
         into->updates += bin.updates;
         into->levelSum += bin.levelSum;
     }
+}
+
+ma::EnergyTimeline BrainProcessor::songEnergy() const
+{
+    ma::EnergyTimeline out;
+    if (songBins.empty() || dropUpdates <= 0)
+        return out;
+    const double dropAverage = dropLevelSum / static_cast<double>(dropUpdates);
+    const auto length = static_cast<size_t>(songBins.rbegin()->first + 1);
+    out.levelDb.assign(length, NAN);
+    // Each channel's group, and what counts in the sum (not buses: their sources are there already).
+    std::map<std::uint64_t, int> groupOf;
+    std::map<std::uint64_t, bool> counts;
+    std::array<bool, ma::kStemGroups> any {};
+    for (const auto& channel : mix.channels)
+    {
+        const int g = groupOfChannel(channel);
+        groupOf[channel.owner] = g;
+        counts[channel.owner] = inMixSums(channel);
+        if (g >= 0)
+            any[static_cast<size_t>(g)] = true;
+    }
+    for (int g = 0; g < ma::kStemGroups; ++g)
+        if (any[static_cast<size_t>(g)])
+            out.groupDb[static_cast<size_t>(g)].assign(length, NAN);
+    static const auto weights = [] {
+        std::array<double, ma::bus::kBands> w {};
+        for (int b = 0; b < ma::bus::kBands; ++b)
+            w[static_cast<size_t>(b)] = std::pow(10.0, ma::kWeightingDb(ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b)) / 10.0);
+        return w;
+    }();
+    for (const auto& [second, bin] : songBins)
+    {
+        if (second < 0 || bin.updates <= 0)
+            continue;
+        const auto at = static_cast<size_t>(second);
+        const double level = std::max(ma::kEnergyFloorDb, bin.levelSum / static_cast<double>(bin.updates) - dropAverage);
+        out.levelDb[at] = level;
+        // Each group's share of the sum, as the loudness meter weighs it.
+        std::array<double, ma::kStemGroups> power {};
+        double total = 0.0;
+        for (const auto& [owner, sum] : bin.sums)
+        {
+            const auto counted = counts.find(owner);
+            if (counted == counts.end() || !counted->second)
+                continue;
+            double p = 0.0;
+            for (size_t b = 0; b < sum.power.size() && b < weights.size(); ++b)
+                p += sum.power[b] * weights[b];
+            total += p;
+            const int g = groupOf[owner];
+            if (g >= 0)
+                power[static_cast<size_t>(g)] += p;
+        }
+        for (int g = 0; g < ma::kStemGroups; ++g)
+        {
+            auto& values = out.groupDb[static_cast<size_t>(g)];
+            if (!values.empty())
+                values[at] = total > 0.0 && power[static_cast<size_t>(g)] > 0.0
+                                 ? std::max(ma::kEnergyFloorDb, level + 10.0 * std::log10(power[static_cast<size_t>(g)] / total))
+                                 : ma::kEnergyFloorDb;
+        }
+    }
+    out.valid = true;
+    return out;
 }
 
 bool BrainProcessor::stemsReady() const
@@ -1903,6 +1975,9 @@ void BrainProcessor::buildReport()
         }
         report.push_back(item);
     }
+
+    // Phase 20: the song's energy over time against the references'.
+    report.push_back(energyItem());
 
     // Collisions.
     {
@@ -4010,6 +4085,84 @@ juce::String signedDb(double db)
 }
 } // namespace
 
+juce::String BrainProcessor::songTime(double seconds) const
+{
+    const int total = juce::roundToInt(std::max(0.0, seconds));
+    const auto clock = juce::String(total / 60) + ":" + juce::String(total % 60).paddedLeft('0', 2);
+    const double bpm = tempoBpm();
+    return bpm > 0.0 ? pl("takt ") + juce::String(static_cast<int>(seconds * bpm / 240.0 + 1e-6) + 1) + " (" + clock + ")" : clock;
+}
+
+MixSnapshot::ReportItem BrainProcessor::energyItem() const
+{
+    using Status = MixSnapshot::Status;
+    MixSnapshot::ReportItem item;
+    item.title = pl("Przebieg utworu (mapa energii)");
+    const auto& e = mix.energy;
+    if (!e.comparison.valid)
+    {
+        item.detail = pl("Puść utwór od początku przez pierwszy drop (FL w trybie utworu, żeby Mózg znał pozycję).");
+        return item;
+    }
+    const auto& c = e.comparison;
+    const auto& r = e.references;
+    auto range = [](const ma::StemCorridor& corridor, int decimals) {
+        return juce::String(corridor.low, decimals) + pl("–") + juce::String(corridor.high, decimals);
+    };
+    juce::StringArray parts, advice;
+    {
+        juce::String text = pl("pierwszy drop: ") + songTime(c.firstDropSeconds);
+        if (r.valid)
+        {
+            const int low = juce::roundToInt(r.firstDrop.low), high = juce::roundToInt(r.firstDrop.high);
+            text += pl(", w referencjach ") + juce::String(low / 60) + ":" + juce::String(low % 60).paddedLeft('0', 2) + pl("–")
+                    + juce::String(high / 60) + ":" + juce::String(high % 60).paddedLeft('0', 2);
+            if (c.firstDropOutside > 0.0)
+                advice.add(pl("intro z buildem trwa dłużej niż w referencjach"));
+            else if (c.firstDropOutside < 0.0)
+                advice.add(pl("drop wchodzi wcześniej niż w referencjach"));
+        }
+        parts.add(text);
+    }
+    {
+        juce::String text = pl("dropów: ") + juce::String(c.drops);
+        if (r.valid)
+            text += pl(" (w referencjach ") + range(r.drops, 0) + ")";
+        parts.add(text);
+    }
+    if (std::isfinite(c.deepestDb))
+    {
+        juce::String text = pl("najgłębiej między dropami ") + juce::String(-c.deepestDb, 1) + pl(" dB pod dropem");
+        if (r.valid && r.deepest.valid)
+        {
+            text += pl(" (w referencjach ") + juce::String(-r.deepest.high, 1) + pl("–") + juce::String(-r.deepest.low, 1) + " dB)";
+            // A dB of slack: the corridor's edge is not a problem yet.
+            if (c.deepestOutside >= 1.0)
+                advice.add(pl("między dropami miks siada za mało, drop nie ma z czego wyrosnąć"));
+            else if (c.deepestOutside <= -1.0)
+                advice.add(pl("między dropami miks siada głębiej niż w referencjach"));
+        }
+        parts.add(text);
+    }
+    for (const auto& span : c.spans)
+        advice.add(songTime(span.fromSeconds) + pl("–") + songTime(span.toSeconds) + pl(" o ") + juce::String(std::abs(span.deviationDb), 1)
+                   + (span.deviationDb > 0.0 ? pl(" dB głośniej") : pl(" dB ciszej")) + pl(" niż referencje w tym miejscu"));
+    if (!r.valid)
+    {
+        item.status = Status::good;
+        item.detail = parts.joinIntoString(", ") + "."
+                      + (keyedStems.valid() ? pl(" Zestaw referencji nie ma jeszcze przebiegu energii: wczytaj ich stemy jeszcze raz.")
+                                            : pl(" Wczytaj referencje ze stemami, żeby porównać przebieg."));
+        return item;
+    }
+    item.status = advice.isEmpty() ? Status::good : Status::warning;
+    item.detail = parts.joinIntoString(", ") + "."
+                  + (advice.isEmpty() ? pl(" Przebieg jak w referencjach.")
+                                      : " " + advice.joinIntoString("; ").substring(0, 1).toUpperCase() + advice.joinIntoString("; ").substring(1)
+                                            + pl(". To sprawa aranżu, widać to na zakładce „Energia”."));
+    return item;
+}
+
 juce::String BrainProcessor::automationStep(const ma::SectionAutomation& automation, int group)
 {
     const auto at = static_cast<size_t>(group);
@@ -4246,6 +4399,8 @@ juce::String BrainProcessor::masteringReportHtml() const
             out << "<p>" << html(automation) << "</p>";
         out << "</section>\n";
     }
+    if (mix.energy.comparison.valid)
+        out << "<h2>" << pl("Przebieg utworu") << "</h2><section><p>" << html(energyItem().detail) << "</p></section>\n";
 
     out << "<h2>" << pl("Kanały") << "</h2><section class=\"wrap\"><table><tr><th>" << pl("Kanał") << "</th><th>" << pl("Rola")
         << "</th><th class=\"num\">Trim</th><th class=\"num\">" << pl("Szczyt") << "</th><th>" << pl("Łańcuch") << "</th></tr>";

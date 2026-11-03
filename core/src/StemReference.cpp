@@ -482,6 +482,13 @@ void StemProfiler::prepare(double rate, bool haveFullMix)
     keys.prepare(rate);
     loudness.clear();
     drums.clear();
+    for (auto& m : groupMeters)
+    {
+        m.prepare(rate, 2);
+        m.reset();
+    }
+    for (auto& g : groupLoudness)
+        g.clear();
     drop.clear();
     for (auto& g : groups)
     {
@@ -631,6 +638,19 @@ void StemProfiler::measureDrums(const float* left, const float* right, int numSa
         drums.back() = numSamples > 0 ? power / numSamples : 0.0;
 }
 
+void StemProfiler::measureGroup(int group, const float* left, const float* right, int numSamples)
+{
+    if (group < 0 || group >= kStemGroups)
+        return;
+    const auto at = static_cast<size_t>(group);
+    const float* channels[] { left, right };
+    groupMeters[at].process(channels, 2, numSamples);
+    // One value per block, in step with measureBlock (a group heard late starts silent).
+    groupLoudness[at].resize(loudness.size(), -INFINITY);
+    if (!groupLoudness[at].empty())
+        groupLoudness[at].back() = groupMeters[at].shortTermLufs();
+}
+
 bool StemProfiler::inSection(StemSection section, int blockIndex) const
 {
     const auto& mask = sections[static_cast<size_t>(section)];
@@ -728,6 +748,34 @@ StemProfile StemProfiler::finish(const std::string& name) const
         }
         b.belowDropDb = dropLoudness / std::max(1, dropBlocks) - sectionLoudness / sectionBlocks[at];
     }
+    // Phase 20: the energy over time, a point a second (the blocks' power averaged), against the drop.
+    if (dropBlocks > 0)
+    {
+        double dropLoudness = 0.0;
+        for (size_t i = 0; i < loudness.size(); ++i)
+            dropLoudness += drop[i] != 0 ? loudness[i] : 0.0;
+        dropLoudness /= dropBlocks;
+        const auto perSecond = static_cast<size_t>(std::max(1L, std::lround(sampleRate / block)));
+        const size_t seconds = loudness.size() / perSecond;
+        auto timeline = [&](const std::vector<double>& blocks) {
+            std::vector<double> out(seconds, kEnergyFloorDb);
+            for (size_t s = 0; s < seconds; ++s)
+            {
+                double power = 0.0;
+                for (size_t i = s * perSecond; i < (s + 1) * perSecond && i < blocks.size(); ++i)
+                    power += std::isfinite(blocks[i]) ? std::pow(10.0, blocks[i] / 10.0) : 0.0;
+                if (power > 0.0)
+                    out[s] = std::max(kEnergyFloorDb, 10.0 * std::log10(power / static_cast<double>(perSecond)) - dropLoudness);
+            }
+            return out;
+        };
+        profile.energy.levelDb = timeline(loudness);
+        for (int g = 0; g < kStemGroups; ++g)
+            if (!groupLoudness[static_cast<size_t>(g)].empty())
+                profile.energy.groupDb[static_cast<size_t>(g)] = timeline(groupLoudness[static_cast<size_t>(g)]);
+        profile.energy.valid = seconds > 0;
+    }
+
     const auto key = keys.estimate();
     if (key.confident)
     {
@@ -816,6 +864,24 @@ std::string serialiseStemTarget(const StemTarget& target)
                 }
         for (int g = 0; g < kStemGroups; ++g)
             writeGroupLine(out, "group", g, p.measure.groups[static_cast<size_t>(g)]);
+        if (p.energy.valid)
+        {
+            // Phase 20: "energy" with the whole, "egroup <key>" per group, a value a second.
+            out << "energy";
+            for (double v : p.energy.levelDb)
+                out << " " << number(v, 1);
+            out << "\n";
+            for (int g = 0; g < kStemGroups; ++g)
+            {
+                const auto& values = p.energy.groupDb[static_cast<size_t>(g)];
+                if (values.empty())
+                    continue;
+                out << "egroup " << stemGroupKey(static_cast<StemGroup>(g));
+                for (double v : values)
+                    out << " " << number(v, 1);
+                out << "\n";
+            }
+        }
         for (int s = 0; s < kStemSections; ++s)
         {
             const auto section = static_cast<StemSection>(s);
@@ -916,6 +982,30 @@ bool parseStemTarget(const std::string& text, StemTarget& target)
             }
             if (section == nullptr)
                 p.hasBands = true;
+        }
+        else if (kind == "energy" || kind == "egroup")
+        {
+            if (parsed.profiles.empty())
+                return false;
+            auto& energy = parsed.profiles.back().energy;
+            std::vector<double>* into = &energy.levelDb;
+            if (kind == "egroup")
+            {
+                std::string key;
+                words >> key;
+                into = nullptr;
+                for (int k = 0; k < kStemGroups; ++k)
+                    if (key == stemGroupKey(static_cast<StemGroup>(k)))
+                        into = &energy.groupDb[static_cast<size_t>(k)];
+                if (into == nullptr)
+                    return false;
+            }
+            into->clear();
+            double v = 0.0;
+            while (words >> v)
+                into->push_back(v);
+            if (kind == "energy")
+                energy.valid = !into->empty();
         }
         else if (sectionOfKind(kind, 0) >= 0)
         {

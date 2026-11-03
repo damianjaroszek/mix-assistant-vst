@@ -77,6 +77,16 @@ enum class StemSection
 };
 constexpr int kStemSections = 3;
 
+// Phase 20: a track's energy over time, one point a second: the short-term loudness of the whole
+// and of each group against the drop's (dB, kEnergyFloorDb when silent, NaN when not heard).
+constexpr double kEnergyFloorDb = -60.0;
+struct EnergyTimeline
+{
+    bool valid = false;
+    std::vector<double> levelDb;
+    std::array<std::vector<double>, kStemGroups> groupDb; // empty: the group is not there
+};
+
 // One reference track.
 struct StemProfile
 {
@@ -106,6 +116,7 @@ struct StemProfile
     };
     Section breakdown;
     Section intro, build; // phase 16
+    EnergyTimeline energy; // phase 20 (sets saved before have none)
     Section& section(StemSection s) { return s == StemSection::intro ? intro : s == StemSection::build ? build : breakdown; }
     const Section& section(StemSection s) const { return s == StemSection::intro ? intro : s == StemSection::build ? build : breakdown; }
 };
@@ -129,6 +140,8 @@ public:
     // Pass 1, phase 12: the drums stem's level of the same block, so the break can be found
     // (no drums stem, no break).
     void measureDrums(const float* left, const float* right, int numSamples);
+    // Pass 1, phase 20: a group's stem in the same block, for its energy over time.
+    void measureGroup(int group, const float* left, const float* right, int numSamples);
     // Between the passes: the blocks within 3 dB of the loudest short-term loudness, the break
     // (drums 15 dB under their drop level, the rest within 20 dB of the drop) and (phase 16)
     // the intro and the builds.
@@ -153,6 +166,8 @@ private:
     LoudnessMeter meter;
     KeyDetector keys;
     std::vector<double> loudness, drums;
+    std::array<LoudnessMeter, kStemGroups> groupMeters;
+    std::array<std::vector<double>, kStemGroups> groupLoudness;
     std::vector<char> drop;
     std::array<StereoAnalyzer, kStemGroups> groups;
     std::array<bool, kStemGroups> seen {};
