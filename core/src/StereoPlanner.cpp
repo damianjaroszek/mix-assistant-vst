@@ -13,6 +13,10 @@ constexpr double kHighestHz = 16000.0;
 constexpr double kTargetCoherence = 0.2;  // a cut brings the band back up to this
 constexpr double kMaxCutDb = 9.0;
 constexpr double kMinCutDb = 1.5;
+// Phase 27: a side cut already there stays until the band is clearly back in phase, so a band
+// hovering around 0 does not get its cut on one analysis and lose it on the next.
+constexpr double kKeepCutCoherence = 0.15;
+constexpr double kHeldCutDb = -1.0; // the channel's side EQ cuts this band by at least this
 constexpr double kAudibleShare = 0.05;    // of the mix in that band: less and nobody hears it
 constexpr double kCulpritSideShare = 0.3; // of all side in a band where the sum is out of phase
 constexpr double kNarrowMix = 0.85;       // the sum this mono in a band may take a little side
@@ -382,7 +386,7 @@ std::vector<StereoPlan> planStereo(const std::vector<StereoChannel>& channels, c
 
         // 1. Anti-phase: the channel's own bands under 0, and the bands where the sum is out of
         // phase and this channel brings most of the side.
-        std::array<bool, kBands> marked {}, bySum {};
+        std::array<bool, kBands> marked {}, bySum {}, held {};
         std::array<double, kBands> own {};
         for (int b = 0; b < kBands; ++b)
         {
@@ -393,7 +397,8 @@ std::vector<StereoPlan> planStereo(const std::vector<StereoChannel>& channels, c
                 continue;
             const double sideShare = totalSide[at] > 0.0 ? power(c.sideDb[at]) / totalSide[at] : 0.0;
             bySum[at] = sumCoherence[at] < 0.0 && own[at] < 0.5 && sideShare >= kCulpritSideShare;
-            marked[at] = own[at] < 0.0 || bySum[at];
+            held[at] = sideResponseDb(c.current, centre(b)) < kHeldCutDb && own[at] < kKeepCutCoherence;
+            marked[at] = own[at] < 0.0 || bySum[at] || held[at];
         }
         size_t slot = 0;
         for (const auto& [first, last] : groups(marked))
@@ -401,7 +406,8 @@ std::vector<StereoPlan> planStereo(const std::vector<StereoChannel>& channels, c
             if (slot == plan.settings.side.size())
                 break;
             double cut = 0.0, worst = 1.0;
-            bool sum = false;
+            bool sum = false, keep = false;
+            double heldDepth = 0.0;
             std::array<double, kBands> needed {};
             for (int b = first; b <= last; ++b)
             {
@@ -410,6 +416,9 @@ std::vector<StereoPlan> planStereo(const std::vector<StereoChannel>& channels, c
                     continue;
                 worst = std::min(worst, own[at]);
                 sum = sum || bySum[at];
+                keep = keep || held[at];
+                if (held[at])
+                    heldDepth = std::min(heldDepth, sideResponseDb(c.current, centre(b)));
                 // Back in phase: the mix itself where it is out of phase (this channel gives up the side
                 // the sum has too much of), else the channel on its own.
                 const double side = power(c.sideDb[at]);
@@ -422,10 +431,13 @@ std::vector<StereoPlan> planStereo(const std::vector<StereoChannel>& channels, c
                 needed[at] = std::clamp(toDb(wanted) - c.sideDb[at], -kMaxCutDb, 0.0);
                 cut = std::min(cut, needed[at]);
             }
+            // A cut it keeps stays as deep as it is (a lighter one would come back deeper next time).
+            if (keep)
+                cut = std::min(cut, heldDepth);
             cut = std::max(cut, -kMaxCutDb);
             if (cut > -kMinCutDb)
             {
-                if (!sum)
+                if (!sum && !keep)
                     continue;
                 cut = -kMinCutDb;
             }

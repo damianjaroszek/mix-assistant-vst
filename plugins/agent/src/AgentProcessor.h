@@ -282,6 +282,7 @@ private:
     std::atomic<bool> widthWanted { false };
     WidthStatus width;
     int widthTick = 0;
+    float widthPlannedFor = -1.0f, widthFromPlannedFor = -1.0f;
     std::atomic<float> compHold { 0.0f }, clipHold { 0.0f }; // dB, max since the timer last read them
     std::atomic<double> evenerGain { 0.0 }, evenerNote { 0.0 };
     std::array<float, 10> compHistory {}, clipHistory {};    // message thread: last second of maxima

@@ -42,6 +42,10 @@ struct SolverChannel
     // planned cleanup already in rawDb). Unset: rawDb + currentEq.
     SpectrumAnalyzer::Bands nowDb {};
     bool hasNow = false;
+    // Phase 27: what steps outside the solver add to the channel with this proposal (the Brain's
+    // translation steps: room cuts, presence, overtones), in dB per band. Counted only where the
+    // tonal stage predicts the master, so the balance it aims at is the one after them too.
+    SpectrumAnalyzer::Bands extraDb {};
 };
 
 struct SolverOptions

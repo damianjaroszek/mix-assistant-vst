@@ -842,10 +842,15 @@ void AgentProcessor::publishToBrain()
     if (slotIndex < 0)
         return;
     handleBrainCommand(*region);
-    // A third of a second is quick enough for a slider and cheap enough for many Agents.
-    if (++widthTick >= 3 || (ma::widthRequested(parameters.getRawParameterValue(widthId)->load()) != ma::widthOn(width.settings)))
+    // Every half second (every Agent runs the whole plan, so with many sliders this adds up), and at
+    // once when this slider moves.
+    const float widthNow = parameters.getRawParameterValue(widthId)->load();
+    const float widthFromNow = parameters.getRawParameterValue(widthFromId)->load();
+    if (++widthTick >= 5 || std::abs(widthNow - widthPlannedFor) > 1e-4f || std::abs(widthFromNow - widthFromPlannedFor) > 1e-4f)
     {
         widthTick = 0;
+        widthPlannedFor = widthNow;
+        widthFromPlannedFor = widthFromNow;
         planWidthNow(*region, now);
     }
 
