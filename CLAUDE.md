@@ -168,6 +168,11 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   < 0.25 with >= 2 side sources (< 0.2 always). The stereo analyser runs while any slot uses a slider (`widthWanted`). AgentData carries
   the request and result (`bus::kVersion` 15); the Brain's `StereoChannel::userWidth` channels get no stereo proposal and count in
   the sum as they play (`processedSidePower`).
+  Phase 27 stability: `propose` runs `proposeOnce` and, when the translation steps (`translationDelta`, from `proposeHarmonics`'
+  trial minus base) move any band of the sum by >= 0.5 dB, once more with them as `SolverChannel::extraDb` (counted only in the
+  tonal prediction); every translation step needs `tonalOk` (sum of distances outside the corridor grows by <= 1 dB), harmonics
+  grow only while it holds. `planStereo` keeps an existing side cut (`StereoChannel::current`, as deep) while the band's own
+  coherence < 0.15. `planWidth` precomputes per-channel tables (`SideModel`); Agents plan every 0.5 s or when their slider moves.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

@@ -757,7 +757,7 @@ SolverResult solve(const std::vector<SolverChannel>& channels, const SolverOptio
                     const double raw = channels[c].rawDb[static_cast<size_t>(b)];
                     before += std::pow(10.0, (channels[c].hasNow ? channels[c].nowDb[static_cast<size_t>(b)]
                                                                  : raw + eqResponseDb(channels[c].currentEq, hz)) / 10.0);
-                    after += std::pow(10.0, (raw + channels[c].gainDb + eqResponseDb(result.eq[c], hz)) / 10.0);
+                    after += std::pow(10.0, (raw + channels[c].gainDb + eqResponseDb(result.eq[c], hz) + channels[c].extraDb[static_cast<size_t>(b)]) / 10.0);
                 }
                 if (before > 1e-20 && after > 1e-20)
                     master[static_cast<size_t>(b)] += 10.0 * std::log10(after / before);
