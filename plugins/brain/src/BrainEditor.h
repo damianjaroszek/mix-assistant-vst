@@ -57,6 +57,7 @@ private:
     brain::ArrangementView arrangementView;
     brain::EnergyView energyView; // phase 20
     juce::ToggleButton sketchButton;
+    juce::ToggleButton listenGhostsButton; // phase 21
     void updateKeyControls(juce::String& status, bool& warning);
     void refreshStemTargets();
     void askForNewStemTarget();

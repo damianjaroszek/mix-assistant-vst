@@ -79,6 +79,13 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     sketchButton.setColour(juce::ToggleButton::textColourId, colours::text);
     sketchButton.setToggleState(processor.sketchMode(), juce::dontSendNotification);
     sketchButton.onClick = [this] { processor.setSketchMode(sketchButton.getToggleState()); };
+    listenGhostsButton.setButtonText(pl("Słuchaj duchów (szum w ich kształcie, tylko w dropie)"));
+    listenGhostsButton.setTooltip(pl("W odsłuchu Mózgu grają brakujące partie jako szum o ich widmie, poziomie i szerokości "
+                                     "(perkusja pulsuje na bit). Słychać, jak drop zabrzmi z nimi. Pomiary go nie słyszą; "
+                                     "wyłącz przed eksportem."));
+    listenGhostsButton.setColour(juce::ToggleButton::textColourId, colours::text);
+    listenGhostsButton.setToggleState(processor.listenGhosts(), juce::dontSendNotification);
+    listenGhostsButton.onClick = [this] { processor.setListenGhosts(listenGhostsButton.getToggleState()); };
 
     styleLabel(proposalStatus, {}, colours::quiet, 13.0f);
 
@@ -275,9 +282,12 @@ BrainEditor::BrainEditor(BrainProcessor& p)
            &buildSectionButton, &dropSectionButton, &breakSectionButton, &stemView },
          [this](auto area) { layoutStems(area); });
     page(Tab::arrangement, pl("Aranż"), pl("Tryb szkicu: czego dropowi brakuje względem referencji i co dograć."),
-         { &sketchButton, &arrangementView }, [this](juce::Rectangle<int> area) {
+         { &sketchButton, &listenGhostsButton, &arrangementView }, [this](juce::Rectangle<int> area) {
              area.reduce(10, 10);
-             sketchButton.setBounds(area.removeFromTop(24).removeFromLeft(420));
+             auto row = area.removeFromTop(24);
+             sketchButton.setBounds(row.removeFromLeft(420));
+             row.removeFromLeft(12);
+             listenGhostsButton.setBounds(row.removeFromLeft(440));
              area.removeFromTop(6);
              arrangementView.setBounds(area);
          });
@@ -471,6 +481,10 @@ void BrainEditor::timerCallback()
         }
         arrangementView.setData(mix.sketch, status, briefs);
         sketchButton.setToggleState(processor.sketchMode(), juce::dontSendNotification);
+        listenGhostsButton.setToggleState(processor.listenGhosts(), juce::dontSendNotification);
+        listenGhostsButton.setEnabled(processor.sketchMode() && mix.sketch.active());
+        listenGhostsButton.setColour(juce::ToggleButton::textColourId,
+                                     processor.ghostsAudibleNow() ? colours::warning : colours::text);
     }
     {
         // Phase 20: the energy map.
