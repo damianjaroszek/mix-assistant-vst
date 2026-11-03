@@ -2070,6 +2070,39 @@ void testWidth()
     check(none, "width: no references, no widener");
 }
 
+// Phase 27: a band hovering just above 0 keeps the side cut it already has, and gets none if it has none.
+void testStereoHysteresis()
+{
+    auto flat = [](double db) { ma::SpectrumAnalyzer::Bands b {}; b.fill(db); return b; };
+    ma::StereoChannel pad { ma::Role::pad, 6, true, flat(-20.0), flat(-40.0) };
+    for (int b = 0; b < 40; ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        if (hz > 2500.0 && hz < 4000.0)
+            pad.sideDb[static_cast<size_t>(b)] = -20.6; // coherence about 0.07
+    }
+    ma::StereoChannel other { ma::Role::lead, 3, true, flat(-20.0), flat(-40.0) };
+    ma::StereoMaster master;
+    const auto fresh = ma::planStereo({ pad, other }, master);
+    check(fresh[0].fixes.empty(), "stereo hysteresis: just above 0 and no cut yet, nothing to do");
+    pad.current.side[0] = { 3100.0f, -4.0f, 2.0f };
+    const auto kept = ma::planStereo({ pad, other }, master);
+    check(!kept[0].fixes.empty() && kept[0].settings.side[0].db < -3.5f, "stereo hysteresis: the cut it has stays, as deep, while the band is near 0");
+    pad.current = kept[0].settings;
+    const auto again = ma::planStereo({ pad, other }, master);
+    check(!again[0].fixes.empty() && std::abs(again[0].settings.side[0].db - kept[0].settings.side[0].db) < 0.6f
+              && std::abs(std::log2(again[0].settings.side[0].hz / kept[0].settings.side[0].hz)) < 0.1,
+          "stereo hysteresis: planning again gives the same cut");
+    for (int b = 0; b < 40; ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        if (hz > 2500.0 && hz < 4000.0)
+            pad.sideDb[static_cast<size_t>(b)] = -24.0; // coherence about 0.43
+    }
+    const auto released = ma::planStereo({ pad, other }, master);
+    check(released[0].fixes.empty(), "stereo hysteresis: clearly back in phase, the cut goes");
+}
+
 // Phase 26: the width slider.
 void testWidthSlider()
 {
@@ -3261,6 +3294,7 @@ int main()
     testCentreZones();
     testWidth();
     testWidthSlider();
+    testStereoHysteresis();
     testSectionAutomation();
     testEnergyMap();
     testGhostNoise();

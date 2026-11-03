@@ -26,6 +26,8 @@ constexpr double kDuckMaxHz = 300.0;             // collisions below this are ti
 constexpr int kDuckSync = 2;                     // release in a sixteenth: back before the next off-beat
 constexpr double kPhoneGoalDb = -12.0;           // a channel this much quieter (vs the mix) on a phone ...
 constexpr double kLaptopGoalDb = -8.0;           // ... or a laptop counts as lost there
+constexpr double kTranslationShiftDb = 0.5;
+constexpr double kTranslationTonalSlackDb = 1.0; // phase 27: summed over bands, how much further out of the corridor a step may take the mix     // phase 27: translation steps moving the balance more get a second pass
 constexpr double kPhoneAimDb = -6.0;             // what the proposals aim for: still clearly there ...
 constexpr double kLaptopAimDb = -4.0;            // ... on a phone and on a laptop
 constexpr double kOnsetShare = 0.5;              // share of a percussive channel's energy in its onsets
@@ -796,6 +798,8 @@ ma::SolverResult BrainProcessor::solveNow(double headroomGainDb, const ma::StemS
                 channels[c].currentEq[static_cast<size_t>(b)] = channel.data.eq[b];
         const int group = groupOfChannel(channel);
         channels[c].gainDb = groupGain != nullptr && group >= 0 ? (*groupGain)[static_cast<size_t>(group)] : 0.0;
+        if (const auto extra = translationExtra.find(channel.owner); extra != translationExtra.end())
+            channels[c].extraDb = extra->second;
     }
     // Phase 17: the ghosts after the channels, so the indices of the channels stay.
     if (mix.sketch.active())
@@ -2568,7 +2572,38 @@ juce::String BrainProcessor::describeIssue(const ma::MaskingIssue& issue) const
     return text;
 }
 
+// Phase 27: the translation steps (room cuts, presence, overtones) are chosen after the solver and
+// move the balance too. When they move it noticeably, the proposal is made once more with them
+// counted in the solver's tonal prediction, so one "Zastosuj" lands where the balance was aimed.
 void BrainProcessor::propose(const std::array<double, ma::kStemGroups>* groupGain)
+{
+    translationExtra.clear();
+    proposeOnce(groupGain);
+    if (!mix.tonal.valid || translationDelta.empty())
+        return;
+    double largest = 0.0;
+    for (int b = 0; b < ma::bus::kBands; ++b)
+    {
+        double before = 0.0, after = 0.0;
+        for (const auto& channel : mix.channels)
+        {
+            if (!channel.spectrumValid || !inMixSums(channel))
+                continue;
+            const double heard = channel.heardDb[static_cast<size_t>(b)];
+            const auto delta = translationDelta.find(channel.owner);
+            before += std::pow(10.0, heard / 10.0);
+            after += std::pow(10.0, (heard + (delta != translationDelta.end() ? delta->second[static_cast<size_t>(b)] : 0.0)) / 10.0);
+        }
+        if (before > 1e-20 && after > 1e-20)
+            largest = std::max(largest, std::abs(10.0 * std::log10(after / before)));
+    }
+    if (largest < kTranslationShiftDb)
+        return;
+    translationExtra = translationDelta;
+    proposeOnce(groupGain);
+}
+
+void BrainProcessor::proposeOnce(const std::array<double, ma::kStemGroups>* groupGain)
 {
     currentProposal = {};
     currentProposal.made = true;
@@ -3429,6 +3464,7 @@ std::vector<Proposal::Verdict> BrainProcessor::verdictsNow() const
 
 void BrainProcessor::proposeHarmonics()
 {
+    translationDelta.clear();
     if (mix.channels.empty())
         return;
 
@@ -3508,6 +3544,33 @@ void BrainProcessor::proposeHarmonics()
     const auto summary = [&](const juce::String& name, const ma::TranslationResult& was, const ma::TranslationResult& now, size_t c) {
         return pl(", żeby ") + quoted(name) + pl(" był słyszalny na małych głośnikach (telefon/laptop ") + shares(was, c) + pl(" → ")
                + shares(now, c) + pl(" dB względem reszty miksu)");
+    };
+
+    // Phase 27: a step may not push the balance further out of the target's corridor than it already
+    // is (overtones on the kick and bass used to lift Low past it, and the next round could not undo
+    // it). How far outside, summed over the bands, with the steps so far against what plays now.
+    const bool tonalKnown = mix.tonal.valid && currentTarget.valid();
+    const auto masterAfter = tonalKnown ? tonalMasterSpectrum() : ma::Curve {};
+    const auto outside = [&](const std::vector<ma::TranslationChannel>& t) {
+        if (!tonalKnown)
+            return 0.0;
+        auto master = masterAfter;
+        for (int b = 0; b < ma::bus::kBands; ++b)
+        {
+            double was = 0.0, now = 0.0;
+            for (size_t c = 0; c < t.size(); ++c)
+                if (t[c].valid)
+                {
+                    was += std::pow(10.0, base[c].rawDb[static_cast<size_t>(b)] / 10.0);
+                    now += std::pow(10.0, t[c].rawDb[static_cast<size_t>(b)] / 10.0);
+                }
+            if (was > 1e-20 && now > 1e-20)
+                master[static_cast<size_t>(b)] += 10.0 * std::log10(now / was);
+        }
+        return ma::outsideCorridorDb(ma::compareToTarget(master, currentTarget));
+    };
+    const auto tonalOk = [&](const std::vector<ma::TranslationChannel>& test) {
+        return !tonalKnown || outside(test) <= outside(trial) + kTranslationTonalSlackDb;
     };
 
     // Phase 23: these steps are judged on what the Agents send now (after their EQ), so a room cut made
@@ -3610,7 +3673,7 @@ void BrainProcessor::proposeHarmonics()
                             break;
                     }
                     const double gain = deficit(now, c) - deficit(after, c);
-                    if (gain >= 1.0 && harm(now, after, c) < 0.5 * gain)
+                    if (gain >= 1.0 && harm(now, after, c) < 0.5 * gain && tonalOk(test))
                     {
                         (*eq)[static_cast<size_t>(slot)] = band;
                         Proposal::Item item;
@@ -3666,9 +3729,9 @@ void BrainProcessor::proposeHarmonics()
             return best;
         };
 
-        const auto accept = [&](const ma::TranslationResult& after) {
+        const auto accept = [&](const ma::TranslationResult& after, const std::vector<ma::TranslationChannel>& test) {
             const double gain = deficit(now, c) - deficit(after, c);
-            return gain >= 1.0 && harm(now, after, c) < 0.5 * gain;
+            return gain >= 1.0 && harm(now, after, c) < 0.5 * gain && tonalOk(test);
         };
         const auto tryAttack = [&] {
             if (channel.data.transients.on > 0.5f)
@@ -3690,7 +3753,7 @@ void BrainProcessor::proposeHarmonics()
                     if (deficit(after, c) <= 0.0)
                         break;
                 }
-                if (accept(after))
+                if (accept(after, test))
                 {
                     Proposal::Item item;
                     item.action = Proposal::Item::Action::transients;
@@ -3715,15 +3778,23 @@ void BrainProcessor::proposeHarmonics()
             ma::TranslationResult after = now;
             // Overtones on a kick soften its punch, so less of them there.
             const float most = percussive ? kMaxPercussiveHarmonicsDb : kMaxHarmonicsDb;
+            settings.amountDb = -60.0f; // none yet
             for (float amount = -24.0f; amount <= most; amount += 1.0f)
             {
-                settings.amountDb = amount;
-                test[c].rawDb = ma::predictHarmonics(trial[c].rawDb, settings);
+                auto louder = settings;
+                louder.amountDb = amount;
+                auto attempt = trial;
+                attempt[c].rawDb = ma::predictHarmonics(trial[c].rawDb, louder);
+                // Only as much as the balance takes (phase 27).
+                if (!tonalOk(attempt))
+                    break;
+                settings = louder;
+                test = attempt;
                 after = ma::analyseTranslation(test);
                 if (deficit(after, c) <= 0.0)
                     break;
             }
-            if (accept(after))
+            if (settings.amountDb > -60.0f && accept(after, test))
             {
                 Proposal::Item item;
                 item.action = Proposal::Item::Action::harmonics;
@@ -3766,7 +3837,7 @@ void BrainProcessor::proposeHarmonics()
                 for (size_t o = 0; o < trial.size(); ++o)
                     if (o != c && mix.channels[o].data.priority <= channel.data.priority)
                         collides = collides || maskWill.amount[c][o] - maskWas.amount[c][o] > 0.05;
-                if (!collides && accept(after))
+                if (!collides && accept(after, test))
                 {
                     (*eq)[static_cast<size_t>(slot)] = bell;
                     Proposal::Item item;
@@ -3803,6 +3874,23 @@ void BrainProcessor::proposeHarmonics()
                              "albo warstwy w paśmie 1–5 kHz");
             currentProposal.items.push_back(item);
         }
+    }
+
+    // Phase 27: what these steps add to each channel, for the second pass of propose().
+    translationDelta.clear();
+    for (size_t c = 0; c < mix.channels.size(); ++c)
+    {
+        if (!trial[c].valid)
+            continue;
+        ma::SpectrumAnalyzer::Bands delta {};
+        bool any = false;
+        for (int b = 0; b < ma::bus::kBands; ++b)
+        {
+            delta[static_cast<size_t>(b)] = trial[c].rawDb[static_cast<size_t>(b)] - base[c].rawDb[static_cast<size_t>(b)];
+            any = any || std::abs(delta[static_cast<size_t>(b)]) > 0.05;
+        }
+        if (any)
+            translationDelta[mix.channels[c].owner] = delta;
     }
 
     // Tonal holes nothing plays in: overtones from the channel an octave below fill them.

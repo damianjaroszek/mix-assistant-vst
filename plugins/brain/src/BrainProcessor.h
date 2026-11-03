@@ -465,6 +465,10 @@ private:
     void updateLoudnessMatch(std::uint64_t now);
     void sendCommand(std::uint64_t owner, const ma::bus::Command& command);
     void propose(const std::array<double, ma::kStemGroups>* groupGain);
+    void proposeOnce(const std::array<double, ma::kStemGroups>* groupGain);
+    // Phase 27: what the translation steps of the last pass add per channel (owner -> dB per band),
+    // and what the solver counts in its tonal prediction (filled for the second pass).
+    std::map<std::uint64_t, ma::SpectrumAnalyzer::Bands> translationDelta, translationExtra;
     void proposeDynamics();
     void proposeHarmonics(); // translation steps and harmonics for tonal holes
     static void applyCleanup(MixSnapshot::Channel& channel, const ma::CleanupSettings& cleanup);
