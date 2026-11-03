@@ -3,6 +3,7 @@
 #include "SharedSession.h"
 #include "ma/ChannelAnalyzer.h"
 #include "ma/Stereo.h"
+#include "ma/Width.h"
 #include "ma/ChannelChain.h"
 #include "ma/ChannelEq.h"
 #include "ma/CorrelationMeter.h"
@@ -166,6 +167,22 @@ public:
     static constexpr const char* widenAmountId = "widenAmount";
     static constexpr const char* widenLowId = "widenFrom";
     static constexpr const char* widenDelayId = "widenDelay";
+    // Phase 26: the width slider (percent: 0 mono, 100 as it is, 200 as wide as stays in phase) and
+    // where the low end stays mono. The user's own: never set by the Brain, not in the A/B backup.
+    static constexpr const char* widthId = "width";
+    static constexpr const char* widthFromId = "widthFrom";
+    // What the shared width plan made of the slider (valid once planned).
+    struct WidthStatus
+    {
+        bool planned = false;
+        float request = 100.0f;
+        ma::WidthSettings settings {};
+        double reach = 0.0;
+        bool limitedBySum = false;
+        double sumLimitHz = 0.0;
+        double worstCoherence = 1.0, worstHz = 0.0;
+    };
+    WidthStatus widthStatus() const { return width; }
     // Live coherence per ERB band for the editor (+1 mono, -1 anti-phase); false while not measured.
     // After the mid-side EQ; `audible` marks bands within 40 dB of the channel's loudest.
     bool copyStereo(double* coherence, bool* audible) const;
@@ -237,6 +254,8 @@ private:
     void setEqParams(const ma::EqSettings& eq);
     void setDynamics(const DynamicState& state);
     void updateDynamicMeters();
+    void planWidthNow(ma::bus::Region& region, std::uint64_t now);
+    ma::WidthSettings liveWidth() const; // audio thread
 
     std::atomic<float>* trimParam = nullptr;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> trimGain;
@@ -256,6 +275,13 @@ private:
     ma::StereoAnalyzer liveStereo; // on the input, while the Brain or the editor looks
     std::array<std::atomic<float>, kBands> liveMid, liveSide;
     std::atomic<bool> stereoSeen { false };
+    // Phase 26: the planned width for the audio thread (WidthSettings as floats), and whether the
+    // stereo analysis has to run for it (this slider or another Agent's is in use).
+    static constexpr int kWidthFloats = 5 + 3 * ma::WidthSettings::kGuards;
+    std::array<std::atomic<float>, kWidthFloats> widthFloats {};
+    std::atomic<bool> widthWanted { false };
+    WidthStatus width;
+    int widthTick = 0;
     std::atomic<float> compHold { 0.0f }, clipHold { 0.0f }; // dB, max since the timer last read them
     std::atomic<double> evenerGain { 0.0 }, evenerNote { 0.0 };
     std::array<float, 10> compHistory {}, clipHistory {};    // message thread: last second of maxima

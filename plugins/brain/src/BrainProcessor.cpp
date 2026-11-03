@@ -2824,6 +2824,9 @@ void BrainProcessor::proposeWholeMix()
         in.priority = channel.data.priority;
         in.valid = channel.spectrumValid && channel.stereoValid;
         in.group = ma::stemGroupForRole(in.role);
+        in.userWidth = ma::widthOn(channel.data.width);
+        in.current = channel.data.stereo;
+        in.width = channel.data.width;
         for (int b = 0; b < ma::bus::kBands; ++b)
         {
             in.midDb[static_cast<size_t>(b)] = channel.midDb[static_cast<size_t>(b)];
@@ -3025,7 +3028,8 @@ void BrainProcessor::proposeWholeMix()
     {
         const auto& channel = mix.channels[c];
         const auto& stereoPlan = stereoPlans[c];
-        if (!channel.spectrumValid || !channel.stereoValid)
+        // Phase 26: a channel on its width slider is the user's; the slider keeps it in phase itself.
+        if (!channel.spectrumValid || !channel.stereoValid || ma::widthOn(channel.data.width))
             continue;
         // Parameters round what the plan sets (step and skew), so "the same" allows for that.
         const bool same = std::equal(stereoPlan.settings.side.begin(), stereoPlan.settings.side.end(), channel.data.stereo.side.begin(),
@@ -3283,7 +3287,11 @@ Proposal::Verdict BrainProcessor::judge(size_t index, const ma::ChainPlan& plan,
     else if (plan.dynamicsKnown && !plan.peakKnown && channel.data.intentionalDrive == 0)
         verdict.reasons.add(pl("Szczyty nieznane (projekt zapisany przed fazą 23): kliknij „Naucz poziom” w Agencie, żeby Mózg ocenił clipper."));
 
-    if (!channel.stereoValid)
+    if (channel.stereoValid && ma::widthOn(channel.data.width))
+        verdict.reasons.add(pl("Stereo: szerokość ustawiona suwakiem w Agencie (") + juce::String(juce::roundToInt(channel.data.widthRequest))
+                            + pl("%), Mózg jej nie zmienia. Najsłabsze pasmo ma korelację ") + juce::String(channel.data.widthWorstCoherence, 2)
+                            + (channel.data.widthLimitedBySum != 0 ? pl("; suma miksu ograniczyła poszerzenie.") : pl(".")));
+    else if (!channel.stereoValid)
         verdict.reasons.add(pl("Stereo: brak pomiaru (kanał mono albo Agent jeszcze nie wysłał danych)."));
     else if (stereoPlan.fixes.empty())
         verdict.reasons.add(pl("Stereo: każde pasmo w fazie, nic do zmiany."));

@@ -188,6 +188,22 @@ tam, gdzie pasmo wpada w przeciwfazę, i najwyżej +1 dB side'u na szerokich rol
 pokrętła poszerzenia (ile dB pod środkiem, od ilu Hz, opóźnienie); -40 dB znaczy wyłączone. W widoku „Stereo” Mózgu
 pomarańczowe są dopiero pasma poniżej 0,15, bo 0,2 to zamierzona granica.
 
+### Suwak szerokości (faza 26)
+
+Każdy Agent ma na zakładce „Stereo” suwak „Szerokość”, działający także bez stemów referencji: 0% to mono, 100% to bez
+zmian (domyślnie, nic nie jest przetwarzane), 200% to „max”, czyli tak szeroko, jak się da bez przeciwfazy. Gdy suwak
+jest w użyciu, poniżej „Mono poniżej” (domyślnie 150 Hz) kanał gra w mono. W lewo side nad tą częstotliwością jest
+ściszany. W prawo side jest podbijany (do +6 dB) i dochodzi poszerzenie od 300 Hz (kopia środka opóźniona o kilka ms,
+inne opóźnienie na każdym kanale). Środek się nie zmienia, więc w mono kanał gra tak samo.
+
+Agent pilnuje każdego pasma: korelacja nie spada poniżej 0,2. Pasmo, które by spadło (albo już jest w przeciwfazie),
+dostaje cięcie side'u tylko w tym miejscu, najwyżej w dwóch miejscach. „Max” to największe poszerzenie, przy którym to
+wystarcza, więc kanał już szeroki poszerzy się mniej niż mono. Kanał w przeciwfazie w zbyt wielu pasmach (np. krótki
+delay stereo) zostaje zwężony jako całość. Agenty pilnują też sumy: każdy liczy ten sam plan z tego, co wszystkie
+publikują, i gdy pasmo sumy zeszłoby poniżej 0,2 przez suwaki (z zapasem tam, gdzie spotykają się side'y kilku kanałów),
+poszerzenia grające w tym paśmie ustępują razem. Działa to także bez Mózgu. Mózg liczy kanał z suwakiem w sumie, nie
+proponuje mu zmian stereo i pisze w werdykcie, że szerokość jest ustawiona ręcznie.
+
 ### Przed masteringiem (Ozone)
 
 „Cel mastera” w Mózgu to głośność, do której Ozone podciągnie master (domyślnie -8 LUFS). Mózg w tle robi

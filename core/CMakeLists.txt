@@ -25,6 +25,7 @@ add_library(ma_core STATIC
     src/Resonance.cpp
     src/Stereo.cpp
     src/StereoPlanner.cpp
+    src/Width.cpp
     src/Key.cpp
     src/KickTuning.cpp
     src/MasterPreview.cpp

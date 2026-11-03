@@ -76,6 +76,8 @@ StereoSettings::Bell bellFor(int first, int last, double gainDb)
 double plannedSide(const StereoChannel& c, const StereoSettings& settings, int b)
 {
     const auto at = static_cast<size_t>(b);
+    if (c.userWidth)
+        return processedSidePower(c.current, c.width, centre(b), power(c.midDb[at]), power(c.sideDb[at]));
     return power(c.sideDb[at] + sideResponseDb(settings, centre(b))) + power(c.midDb[at]) * widenPowerRatio(settings, centre(b));
 }
 
@@ -354,8 +356,10 @@ std::vector<StereoPlan> planStereo(const std::vector<StereoChannel>& channels, c
             continue;
         for (size_t b = 0; b < total.size(); ++b)
         {
-            total[b] += power(c.midDb[b]) + power(c.sideDb[b]);
-            totalSide[b] += power(c.sideDb[b]);
+            // A channel on its width slider counts as it plays; the others before their stereo EQ.
+            const double side = c.userWidth ? plannedSide(c, c.current, static_cast<int>(b)) : power(c.sideDb[b]);
+            total[b] += power(c.midDb[b]) + side;
+            totalSide[b] += side;
         }
     }
     // The sum as the channels add up before their stereo EQ, not as measured on the master:
@@ -373,7 +377,7 @@ std::vector<StereoPlan> planStereo(const std::vector<StereoChannel>& channels, c
     {
         const auto& c = channels[i];
         auto& plan = plans[i];
-        if (!c.valid || c.role == Role::bus)
+        if (!c.valid || c.role == Role::bus || c.userWidth)
             continue;
 
         // 1. Anti-phase: the channel's own bands under 0, and the bands where the sum is out of

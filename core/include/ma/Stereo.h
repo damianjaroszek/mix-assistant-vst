@@ -63,6 +63,27 @@ struct StereoSettings
 constexpr float kWidenOffDb = -40.0f;
 constexpr float kMaxWidenDelayMs = 20.0f;
 
+// Phase 26: the Agent's width slider, worked out by `planWidth` (ma/Width.h) and kept apart from the
+// Brain's settings (it is the user's, never in a Command or the A/B backup). While active, the side
+// below `fromHz` is removed (the low end mono), the side above it scaled by `scale` (0 = mono),
+// the slider's own widener (replacing the Brain's) adds a delayed mid from max(300 Hz, fromHz), and
+// up to two guard bells cut the side wherever a band would fall under the safe coherence.
+struct WidthSettings
+{
+    static constexpr int kGuards = 2;
+    float active = 0.0f;
+    float fromHz = 150.0f;
+    float scale = 1.0f;
+    float widenDb = -60.0f; // <= kWidenOffDb = off
+    float delayMs = 8.0f;
+    std::array<StereoSettings::Bell, kGuards> guard {};
+};
+
+bool widthOn(const WidthSettings& width);
+// Side power after the stereo EQ, the widener(s) and the width, for a band at `hz` with this
+// mid and side power (power sums, the generated side counted as uncorrelated).
+double processedSidePower(const StereoSettings& settings, const WidthSettings& width, double hz, double midPower, double sidePower);
+
 double sideResponseDb(const StereoSettings& settings, double hz);
 // Side power the widener adds per unit of mid power at `hz` (0 when off).
 double widenPowerRatio(const StereoSettings& settings, double hz);
@@ -75,6 +96,7 @@ public:
     void prepare(double sampleRate);
     void reset();
     void setSettings(const StereoSettings& settings);
+    void setWidth(const WidthSettings& width);
     void process(float* const* channels, int numChannels, int numSamples);
 
 private:
@@ -87,6 +109,15 @@ private:
     int delayPos = 0, delaySamples = 0;
     double widenGain = 0.0;
     std::array<Biquad, 2> widenHighPass {};
+    // Phase 26: the width slider.
+    WidthSettings width {};
+    bool widthInitialised = false;
+    std::array<Biquad, 2> widthSideHighPass {}; // the side below fromHz, taken out
+    std::array<Biquad, 2> widthHighPass {}; // its widener's
+    std::array<Biquad, WidthSettings::kGuards> guards {};
+    int widthDelaySamples = 0;
+    double widthScale = 1.0, widthWidenGain = 0.0;      // targets
+    double scaleNow = 1.0, widthWidenNow = 0.0;          // ramped per sample
 };
 
 } // namespace ma
