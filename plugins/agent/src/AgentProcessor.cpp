@@ -183,6 +183,8 @@ AgentProcessor::AgentProcessor()
         liveSide[b].store(-200.0f);
         outputBands[b].store(-INFINITY);
     }
+    for (auto& f : widthFloats)
+        f.store(0.0f); // fromHz 0: not planned, the width stays off
     startTimerHz(10);
 }
 
@@ -391,6 +393,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout AgentProcessor::createLayout
     widenFrom.setSkewForCentre(400.0f);
     widenParam(widenLowId, "Widener from", widenFrom, 300.0f, "Hz");
     widenParam(widenDelayId, "Widener delay", Range { 1.0f, 20.0f, 0.1f }, 8.0f, "ms");
+    // Phase 26: the width slider.
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { widthId, 11 }, "Width",
+                                                           Range { 0.0f, ma::kWidthMax, 1.0f }, ma::kWidthNeutral,
+                                                           juce::AudioParameterFloatAttributes().withLabel("%")));
+    Range widthFrom { 60.0f, 1000.0f, 1.0f };
+    widthFrom.setSkewForCentre(200.0f);
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { widthFromId, 11 }, "Width mono below", widthFrom, 150.0f,
+                                                           juce::AudioParameterFloatAttributes().withLabel("Hz")));
 
     return layout;
 }
@@ -492,7 +502,7 @@ void AgentProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     liveLoudness.process(input, numChannels, numSamples);
     inputLufs.store(liveLoudness.shortTermLufs());
 
-    if (spectrumVisible.load() || brainWantsSpectra.load())
+    if (spectrumVisible.load() || brainWantsSpectra.load() || widthWanted.load())
     {
         liveSpectrum.process(input, numChannels, numSamples);
         const auto bands = liveSpectrum.recentDb();
@@ -604,6 +614,7 @@ void AgentProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     cleanup.setSettings(dynamics.cleanup);
     cleanup.process(mainBuffer.getArrayOfWritePointers(), numChannels, numSamples);
     stereoShaper.setSettings(dynamics.stereo);
+    stereoShaper.setWidth(liveWidth()); // the user's: the same before and after
     stereoShaper.process(mainBuffer.getArrayOfWritePointers(), numChannels, numSamples);
 
     ma::EqSettings bands {};
@@ -696,6 +707,103 @@ void AgentProcessor::timerCallback()
     publishToBrain();
 }
 
+ma::WidthSettings AgentProcessor::liveWidth() const
+{
+    ma::WidthSettings w;
+    w.active = widthFloats[0].load();
+    w.fromHz = widthFloats[1].load();
+    w.scale = widthFloats[2].load();
+    w.widenDb = widthFloats[3].load();
+    w.delayMs = widthFloats[4].load();
+    for (int g = 0; g < ma::WidthSettings::kGuards; ++g)
+    {
+        w.guard[static_cast<size_t>(g)].hz = widthFloats[static_cast<size_t>(5 + 3 * g)].load();
+        w.guard[static_cast<size_t>(g)].db = widthFloats[static_cast<size_t>(6 + 3 * g)].load();
+        w.guard[static_cast<size_t>(g)].q = widthFloats[static_cast<size_t>(7 + 3 * g)].load();
+    }
+    if (w.fromHz < 20.0f) // never planned yet
+        return {};
+    return w;
+}
+
+// Phase 26: every Agent runs the same width plan over what all of them publish and takes its own
+// row, so the sliders keep the sum in phase together, with or without the Brain.
+void AgentProcessor::planWidthNow(ma::bus::Region& region, std::uint64_t now)
+{
+    const float request = parameters.getRawParameterValue(widthId)->load();
+    std::vector<ma::WidthInput> inputs;
+    int own = -1;
+    bool anyRequest = ma::widthRequested(request);
+    ma::bus::AgentData other {};
+    for (int s = 0; s < ma::bus::kMaxSlots; ++s)
+    {
+        if (!ma::bus::read(region.slots[s], other, now))
+            continue;
+        anyRequest = anyRequest || ma::widthRequested(other.widthRequest);
+        ma::WidthInput in;
+        in.valid = other.stereoValid != 0;
+        const auto role = static_cast<ma::Role>(other.role);
+        in.inMix = role != ma::Role::bus && role != ma::Role::send;
+        in.request = other.widthRequest;
+        in.fromHz = other.widthFromHz > 20.0f ? other.widthFromHz : 150.0f;
+        in.delayMs = ma::widthDelayMs(s);
+        in.stereo = other.stereo;
+        ma::EqSettings eqNow {};
+        for (int b = 0; b < ma::kEqBands; ++b)
+            eqNow[static_cast<size_t>(b)] = other.eq[b];
+        for (int b = 0; b < ma::bus::kBands; ++b)
+        {
+            const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+            const double heard = other.trimDb + (other.eqBypass != 0 ? 0.0 : ma::eqResponseDb(eqNow, hz));
+            in.midDb[static_cast<size_t>(b)] = other.midDb[b] + heard;
+            in.sideDb[static_cast<size_t>(b)] = other.sideDb[b] + heard;
+        }
+        if (s == slotIndex)
+        {
+            own = static_cast<int>(inputs.size());
+            // This Agent's slider as it is now, not as last published.
+            in.request = request;
+            in.fromHz = parameters.getRawParameterValue(widthFromId)->load();
+        }
+        inputs.push_back(in);
+    }
+    widthWanted.store(anyRequest);
+    WidthStatus next;
+    next.request = request;
+    if (own >= 0 && ma::widthRequested(request))
+    {
+        const auto plans = ma::planWidth(inputs);
+        const auto& plan = plans[static_cast<size_t>(own)];
+        next.planned = inputs[static_cast<size_t>(own)].valid;
+        next.settings = plan.settings;
+        next.reach = plan.reach;
+        next.limitedBySum = plan.limitedBySum;
+        next.sumLimitHz = plan.sumLimitHz;
+        next.worstCoherence = plan.worstCoherence;
+        next.worstHz = plan.worstHz;
+    }
+    else if (ma::widthRequested(request))
+    {
+        // Not on the bus yet: at least the low end mono and the side scaled, no widening unchecked.
+        next.settings.active = 1.0f;
+        next.settings.fromHz = parameters.getRawParameterValue(widthFromId)->load();
+        next.settings.scale = std::min(1.0f, request / ma::kWidthNeutral);
+    }
+    width = next;
+    const auto& w = next.settings;
+    widthFloats[0].store(w.active);
+    widthFloats[1].store(w.fromHz);
+    widthFloats[2].store(w.scale);
+    widthFloats[3].store(w.widenDb);
+    widthFloats[4].store(w.delayMs);
+    for (int g = 0; g < ma::WidthSettings::kGuards; ++g)
+    {
+        widthFloats[static_cast<size_t>(5 + 3 * g)].store(w.guard[static_cast<size_t>(g)].hz);
+        widthFloats[static_cast<size_t>(6 + 3 * g)].store(w.guard[static_cast<size_t>(g)].db);
+        widthFloats[static_cast<size_t>(7 + 3 * g)].store(w.guard[static_cast<size_t>(g)].q);
+    }
+}
+
 void AgentProcessor::updateDynamicMeters()
 {
     const auto now = juce::Time::getMillisecondCounterHiRes();
@@ -734,6 +842,12 @@ void AgentProcessor::publishToBrain()
     if (slotIndex < 0)
         return;
     handleBrainCommand(*region);
+    // A third of a second is quick enough for a slider and cheap enough for many Agents.
+    if (++widthTick >= 3 || (ma::widthRequested(parameters.getRawParameterValue(widthId)->load()) != ma::widthOn(width.settings)))
+    {
+        widthTick = 0;
+        planWidthNow(*region, now);
+    }
 
     ma::bus::AgentData data {};
     const auto name = getDisplayName().toRawUTF8();
@@ -787,7 +901,15 @@ void AgentProcessor::publishToBrain()
         data.changedTools = changed;
     }
     data.stereo = dynamics.stereo;
-    data.stereoValid = stereoSeen.load() && data.liveValid != 0 ? 1 : 0;
+    data.stereoValid = stereoSeen.load() && (data.liveValid != 0 || widthWanted.load()) ? 1 : 0;
+    data.widthRequest = parameters.getRawParameterValue(widthId)->load();
+    data.widthFromHz = parameters.getRawParameterValue(widthFromId)->load();
+    data.width = width.settings;
+    data.widthReach = static_cast<float>(width.reach);
+    data.widthLimitedBySum = width.limitedBySum ? 1 : 0;
+    data.widthLimitHz = static_cast<float>(width.sumLimitHz);
+    data.widthWorstCoherence = static_cast<float>(width.worstCoherence);
+    data.widthWorstHz = static_cast<float>(width.worstHz);
     for (int b = 0; b < ma::bus::kBands; ++b)
     {
         data.midDb[b] = liveMid[static_cast<size_t>(b)].load();
@@ -1333,14 +1455,18 @@ bool AgentProcessor::copyStereo(double* coherence, bool* audible) const
     if (!stereoSeen.load())
         return false;
     const auto settings = currentDynamics().stereo;
+    const auto widthNow = width.settings;
     double loudest = -200.0;
     std::array<double, kBands> level {};
     for (size_t b = 0; b < kBands; ++b)
     {
         const double mid = liveMid[b].load();
-        const double side = liveSide[b].load() + ma::sideResponseDb(settings, ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, static_cast<int>(b)));
+        const double side = 10.0 * std::log10(ma::processedSidePower(settings, widthNow, ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, static_cast<int>(b)),
+                                                                     std::pow(10.0, mid / 10.0), std::pow(10.0, liveSide[b].load() / 10.0))
+                                              + 1e-30);
         coherence[b] = ma::coherence(mid, side);
-        level[b] = 10.0 * std::log10(std::pow(10.0, mid / 10.0) + std::pow(10.0, side / 10.0) + 1e-30);
+        const double inputSide = liveSide[b].load();
+        level[b] = 10.0 * std::log10(std::pow(10.0, mid / 10.0) + std::pow(10.0, inputSide / 10.0) + 1e-30);
         loudest = std::max(loudest, level[b]);
     }
     for (size_t b = 0; b < kBands; ++b)

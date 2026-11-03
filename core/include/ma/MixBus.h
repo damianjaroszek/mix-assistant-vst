@@ -27,7 +27,7 @@ namespace ma::bus
 {
 
 constexpr std::uint32_t kMagic = 0x4D414255; // "MABU"
-constexpr std::uint32_t kVersion = 14; // phase 25: StereoSettings carries the widener
+constexpr std::uint32_t kVersion = 15; // phase 26: the width slider in AgentData
 constexpr int kMaxSlots = 128;
 constexpr int kNameLength = 48;
 constexpr int kBands = 40;            // ERB bands, as SpectrumAnalyzer with BandScale::erb
@@ -97,6 +97,15 @@ struct AgentData
     // since (bits of ToolBit). A tool both off is in neither.
     std::int32_t brainTools;
     std::int32_t changedTools;
+    // Phase 26: the width slider (percent, 100 = off) and what the shared width plan made of it.
+    float widthRequest;
+    float widthFromHz;
+    WidthSettings width;
+    float widthReach;           // 0..1 of the full widening that was safe for the channel
+    std::int32_t widthLimitedBySum;
+    float widthLimitHz;
+    float widthWorstCoherence;  // its own worst audible band after the width
+    float widthWorstHz;
 };
 
 // Phase 23: the tools of an Agent, for AgentData::brainTools / changedTools.

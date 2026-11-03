@@ -186,7 +186,19 @@ AgentEditor::AgentEditor(AgentProcessor& p)
     styleLabel(stereoLabel, pl("Faza w pasmach (mid-side)"), colours::quiet);
     stereoLabel.setTooltip(pl("Jak Correlometer: na dole przeciwfaza, która w mono znika. „Analizuj” (cały łańcuch) zdejmuje tam side, "
                               "a ze stemami referencji poszerza kanał do szerokości jego grupy w referencjach (nigdy poniżej korelacji 0,2)."));
-    for (auto* label : { &cleanStatus, &compStatus, &clipStatus, &evenStatus, &stereoStatus })
+    styleLabel(widthLabel, pl("Szerokość"), colours::text, 13.0f);
+    widthLabel.setTooltip(pl("Od mono (0%) przez „bez zmian” (100%) do „max” (200%), czyli tak szeroko, jak się da bez przeciwfazy. "
+                             "Poszerza od 300 Hz w górę kopią środka opóźnioną o kilka ms i podbiciem side'u. Agent pilnuje każdego pasma "
+                             "(korelacja nie spada poniżej 0,2, w razie potrzeby tnie side w tym paśmie). Agenty pilnują też sumy: "
+                             "suwaki ustępują, gdy suma zeszłaby poniżej 0,2. W mono nic się nie zmienia."));
+    styleLabel(widthFromLabel, pl("Mono poniżej"), colours::quiet, 13.0f);
+    widthFromLabel.setTooltip(pl("Gdy suwak szerokości jest w użyciu, poniżej tej częstotliwości kanał gra w mono."));
+    styleLabel(widthMonoMark, "mono", colours::quiet, 11.0f);
+    styleLabel(widthNeutralMark, pl("bez zmian"), colours::quiet, 11.0f);
+    styleLabel(widthMaxMark, "max", colours::quiet, 11.0f);
+    widthNeutralMark.setJustificationType(juce::Justification::centred);
+    widthMaxMark.setJustificationType(juce::Justification::centredRight);
+    for (auto* label : { &cleanStatus, &compStatus, &clipStatus, &evenStatus, &stereoStatus, &widthStatusLabel })
     {
         styleLabel(*label, {}, colours::quiet, 13.0f);
         label->setJustificationType(juce::Justification::topLeft);
@@ -213,6 +225,8 @@ AgentEditor::AgentEditor(AgentProcessor& p)
         { &clipSoftnessSlider, AgentProcessor::clipSoftnessId },
         { &evenAmountSlider, AgentProcessor::evenAmountId },
         { &evenRefSlider, AgentProcessor::evenRefId },
+        { &widthSlider, AgentProcessor::widthId },
+        { &widthFromSlider, AgentProcessor::widthFromId },
     };
     for (const auto& [slider, id] : chainSliders)
     {
@@ -291,7 +305,11 @@ AgentEditor::AgentEditor(AgentProcessor& p)
            &clipCeilingLabel, &clipCeilingSlider, &clipSoftnessLabel, &clipSoftnessSlider, &clipStatus, &evenLabel,
            &evenOnButton, &evenAmountLabel, &evenAmountSlider, &evenRefLabel, &evenRefSlider, &evenStatus },
          [this](auto area) { layoutChain(area); });
-    page(stereoPage, "Stereo", { &stereoLabel, &origins[5], &stereoView, &stereoStatus }, [this](auto area) { layoutStereo(area); });
+    page(stereoPage, "Stereo",
+         { &stereoLabel, &origins[5], &stereoView, &stereoStatus, &widthLabel, &widthSlider, &widthMonoMark, &widthNeutralMark, &widthMaxMark,
+           &widthFromLabel, &widthFromSlider, &widthStatusLabel },
+         [this](auto area) { layoutStereo(area); });
+    widthSlider.setDoubleClickReturnValue(true, ma::kWidthNeutral);
     tabs.setCurrentTabIndex(juce::jlimit(0, tabs.getNumTabs() - 1, processor.editorTab), false);
     tabs.onChange = [this](int index) { processor.editorTab = index; };
 
@@ -527,8 +545,51 @@ void AgentEditor::updateChainStatus()
         bells.add(pl("poszerzenie ") + juce::String(dynamics.stereo.widen.amountDb, 1) + pl(" dB od ")
                   + juce::String(juce::roundToInt(dynamics.stereo.widen.lowHz)) + " Hz (" + juce::String(dynamics.stereo.widen.delayMs, 1)
                   + pl(" ms; w mono bez zmian)"));
-    stereoStatus.setText(bells.isEmpty() ? pl("Mid-side EQ wyłączony.") : bells.joinIntoString(", "), juce::dontSendNotification);
+    stereoStatus.setText(bells.isEmpty() ? pl("Mid-side EQ wyłączony.") : pl("Od Mózgu: ") + bells.joinIntoString(", "),
+                         juce::dontSendNotification);
     stereoStatus.setColour(juce::Label::textColourId, bells.isEmpty() ? colours::quiet : colours::good);
+
+    // Phase 26: what the slider does now.
+    const auto w = processor.widthStatus();
+    juce::String text;
+    auto colour = colours::quiet;
+    if (!ma::widthRequested(w.request))
+        text = pl("Suwak na 100%: szerokość bez zmian. W lewo węziej (0% = mono), w prawo szerzej (200% = max bez przeciwfazy).");
+    else
+    {
+        juce::StringArray parts;
+        parts.add(pl("Mono poniżej ") + juce::String(juce::roundToInt(w.settings.fromHz)) + " Hz");
+        const float asked = std::min(1.0f, w.request / ma::kWidthNeutral);
+        if (w.request < ma::kWidthNeutral || w.settings.scale < asked - 0.01f)
+        {
+            parts.add(w.settings.scale < 0.005f ? pl("wyżej też mono") : pl("side wyżej ") + signedDb(20.0 * std::log10(w.settings.scale)));
+            if (w.settings.scale < asked - 0.01f)
+                parts.add(pl("węziej, niż chce suwak: kanał ma przeciwfazę w zbyt wielu pasmach, żeby wyciąć ją punktowo"));
+        }
+        else
+        {
+            if (w.settings.scale > 1.005f)
+                parts.add(pl("side ") + signedDb(20.0 * std::log10(w.settings.scale)));
+            if (w.settings.widenDb > ma::kWidenOffDb)
+                parts.add(pl("poszerzenie ") + juce::String(w.settings.widenDb, 1) + pl(" dB (") + juce::String(w.settings.delayMs, 1) + " ms)");
+            if (w.planned)
+                parts.add(pl("max dla tego kanału: ") + juce::String(juce::roundToInt(100.0 * w.reach)) + pl("% pełnego poszerzenia"));
+        }
+        for (const auto& g : w.settings.guard)
+            if (std::abs(g.db) > 0.01f)
+                parts.add(pl("pilnuje ") + juce::String(g.hz >= 1000.0f ? juce::String(g.hz / 1000.0f, 1) + " kHz" : juce::String(juce::roundToInt(g.hz)) + " Hz")
+                          + " (side " + signedDb(g.db) + ")");
+        text = parts.joinIntoString(", ") + ".";
+        if (w.limitedBySum)
+            text += pl(" Suma miksu nie pozwala szerzej (") + juce::String(w.sumLimitHz >= 1000.0 ? juce::String(w.sumLimitHz / 1000.0, 1) + " kHz"
+                                                                                                : juce::String(juce::roundToInt(w.sumLimitHz)) + " Hz")
+                    + pl(" zeszłoby poniżej 0,2).");
+        else if (!w.planned)
+            text += pl(" Czeka na pomiar stereo, dopiero wtedy poszerza.");
+        colour = w.limitedBySum ? colours::warning : colours::good;
+    }
+    widthStatusLabel.setText(text, juce::dontSendNotification);
+    widthStatusLabel.setColour(juce::Label::textColourId, colour);
 }
 
 void AgentEditor::paint(juce::Graphics& g)
@@ -768,8 +829,26 @@ void AgentEditor::layoutStereo(juce::Rectangle<int> area)
         origin(ma::bus::toolStereo).setBounds(row.removeFromRight(170));
         stereoLabel.setBounds(row);
     }
+    area.removeFromTop(6);
+    {
+        auto row = area.removeFromTop(26);
+        widthLabel.setBounds(row.removeFromLeft(110));
+        widthSlider.setBounds(row);
+        auto marks = area.removeFromTop(14).withTrimmedLeft(110).withTrimmedRight(70);
+        widthMonoMark.setBounds(marks.removeFromLeft(80));
+        widthMaxMark.setBounds(marks.removeFromRight(80));
+        widthNeutralMark.setBounds(marks);
+    }
     area.removeFromTop(4);
-    stereoStatus.setBounds(area.removeFromBottom(44));
-    area.removeFromBottom(8);
+    {
+        auto row = area.removeFromTop(24);
+        widthFromLabel.setBounds(row.removeFromLeft(110));
+        widthFromSlider.setBounds(row.removeFromLeft(360));
+    }
+    area.removeFromTop(4);
+    widthStatusLabel.setBounds(area.removeFromTop(36));
+    area.removeFromTop(6);
+    stereoStatus.setBounds(area.removeFromBottom(40));
+    area.removeFromBottom(6);
     stereoView.setBounds(area);
 }

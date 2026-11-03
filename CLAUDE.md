@@ -159,6 +159,15 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   the reference profiles' median coherence; `planStereo(..., &width)` lifts existing side or, on a near-mono part, sets the widener
   (never kick, bass, bus, send; vocals lift only), each channel and the sum kept >= `kSafeCoherence` 0.2 (`keepSumInPhase` steps
   every widening in the worst band back: widener 1 dB, lift 0.5 dB). Without stem references the phase 8 behaviour stays. `bus::kVersion` 14.
+  Phase 26 width slider (`ma/Width.h`): Agent params `width` (0-200 %, 100 = off) and `widthFrom` (mono below, default 150 Hz), the
+  user's (not in `Command`, `brainSet` or the A/B backup). `WidthSettings` (in Stereo.h) goes to `StereoShaper::setWidth`: side LR4
+  high-passed at fromHz (mono sum untouched), scaled, own widener from max(300, fromHz) replacing the Brain's, two guard side bells.
+  `planWidth` (each Agent runs it in its timer every 0.3 s on all slots, heard = mid/side + trim + EQ, and takes its own row): above
+  100 % the widest `reach` (side up to +6 dB, widener up to -2 dB) where two guards keep every audible band >= 0.2, the slider spread
+  over it; too many anti-phase bands narrow the side as a whole; the sum (power sums) steps widenings back where a slider makes a band
+  < 0.25 with >= 2 side sources (< 0.2 always). The stereo analyser runs while any slot uses a slider (`widthWanted`). AgentData carries
+  the request and result (`bus::kVersion` 15); the Brain's `StereoChannel::userWidth` channels get no stereo proposal and count in
+  the sum as they play (`processedSidePower`).
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

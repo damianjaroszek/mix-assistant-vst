@@ -21,6 +21,11 @@ struct StereoChannel
     bool valid = false;
     SpectrumAnalyzer::Bands midDb {}, sideDb {}; // ERB, after the trim, before the stereo EQ
     int group = -1; // phase 25: its stem group (stemGroupForRole), -1 = none
+    // Phase 26: the Agent's width slider is in use. The channel keeps what it has (`current` plus
+    // `width`, which keep it in phase themselves) and counts in the sum as it plays.
+    bool userWidth = false;
+    StereoSettings current {};
+    WidthSettings width {};
 };
 
 // The measured sum, for the report and the view; planning works from the channels.

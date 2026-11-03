@@ -84,6 +84,9 @@ private:
     juce::Slider clipCeilingSlider, clipSoftnessSlider, evenAmountSlider, evenRefSlider;
     juce::Label cleanStatus, compStatus, clipStatus, evenStatus;
     juce::Label stereoLabel, stereoStatus;
+    // Phase 26: the width slider.
+    juce::Label widthLabel, widthFromLabel, widthStatusLabel, widthMonoMark, widthNeutralMark, widthMaxMark;
+    juce::Slider widthSlider, widthFromSlider;
     ma::ui::CoherenceView stereoView;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> compOnAttachment, clipOnAttachment, evenOnAttachment;
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>> chainAttachments;

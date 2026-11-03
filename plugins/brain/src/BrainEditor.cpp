@@ -605,10 +605,10 @@ void BrainEditor::timerCallback()
         if (chosen != mix.channels.end())
             for (size_t b = 0; b < channel.size(); ++b)
             {
-                // What the channel sends on: its side bells, plus the widener's delayed mid (phase 25).
+                // What the channel sends on: its side bells, the widener's delayed mid (phase 25) and its width slider (phase 26).
                 const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, static_cast<int>(b));
-                const double side = std::pow(10.0, (chosen->sideDb[b] + ma::sideResponseDb(chosen->data.stereo, hz)) / 10.0)
-                                    + ma::widenPowerRatio(chosen->data.stereo, hz) * std::pow(10.0, chosen->midDb[b] / 10.0);
+                const double side = ma::processedSidePower(chosen->data.stereo, chosen->data.width, hz, std::pow(10.0, chosen->midDb[b] / 10.0),
+                                                           std::pow(10.0, chosen->sideDb[b] / 10.0));
                 channel[b] = ma::coherence(chosen->midDb[b], 10.0 * std::log10(side + 1e-30));
             }
         stereoView.setBands(sum.data(), mix.master.valid, chosen != mix.channels.end() ? channel.data() : nullptr);

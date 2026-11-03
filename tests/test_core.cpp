@@ -16,6 +16,7 @@
 #include "ma/Resonance.h"
 #include "ma/Stereo.h"
 #include "ma/StereoPlanner.h"
+#include "ma/Width.h"
 #include "ma/StemReference.h"
 #include "ma/Sketch.h"
 #include "ma/EnergyMap.h"
@@ -2069,6 +2070,149 @@ void testWidth()
     check(none, "width: no references, no widener");
 }
 
+// Phase 26: the width slider.
+void testWidthSlider()
+{
+    constexpr double sr = 48000.0;
+    uint32_t seed = 777;
+    auto noise = [&seed]() { seed = seed * 1664525u + 1013904223u; return static_cast<float>(seed >> 8) / 8388608.0f - 1.0f; };
+    auto runShaper = [&](const ma::WidthSettings& width, bool stereoIn, double& monoError) {
+        ma::StereoShaper shaper;
+        shaper.prepare(sr);
+        shaper.setWidth(width);
+        ma::StereoAnalyzer analyser;
+        analyser.prepare(sr);
+        const int n = 512;
+        std::vector<float> l(static_cast<size_t>(n)), r(static_cast<size_t>(n)), mid(static_cast<size_t>(n));
+        monoError = 0.0;
+        for (int block = 0; block < static_cast<int>(6.0 * sr / n); ++block)
+        {
+            for (int i = 0; i < n; ++i)
+            {
+                l[static_cast<size_t>(i)] = 0.2f * noise();
+                r[static_cast<size_t>(i)] = stereoIn ? 0.2f * noise() : l[static_cast<size_t>(i)];
+                mid[static_cast<size_t>(i)] = 0.5f * (l[static_cast<size_t>(i)] + r[static_cast<size_t>(i)]);
+            }
+            float* channels[] { l.data(), r.data() };
+            shaper.process(channels, 2, n);
+            for (int i = 0; i < n; ++i)
+                monoError = std::max(monoError, static_cast<double>(std::abs(0.5f * (l[static_cast<size_t>(i)] + r[static_cast<size_t>(i)]) - mid[static_cast<size_t>(i)])));
+            if (block > 20)
+                analyser.process(l.data(), r.data(), n);
+        }
+        return analyser;
+    };
+    auto at = [](const ma::StereoAnalyzer& a, double hz) {
+        int best = 0;
+        for (int b = 0; b < 40; ++b)
+            if (std::abs(std::log(ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b) / hz))
+                < std::abs(std::log(ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, best) / hz)))
+                best = b;
+        return ma::coherence(a.averageMidDb()[static_cast<size_t>(best)], a.averageSideDb()[static_cast<size_t>(best)]);
+    };
+    {
+        // A wide part (uncorrelated L and R) through the slider at 100% scale: the low end goes mono, the top stays.
+        ma::WidthSettings w;
+        w.active = 1.0f;
+        w.fromHz = 150.0f;
+        double err = 0.0;
+        const auto a = runShaper(w, true, err);
+        std::printf("  width slider, as it is: %.2f at 50 Hz, %.2f at 4 kHz, mono error %.1e\n", at(a, 50.0), at(a, 4000.0), err);
+        check(err < 1e-5, "width slider: the mono sum stays exactly as it was");
+        check(at(a, 50.0) > 0.85, "width slider: the side under its crossover goes (the low end mono)");
+        check(std::abs(at(a, 4000.0)) < 0.15, "width slider: above the crossover the side is left alone at 100%");
+        w.scale = 0.0f;
+        const auto mono = runShaper(w, true, err);
+        check(at(mono, 4000.0) > 0.95 && err < 1e-5, "width slider: 0% is mono");
+        // A mono part with the slider's widener.
+        ma::WidthSettings wide;
+        wide.active = 1.0f;
+        wide.widenDb = -6.0f;
+        wide.delayMs = 6.3f;
+        const auto widened = runShaper(wide, false, err);
+        const double expected = (1.0 - std::pow(10.0, -0.6)) / (1.0 + std::pow(10.0, -0.6));
+        std::printf("  width slider widener: %.2f at 2 kHz (expected %.2f)\n", at(widened, 2000.0), expected);
+        checkNear(at(widened, 2000.0), expected, 0.08, "width slider: its widener makes the side it says");
+        check(err < 1e-5, "width slider: its widener leaves the mono sum alone");
+    }
+
+    auto flat = [](double db) { ma::SpectrumAnalyzer::Bands b {}; b.fill(db); return b; };
+    auto input = [&](double midDb, double sideDb, float request) {
+        ma::WidthInput c;
+        c.valid = true;
+        c.request = request;
+        c.midDb = flat(midDb);
+        c.sideDb = flat(sideDb);
+        return c;
+    };
+    auto worstAudible = [](const ma::WidthPlan& plan) {
+        double worst = 1.0;
+        for (int b = 0; b < 40; ++b)
+        {
+            const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+            if (hz >= 150.0 && hz <= 16000.0)
+                worst = std::min(worst, plan.coherenceAfter[static_cast<size_t>(b)]);
+        }
+        return worst;
+    };
+    {
+        const auto plans = ma::planWidth({ input(-20.0, -200.0, 200.0f), input(-20.0, -24.0, 200.0f), input(-20.0, -200.0, 100.0f),
+                                           input(-20.0, -24.0, 50.0f) });
+        std::printf("  width plan: mono at max reach %.2f widener %.1f dB worst %.2f; wide at max reach %.2f side x%.2f worst %.2f\n", plans[0].reach,
+                    plans[0].settings.widenDb, worstAudible(plans[0]), plans[1].reach, plans[1].settings.scale, worstAudible(plans[1]));
+        check(ma::widthOn(plans[0].settings) && plans[0].settings.widenDb > -6.0f, "width plan: a mono part at max gets the widener");
+        check(worstAudible(plans[0]) >= 0.18 && worstAudible(plans[0]) < 0.35, "width plan: max is about as wide as 0.2 allows");
+        check(worstAudible(plans[1]) >= 0.18, "width plan: an already wide part at max never goes under 0.2");
+        check(plans[1].reach < 1.0, "width plan: an already wide part has less room to widen");
+        check(!ma::widthOn(plans[2].settings), "width plan: 100% changes nothing");
+        check(std::abs(plans[3].settings.scale - 0.5f) < 1e-3 && worstAudible(plans[3]) > 0.43, "width plan: 50% halves the side");
+    }
+    {
+        // One band (around 5 kHz) out of phase in the part: the slider guards it even when only nudged.
+        auto c = input(-20.0, -26.0, 120.0f);
+        for (int b = 0; b < 40; ++b)
+        {
+            const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+            if (hz > 4000.0 && hz < 6500.0)
+                c.sideDb[static_cast<size_t>(b)] = -17.0;
+        }
+        const auto plans = ma::planWidth({ c });
+        int guards = 0;
+        for (const auto& g : plans[0].settings.guard)
+            if (std::abs(g.db) > 0.01f)
+            {
+                ++guards;
+                std::printf("  width plan guard: %.0f Hz %.1f dB Q %.1f\n", g.hz, g.db, g.q);
+            }
+        check(guards >= 1, "width plan: a band out of phase gets a guard");
+        check(worstAudible(plans[0]) >= 0.18, "width plan: the guard brings it back to 0.2");
+    }
+    {
+        // The sum: a wide part left alone and a mono part at max; together they would sink under 0.2.
+        auto widePart = input(-20.0, -21.0, 100.0f);
+        auto monoPart = input(-20.0, -200.0, 200.0f);
+        const auto alone = ma::planWidth({ monoPart });
+        const auto plans = ma::planWidth({ widePart, monoPart });
+        double worstSum = 1.0;
+        for (int b = 0; b < 40; ++b)
+        {
+            const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+            if (hz < 400.0 || hz > 16000.0)
+                continue;
+            const double m = 2.0 * std::pow(10.0, -2.0);
+            const double side = std::pow(10.0, -2.1)
+                                + ma::processedSidePower({}, plans[1].settings, hz, std::pow(10.0, -2.0), 0.0);
+            worstSum = std::min(worstSum, ma::coherence(10.0 * std::log10(m), 10.0 * std::log10(side)));
+        }
+        std::printf("  width sum: mono part reach alone %.2f, with the wide one %.2f (limited %d at %.0f Hz), sum worst %.2f\n", alone[0].reach,
+                    plans[1].reach, int(plans[1].limitedBySum), plans[1].sumLimitHz, worstSum);
+        check(plans[1].limitedBySum, "width sum: the sum narrows the slider");
+        check(worstSum >= 0.18, "width sum: no band of the sum under 0.2 because of a slider");
+        check(!ma::widthOn(plans[0].settings), "width sum: the part at 100% is not touched");
+    }
+    check(ma::widthDelayMs(0) != ma::widthDelayMs(1) && ma::widthDelayMs(1) != ma::widthDelayMs(2), "width: neighbouring channels get different delays");
+}
+
 void testMasterPreview()
 {
     constexpr double sr = 48000.0, pi = 3.14159265358979323846;
@@ -3116,6 +3260,7 @@ int main()
     testOneCorrection();
     testCentreZones();
     testWidth();
+    testWidthSlider();
     testSectionAutomation();
     testEnergyMap();
     testGhostNoise();
