@@ -130,6 +130,12 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   ghosts into drums (pulsed, host ppq) and the rest, publishes them through atomics, and `ghostAudible` = `listenGhosts` (not saved)
   && sketch active && transport playing && short-term within 4 dB of the drop average. Added after every measurement, before the
   playback simulator; report warning while on.
+  Phase 22 readability: one "Analizuj" (`BrainProcessor::analysisScope`: 1 = `proposeWholeMix`, 0 = `propose`) changes nothing; "Zastosuj (N)"
+  counts selected non-advisory items; `brain::StepPath` shows the next step and that button is highlighted; after apply/undo the editor
+  waits for `dropSeconds` to restart and reach `kMinimumDropSeconds`. `ReportItem::group` (mix / arrangement / setup): the view shows
+  non-good items by group, worst first, good ones folded. Tonal balance is red/amber only for regions EQ can fix (`carriedByAChannel`:
+  some channel within 24 dB of its own peak there); `chainAddsDb` (output minus heard, positive part) adds what an Agent's chain makes
+  (saturation, harmonics) to the sketch's channel spectra and that check. `overtoneSource` (bass ghosts only) advises saturation first.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

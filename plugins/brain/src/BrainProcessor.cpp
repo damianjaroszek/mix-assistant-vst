@@ -101,6 +101,43 @@ bool inMixSums(const MixSnapshot::Channel& channel)
     return channel.data.role != static_cast<std::int32_t>(ma::Role::bus);
 }
 
+// Phase 22: what a channel's own chain adds on top of its EQ (saturation, harmonics, attack), per band.
+// The bus spectra are pre-chain, so without it a saturated sine bass would still read as empty above its sub.
+double chainAddsDb(const MixSnapshot::Channel& channel, int band)
+{
+    const auto at = static_cast<size_t>(band);
+    if (!channel.outputValid || !channel.spectrumValid || channel.outputDb[at] < -150.0)
+        return 0.0;
+    return std::max(0.0, channel.outputDb[at] - std::max(channel.heardDb[at], -150.0));
+}
+
+// Phase 22: does any channel (bus left out) play in this region, within 24 dB of its own loudest band?
+// Then EQ (or a level move) can lift it; otherwise the hole is the arrangement's or the sound's.
+bool carriedByAChannel(const std::vector<MixSnapshot::Channel>& channels, const ma::TonalRegion& region)
+{
+    constexpr double kCarryDb = 24.0;
+    for (const auto& channel : channels)
+    {
+        if (!channel.spectrumValid || !inMixSums(channel))
+            continue;
+        double peak = -INFINITY, power = 0.0;
+        int count = 0;
+        for (int b = 0; b < ma::bus::kBands; ++b)
+        {
+            const double db = channel.heardDb[static_cast<size_t>(b)] + chainAddsDb(channel, b);
+            peak = std::max(peak, db);
+            if (b >= region.firstBand && b <= region.lastBand)
+            {
+                power += std::pow(10.0, db / 10.0);
+                ++count;
+            }
+        }
+        if (count > 0 && std::isfinite(peak) && 10.0 * std::log10(power / count + 1e-30) >= peak - kCarryDb)
+            return true;
+    }
+    return false;
+}
+
 int groupOfChannel(const MixSnapshot::Channel& channel)
 {
     return ma::stemGroupForRole(static_cast<ma::Role>(juce::jlimit(0, static_cast<int>(ma::Role::send), static_cast<int>(channel.data.role))));
@@ -1411,7 +1448,9 @@ void BrainProcessor::updateSketch()
         {
             const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
             const double p = found->second.power[static_cast<size_t>(b)] / static_cast<double>(dropUpdates);
+            // Phase 22: with what its chain adds, so a part filled by saturation is no longer a ghost.
             own.db[static_cast<size_t>(b)] = p > 1e-20 ? 10.0 * std::log10(p) + ma::cleanupResponseDb(channel.data.cleanup, hz) + ma::eqResponseDb(eq, hz)
+                                                             + chainAddsDb(channel, b)
                                                        : -200.0;
         }
         in.channels.push_back(own);
@@ -1481,7 +1520,8 @@ juce::String BrainProcessor::ghostName(const ma::SketchGhost& ghost)
     {
         case ma::StemGroup::drums:
             return r < 0 ? pl("perkusja") : r <= 1 ? pl("stopa") : r <= 3 ? pl("werbel albo clap") : pl("hi-haty, shakery");
-        case ma::StemGroup::bass: return r < 0 ? pl("bas") : r <= 1 ? pl("sub bas") : pl("górna część basu");
+        case ma::StemGroup::bass:
+            return r < 0 ? pl("bas") : r == 0 ? pl("sub bas") : r == 1 ? pl("dół basu (alikwoty nad subem)") : pl("górna część basu");
         case ma::StemGroup::vocals: return pl("wokal");
         case ma::StemGroup::music: break;
     }
@@ -1495,9 +1535,24 @@ juce::String BrainProcessor::ghostBrief(const ma::SketchGhost& ghost) const
     const auto name = ghostName(ghost);
     auto text = name.substring(0, 1).toUpperCase() + name.substring(1);
     if (ghost.region >= 0)
+    {
         text += pl(" w ") + hzText(ma::stemRegionEdgeHz(ghost.region)) + pl("–") + hzText(ma::stemRegionEdgeHz(ghost.region + 1)) + pl(": grupa ") + quoted(stemGroupName(ghost.group)) + pl(" ma tam ok. ")
                 + juce::String(juce::roundToInt(ghost.shortDb)) + pl(" dB mniej niż ") + (mix.sketch.arrangement.fromReferences ? pl("referencje") : pl("typowy drop"))
-                + pl(", a żaden jej kanał tam nie gra. Dograj partię, EQ tego nie zrobi");
+                + pl(", a żaden jej kanał tam nie gra. EQ tego nie zrobi");
+        // Phase 22: a channel of the group with its body just below (a sine bass under 90-250 Hz) can
+        // fill it with its own overtones; that comes before a new part.
+        bool saturated = false;
+        const auto source = overtoneSource(ghost, saturated);
+        if (source.isEmpty())
+            text += pl(". Dograj partię");
+        else if (saturated)
+            text += pl(". ") + quoted(source) + pl(" ma już saturację, a to pasmo dalej jest puste: mocniejszy drive, „Harmoniczne” "
+                                                    "albo druga warstwa basu (np. mid bas)");
+        else
+            text += pl(". Najpierw saturacja albo „Harmoniczne” na ") + quoted(source)
+                    + pl(": gra tuż niżej, więc jego alikwoty trafią w to pasmo („Analizuj” (cały łańcuch) dobierze saturację sam, "
+                         "gdy brzmienie jest za gładkie). Jeśli to nie wystarczy, dograj partię");
+    }
     else
     {
         text += pl(": ok. ") + juce::String(juce::roundToInt(-ghost.levelDb)) + pl(" dB ciszej niż cały drop (ważone uchem), głównie ")
@@ -1516,6 +1571,40 @@ juce::String BrainProcessor::ghostBrief(const ma::SketchGhost& ghost) const
             text += pl("; w referencjach gra też w sekcjach: ") + sections.joinIntoString(", ");
     }
     return text + ".";
+}
+
+// Phase 22: the channel of a region ghost's group whose loudest broad region sits one or two regions
+// below the ghost (so its 2nd to 4th harmonics land in it), not one that is meant to be dirty.
+juce::String BrainProcessor::overtoneSource(const ma::SketchGhost& ghost, bool& saturated) const
+{
+    saturated = false;
+    // Only the bass: a missing snare or pad is another part, not the kick's or the lead's overtones.
+    if (ghost.region <= 0 || ghost.group != static_cast<int>(ma::StemGroup::bass))
+        return {};
+    juce::String best;
+    double bestDb = -INFINITY;
+    for (const auto& channel : mix.channels)
+    {
+        if (!channel.spectrumValid || !inMixSums(channel) || groupOfChannel(channel) != ghost.group || channel.data.intentionalDrive != 0)
+            continue;
+        std::array<double, ma::kStemRegions> power {};
+        for (int b = 0; b < ma::bus::kBands; ++b)
+        {
+            const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+            for (int r = 0; r < ma::kStemRegions; ++r)
+                if (hz >= ma::stemRegionEdgeHz(r) && hz < ma::stemRegionEdgeHz(r + 1))
+                    power[static_cast<size_t>(r)] += std::pow(10.0, (channel.heardDb[static_cast<size_t>(b)] + chainAddsDb(channel, b)) / 10.0);
+        }
+        const auto loudest = static_cast<int>(std::max_element(power.begin(), power.end()) - power.begin());
+        const double db = 10.0 * std::log10(power[static_cast<size_t>(loudest)] + 1e-30);
+        if (loudest < ghost.region && ghost.region - loudest <= 2 && db > bestDb)
+        {
+            bestDb = db;
+            best = channel.name;
+            saturated = channel.data.saturation.on > 0.5f;
+        }
+    }
+    return best;
 }
 
 juce::String BrainProcessor::stemGroupName(int group)
@@ -1617,7 +1706,7 @@ void BrainProcessor::buildReport()
                 parts.add(part);
             }
             perBand.detail = pl("Przeciwfaza w ") + parts.joinIntoString("; ")
-                           + pl(". W mono te pasma osłabną. „Ustaw cały miks” zdejmie tam side na winnym kanale.");
+                           + pl(". W mono te pasma osłabną. „Analizuj” (cały łańcuch) zdejmie tam side na winnym kanale.");
         }
         report.push_back(perBand);
     }
@@ -1626,6 +1715,7 @@ void BrainProcessor::buildReport()
     {
         MixSnapshot::ReportItem item;
         item.title = pl("Agenci");
+        item.group = MixSnapshot::ReportGroup::setup;
         if (session->region() == nullptr)
         {
             item.status = Status::problem;
@@ -1696,6 +1786,7 @@ void BrainProcessor::buildReport()
         {
             MixSnapshot::ReportItem roles;
             roles.title = pl("Role kanałów");
+            roles.group = MixSnapshot::ReportGroup::setup;
             roles.status = Status::warning;
             roles.detail = pl("Bez roli: ") + joinNames(noRole)
                            + pl(". „Naucz poziom” w Agencie rozpozna instrument i ustawi rolę i priorytet, albo wybierz ją sam.");
@@ -1708,6 +1799,7 @@ void BrainProcessor::buildReport()
     {
         MixSnapshot::ReportItem item;
         item.title = pl("Tryb adaptacyjny");
+        item.group = MixSnapshot::ReportGroup::setup;
         const auto& a = adaptiveState;
         if (!a.running)
         {
@@ -1767,17 +1859,39 @@ void BrainProcessor::buildReport()
             }
             else
             {
+                // Phase 22: only what EQ can fix counts as a mix problem. An excess can always be cut;
+                // a hole only where some channel carries content to lift. A hole nothing plays in is
+                // the arrangement's or the sound's (a sine bass has nothing at 90-250 Hz to boost).
                 double worst = 0.0;
-                juce::StringArray parts;
+                juce::StringArray parts, unfixable;
                 for (const auto& region : regions)
                 {
+                    if (region.hole() && !carriedByAChannel(mix.channels, region))
+                    {
+                        if (unfixable.size() < 3)
+                            unfixable.add(rangeText(region));
+                        continue;
+                    }
                     worst = std::max(worst, std::abs(region.deviationDb));
                     if (parts.size() < 3)
                         parts.add(rangeText(region));
                 }
-                item.status = worst >= 3.0 ? Status::problem : Status::warning;
-                item.detail = (sketch ? pl("Z partiami-duchami: ") : juce::String()) + parts.joinIntoString(", ")
-                              + pl(". „Zaproponuj” podpowie, co zrobić.") + arrangementText;
+                const auto prefix = sketch ? pl("Z partiami-duchami: ") : juce::String();
+                const auto notMix = unfixable.isEmpty()
+                                        ? juce::String()
+                                        : (parts.isEmpty() ? juce::String() : pl(" ")) + pl("Poza zasięgiem EQ: ")
+                                              + unfixable.joinIntoString(", ")
+                                              + pl(" (nic tam nie gra: saturacja kanału, który ma tam alikwoty, albo nowa partia; widok „Aranż”).");
+                if (parts.isEmpty())
+                {
+                    item.status = Status::warning;
+                    item.detail = prefix + pl("EQ nie ma tu nic do zrobienia.") + notMix + arrangementText;
+                }
+                else
+                {
+                    item.status = worst >= 3.0 ? Status::problem : Status::warning;
+                    item.detail = prefix + parts.joinIntoString(", ") + pl(". „Analizuj” podpowie, co zrobić.") + notMix + arrangementText;
+                }
             }
         }
         report.push_back(item);
@@ -1788,6 +1902,7 @@ void BrainProcessor::buildReport()
     {
         MixSnapshot::ReportItem item;
         item.title = pl("Aranż (tryb szkicu)");
+        item.group = MixSnapshot::ReportGroup::arrangement;
         const auto source = mix.sketch.arrangement.fromReferences
                                 ? pl("referencji ") + quoted(juce::String::fromUTF8(currentStems.name.c_str()))
                                 : pl("typowego dropu house'u (bez referencji ze stemów)");
@@ -1807,11 +1922,11 @@ void BrainProcessor::buildReport()
             juce::StringArray names, briefs;
             for (const auto& ghost : mix.sketch.analysis.ghosts)
             {
-                names.add(ghostName(ghost));
+                names.addIfNotAlreadyThere(ghostName(ghost));
                 briefs.add(pl("• ") + ghostBrief(ghost));
             }
             item.detail = pl("Szkic, brakuje: ") + names.joinIntoString(", ") + pl(". Mózg wstawia za nie partie-duchy z ") + source
-                          + pl(": balans tonalny, proporcje grup i kolizje liczy z nimi, a „Ustaw cały miks” zostawia im miejsce i nie łata "
+                          + pl(": balans tonalny, proporcje grup i kolizje liczy z nimi, a „Analizuj” (cały łańcuch) zostawia im miejsce i nie łata "
                                "EQ-em dziur, które wypełni aranż.\n")
                           + briefs.joinIntoString("\n");
             juce::StringArray covers;
@@ -1821,7 +1936,7 @@ void BrainProcessor::buildReport()
                                + pl(" w ") + hzText(collision.lowHz) + pl("–") + hzText(collision.highHz) + " ("
                                + juce::String(juce::roundToInt(collision.score * 100.0)) + "%)");
             if (!covers.isEmpty())
-                item.detail += pl("\nJuż teraz: ") + covers.joinIntoString(", ") + pl(". „Ustaw cały miks” zrobi na to miejsce (do 3 dB).");
+                item.detail += pl("\nJuż teraz: ") + covers.joinIntoString(", ") + pl(". „Analizuj” (cały łańcuch) zrobi na to miejsce (do 3 dB).");
         }
         juce::StringArray added;
         if (!plannedOwners.empty())
@@ -1833,7 +1948,7 @@ void BrainProcessor::buildReport()
         {
             item.status = Status::warning;
             item.detail += (item.detail.isEmpty() ? juce::String() : pl("\n")) + pl("Doszły kanały: ") + joinNames(added)
-                           + pl(". Kliknij „Ustaw cały miks”, żeby plan objął je razem z resztą.");
+                           + pl(". Kliknij „Analizuj” (cały łańcuch), żeby plan objął je razem z resztą.");
         }
         report.push_back(item);
     }
@@ -1862,7 +1977,7 @@ void BrainProcessor::buildReport()
         {
             item.status = Status::problem;
             item.detail = pl("W basie znosi się z sidechainem: ") + joinNames(cancelling)
-                          + pl(". „Zaproponuj” odwróci polaryzację, porównaj „Przed / po”.");
+                          + pl(". „Analizuj” odwróci polaryzację, porównaj „Przed / po”.");
         }
         else if (!noSignal.isEmpty())
         {
@@ -1890,6 +2005,7 @@ void BrainProcessor::buildReport()
     {
         MixSnapshot::ReportItem item;
         item.title = pl("Stopa a tonacja");
+        item.group = MixSnapshot::ReportGroup::arrangement;
         const auto tuning = kickTuning();
         if (kick->data.statsValid == 0)
             item.detail = pl("Kliknij „Naucz poziom” na stopie: nauka mierzy, na jakiej nucie brzmi jej ogon.");
@@ -1947,12 +2063,12 @@ void BrainProcessor::buildReport()
             {
                 item.status = Status::problem;
                 item.detail = pl("Na telefonie i laptopie prawie znika: ") + joinNames(lost)
-                              + pl(". „Zaproponuj” dobierze kroki. Posłuchaj w „Odsłuch: Telefon”.");
+                              + pl(". „Analizuj” dobierze kroki. Posłuchaj w „Odsłuch: Telefon”.");
             }
             else if (!weak.isEmpty())
             {
                 item.status = Status::warning;
-                item.detail = pl("Na małych głośnikach słabnie: ") + joinNames(weak) + pl(". „Zaproponuj” dobierze kroki.");
+                item.detail = pl("Na małych głośnikach słabnie: ") + joinNames(weak) + pl(". „Analizuj” dobierze kroki.");
             }
             else
             {
@@ -2013,7 +2129,7 @@ void BrainProcessor::buildReport()
             else
             {
                 item.status = worst >= 3.0 ? Status::problem : Status::warning;
-                item.detail = parts.joinIntoString(", ") + pl(". „Ustaw cały miks” dopasuje poziomy grup i barwę szerokimi korekcjami.");
+                item.detail = parts.joinIntoString(", ") + pl(". „Analizuj” (cały łańcuch) dopasuje poziomy grup i barwę szerokimi korekcjami.");
             }
         }
         report.push_back(item);
@@ -2030,6 +2146,7 @@ void BrainProcessor::buildReport()
         const auto text = sectionText(section);
         MixSnapshot::ReportItem item;
         item.title = text.title;
+        item.group = MixSnapshot::ReportGroup::arrangement;
         const bool anyDrums = std::any_of(mix.channels.begin(), mix.channels.end(),
                                           [](const auto& c) { return groupOfChannel(c) == static_cast<int>(ma::StemGroup::drums); });
         if (section == ma::StemSection::breakdown && !anyDrums)
@@ -4131,8 +4248,8 @@ juce::String BrainProcessor::previewVerdict(MixSnapshot::Status& status) const
     const auto base = pl("Podciągnięty do ") + targetText + pl(" limiter ścina w głośnej części do ")
                       + juce::String(s.typicalReductionDb, 1) + pl(" dB (najwięcej ") + juce::String(s.maxReductionDb, 1) + pl(" dB)");
     const auto peaks = loudestPeakChannel();
-    const auto advice = (peaks.isNotEmpty() ? pl(" Najwyższe szczyty daje ") + quoted(peaks) + pl(": clipper na nim („Ustaw cały miks”)")
-                                            : pl(" Clipper na kanałach z najwyższymi szczytami („Ustaw cały miks”)"))
+    const auto advice = (peaks.isNotEmpty() ? pl(" Najwyższe szczyty daje ") + quoted(peaks) + pl(": clipper na nim („Analizuj”, cały łańcuch)")
+                                            : pl(" Clipper na kanałach z najwyższymi szczytami („Analizuj”, cały łańcuch)"))
                         + pl(" albo niższy cel, np. ") + juce::String(target - 2.0, 1) + " LUFS.";
     // A limiter working that hard does not even get there.
     const auto shortOf = std::isfinite(s.outputLufs) && s.outputLufs < target - 1.0
@@ -4190,11 +4307,30 @@ MixSnapshot::ReportItem BrainProcessor::energyItem() const
     using Status = MixSnapshot::Status;
     MixSnapshot::ReportItem item;
     item.title = pl("Przebieg utworu (mapa energii)");
+    item.group = MixSnapshot::ReportGroup::arrangement;
     const auto& e = mix.energy;
     if (!e.comparison.valid)
     {
         item.detail = pl("Puść utwór od początku przez pierwszy drop (FL w trybie utworu, żeby Mózg znał pozycję).");
         return item;
+    }
+    // Phase 22: a loop of the drop (pattern mode, or only the drop played) has no course to judge:
+    // every heard second is at the drop's level, so "first drop at bar 1" would mean nothing.
+    {
+        int heard = 0, under = 0;
+        for (const double level : e.ours.levelDb)
+            if (std::isfinite(level))
+            {
+                ++heard;
+                under += level < -6.0 ? 1 : 0;
+            }
+        if (under < 4)
+        {
+            item.detail = pl("Słyszę tylko drop (") + juce::String(heard)
+                          + pl(" s, nic wyraźnie ciszej), więc przebiegu utworu nie ma z czego ocenić. Puść całość od początku "
+                               "w trybie utworu (Song), przez intro, build i pierwszy drop.");
+            return item;
+        }
     }
     const auto& c = e.comparison;
     const auto& r = e.references;

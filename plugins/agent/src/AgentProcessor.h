@@ -150,14 +150,14 @@ public:
     static constexpr const char* satDriveId = "satDrive";
     static constexpr const char* satMixId = "satMix";
     static constexpr const char* intentionalDriveId = "intentionalDrive";
-    // The mix engineer's chain (phase 7), set by "Ustaw cały miks" in the Brain or by hand.
+    // The mix engineer's chain (phase 7), set by "Analizuj" (whole chain) in the Brain or by hand.
     static constexpr const char* hpfId = "cleanHpf";
     static constexpr const char* monoBelowId = "cleanMono";
     static constexpr const char* mudFreqId = "mudFreq";
     static constexpr const char* mudGainId = "mudGain";
     static constexpr const char* mudQId = "mudQ";
     // Resonance cuts: frequency, gain, Q per notch. Plain strings, so the audio thread reads them without allocating.
-    // Mid-side EQ (phase 8): bells on the side signal, set by "Ustaw cały miks".
+    // Mid-side EQ (phase 8): bells on the side signal, set by "Analizuj" (whole chain).
     static constexpr const char* sideBellIds[4][3] { { "side1Freq", "side1Gain", "side1Q" },
                                                      { "side2Freq", "side2Gain", "side2Q" },
                                                      { "side3Freq", "side3Gain", "side3Q" },

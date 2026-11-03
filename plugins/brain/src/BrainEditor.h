@@ -68,7 +68,15 @@ private:
     juce::String shownTarget;
 
     juce::Label proposalStatus;
-    juce::TextButton proposeButton, wholeMixButton, applyButton, undoButton, compareButton;
+    // Phase 22: one "Analizuj" (changes nothing) with its scope, then "Zastosuj (N)"; the step path says
+    // which comes next and the next step's button is the highlighted one.
+    juce::ComboBox scopeBox;
+    juce::TextButton analyseButton, applyButton, undoButton, compareButton;
+    brain::StepPath stepPath;
+    bool measuringEffect = false; // after apply or undo, until the drop has been heard again
+    bool effectReset = false;     // the Brain's drop measurement has started over since then
+    juce::String effectNote;      // what was done, for the status once it is measured
+    int highlighted = -1;
     juce::ToggleButton adaptiveButton;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> adaptiveAttachment;
     brain::ProposalView proposalView;
