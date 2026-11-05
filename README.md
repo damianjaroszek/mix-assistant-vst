@@ -240,6 +240,22 @@ proponuje mu zmian stereo i pisze w werdykcie, że szerokość jest ustawiona r�
   się względem niej, najwyżej 3 dB na analizę. Głośność całości dopasuje cel mastera. Po wgraniu referencji ze stemów
   proporcje biorą się z nich.
 
+### Ustępowanie bez kabla i dopracowanie (faza 30)
+
+- Kolizję, której EQ ani mały krok poziomu nie usuną (np. jasny bas nad leadem w 1-4 kHz), Mózg rozwiązuje dynamicznie:
+  kanał zasłaniający przycisza dzwonem zakres zasłanianego tylko wtedy, gdy ten gra (do 6 dB, głębokość dobrana z
+  przewidywania maskowania). Nie trzeba kabla sidechain w FL: Agent zasłanianego kanału mierzy swoje wyjście w ośmiu
+  pasmach oktawowych i podaje obwiednię przez wspólną pamięć, a Agent zasłaniający czyta ją co blok. Każdy kanał może tak
+  ustępować dwóm innym; widać to w Agencie na karcie „EQ i ustępowanie” („Ustępowanie bez kabla”, przycisk „Wyłącz”).
+- Ustępowanie na stopę (bas, pady pod stopą) też działa bez kabla, gdy na wejściu sidechain nie ma sygnału. Podłączony
+  kabel ma pierwszeństwo, bo jest co do próbki dokładny; bez niego dip spóźnia się najwyżej o jeden blok bufora.
+- Gdy Mózg planuje proporcje grup, kolizje nie dostają już osobnych kroków poziomu kanału (następna analiza i tak
+  oddawała grupę na miejsce), tylko ustępowanie dynamiczne.
+- „Dopracuj sam” (pod przyciskami, domyślnie włączone): po „Zastosuj” Mózg mierzy drop jeszcze raz i, jeśli coś zostało
+  (np. clipper pod głośny master, kolizja), sam analizuje i stosuje, najwyżej 2 rundy. Odznaczone pozycje zostają
+  odznaczone. „Analizuj”, „Cofnij” albo „Przed / po” przerywają. Jedno „Cofnij” cofa wszystko razem z rundami.
+- Nowy projekt bierze cel tonalny używany ostatnio (`last-target.txt` w folderze celów).
+
 ### Przed masteringiem (Ozone)
 
 „Cel mastera” w Mózgu to głośność, do której Ozone podciągnie master (domyślnie -8 LUFS). Mózg w tle robi

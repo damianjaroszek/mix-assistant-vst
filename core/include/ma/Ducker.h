@@ -40,6 +40,12 @@ public:
 
     // `main` is processed in place; `sidechain` may be null (then nothing ducks).
     void process(float* const* main, int numMain, const float* const* sidechain, int numSidechain, int numSamples);
+    // Phase 30: without a cable, the key's level for this block comes over the bus (ma::KeyFollower,
+    // octave bands around the duck). No absolute threshold then: the dip follows the key against its
+    // own recent loud level (full depth within kKeyedFullUnderDb of it, nothing kKeyedStartUnderDb under).
+    static constexpr double kKeyedStartUnderDb = 18.0;
+    static constexpr double kKeyedFullUnderDb = 6.0;
+    void processKeyed(float* const* main, int numMain, double keyDb, int numSamples);
 
     double reductionDb() const { return peakReductionDb; } // deepest dip in the last process(), >= 0
     double sidechainDb() const { return sidechainLevelDb; } // detector level in the band
@@ -57,6 +63,8 @@ private:
     double peakReductionDb = 0.0;
     double sidechainLevelDb = -200.0;
     double appliedGain = 1.0;
+    double keyReferenceDb = -200.0; // phase 30: the key's recent loud level
+    void applyReduction(float* const* main, int channels, int start, int n);
 };
 
 } // namespace ma

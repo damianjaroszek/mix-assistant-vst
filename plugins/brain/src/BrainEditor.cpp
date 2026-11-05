@@ -121,6 +121,7 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     compareButton.setTooltip(pl("Słuchaj wersji sprzed „Zastosuj”, z wyrównaną głośnością."));
 
     analyseButton.onClick = [this] {
+        processor.stopRefining();
         const bool chain = processor.analysisScope == 1;
         if (chain)
             processor.proposeWholeMix();
@@ -132,7 +133,7 @@ BrainEditor::BrainEditor(BrainProcessor& p)
         timerCallback();
     };
     applyButton.onClick = [this] {
-        const int sent = processor.applySelected();
+        const int sent = processor.applyByUser();
         if (sent > 0)
         {
             measuringEffect = true;
@@ -161,6 +162,12 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     adaptiveButton.setColour(juce::ToggleButton::textColourId, colours::quiet);
     adaptiveAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         processor.parameters, BrainProcessor::adaptiveId, adaptiveButton);
+    autoRefineButton.setButtonText(pl("Dopracuj sam"));
+    autoRefineButton.setTooltip(pl("Po „Zastosuj” Mózg mierzy drop jeszcze raz i, jeśli coś zostało (np. clipper pod głośny master, "
+                                   "kolizja), analizuje i stosuje sam, najwyżej 2 rundy. Jedno „Cofnij” cofa wszystko."));
+    autoRefineButton.setColour(juce::ToggleButton::textColourId, colours::quiet);
+    autoRefineAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        processor.parameters, BrainProcessor::autoRefineId, autoRefineButton);
 
     proposalViewport.setViewedComponent(&proposalView, false);
     proposalViewport.setScrollBarsShown(true, false);
@@ -265,7 +272,7 @@ BrainEditor::BrainEditor(BrainProcessor& p)
              &integratedValue, &shortTermLabel, &shortTermValue, &truePeakLabel, &truePeakValue, &plrLabel, &plrValue,
              &lowCorrelationLabel, &lowCorrelationValue, &fullCorrelationLabel, &fullCorrelationValue, &ceilingLabel,
              &ceilingSlider, &targetLabel, &targetSlider, &tabs, &scopeBox, &analyseButton, &applyButton, &undoButton,
-             &compareButton, &proposalStatus, &adaptiveButton, &stepPath })
+             &compareButton, &proposalStatus, &adaptiveButton, &autoRefineButton, &stepPath })
         addAndMakeVisible(c);
     const auto page = [this](Tab tab, const juce::String& name, const juce::String& tooltip,
                              std::initializer_list<juce::Component*> children, std::function<void(juce::Rectangle<int>)> layout) {
@@ -635,7 +642,7 @@ void BrainEditor::timerCallback()
         line.text = processor.describeIssue(issue);
         line.score = static_cast<float>(issue.score);
         const auto handling = processor.issueHandling(issue);
-        line.ducked = handling == BrainProcessor::IssueHandling::ducked;
+        line.ducked = handling == BrainProcessor::IssueHandling::ducked || handling == BrainProcessor::IssueHandling::unmasked;
         line.cutAtLimit = handling == BrainProcessor::IssueHandling::cutAtLimit;
         line.settled = handling == BrainProcessor::IssueHandling::levelStep || handling == BrainProcessor::IssueHandling::settled;
         line.masker = mix.channels[static_cast<size_t>(issue.masker)].owner;
@@ -694,6 +701,14 @@ void BrainEditor::timerCallback()
         applyButton.setColour(juce::TextButton::buttonColourId, next == 1 ? colours::accent.darker(0.5f) : colours::panel);
     }
 
+    // Phase 30: while the Brain refines by itself, it tells where it is.
+    const auto refineNote = processor.refineStatus();
+    if (refineNote.isNotEmpty())
+    {
+        measuringEffect = false;
+        if (processor.isRefining())
+            stepPath.setState(3, pl("dopracowuję sam"));
+    }
     if (processor.isComparing())
     {
         const double gain = processor.compareGainDb();
@@ -701,6 +716,11 @@ void BrainEditor::timerCallback()
                                                    : pl("Słychać wersję PRZED. Mierzę głośność, wyrównanie za kilka sekund..."),
                                juce::dontSendNotification);
         proposalStatus.setColour(juce::Label::textColourId, colours::warning);
+    }
+    else if (refineNote.isNotEmpty())
+    {
+        proposalStatus.setText(refineNote, juce::dontSendNotification);
+        proposalStatus.setColour(juce::Label::textColourId, processor.isRefining() ? colours::accent : colours::good);
     }
     else if (measuringEffect)
     {
@@ -779,7 +799,9 @@ void BrainEditor::resized()
     area.removeFromTop(8);
 
     auto actions = area.removeFromBottom(28);
-    stepPath.setBounds(area.removeFromBottom(20));
+    auto steps = area.removeFromBottom(20);
+    autoRefineButton.setBounds(steps.removeFromRight(150));
+    stepPath.setBounds(steps);
     scopeBox.setBounds(actions.removeFromLeft(130));
     actions.removeFromLeft(4);
     analyseButton.setBounds(actions.removeFromLeft(100));

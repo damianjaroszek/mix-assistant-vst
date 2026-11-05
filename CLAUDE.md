@@ -187,6 +187,20 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   plans group levels against `typicalLevelTarget(present)` (Sketch.h: typicalArrangement levels +-1.5 dB, shifted so the present
   groups sum to the whole; level corridors only, no profiles: `planStemLevels` now needs only valid level corridors) and
   `anchorStemLevels` keeps the drums at 0 dB.
+  Phase 30 no cable (`ma/Unmask.h`): `KeyFollower` (output, mono, 8 octave bands 125 Hz-16 kHz, 3 ms mean square then 5/25 ms
+  attack/release) writes into the slot's `KeyFeed` (atomics outside the seqlock, `keyId`/`keySinceMs` there too) while another Agent
+  `wantKey`s it (3 s, renewed each tick); `readKey` treats > 250 ms old as silence. `AgentData::keyId` is kept in the project (a clone
+  that loads the same id while the original runs takes a new one). `Unmasker`: up to `kMaxUnmask` 2 dips (bell, depth, key bands), the
+  key against its own recent loud level (full 6 dB under it, none 20 dB under), 10/150 ms; after the duck. `Ducker::processKeyed` is the
+  duck without a cable (when no sidechain signal in 3 s; `duckKey`). Dips and keys are part of `Command` (`unmask`, `unmaskKey`,
+  `duckKey`), the A/B backup and `brainSet` (packed dynamics 72 floats, keys beside them), `ToolBit::toolUnmask`; `bus::kVersion` 16.
+  Brain: `planUnmask` (in `planCollisionSteps`, on the predicted mix) for collisions EQ and a <= 2 dB step do not clear, and for all of
+  them while `groupLevelsPlanned` (no channel level steps then); never kick/percussion as masker; the bell over the masked channel's loudest
+  part of the range (within 12 dB, 150 Hz-10 kHz), smallest of 2-6 dB that clears, else 6 dB if the score drops >= 0.15.
+  `IssueHandling::unmasked`; kick ducks carry `duckKey` and count as ducked with `duckKeyFound`. `CommandKind::refine` = apply that keeps
+  an existing backup; `applyByUser` starts `Refine` (param `autoRefine`, default on): after the drop (and preview, <= 15 s more) is
+  measured again, analyse with the same scope, keep the user's unticked items unticked, apply, at most `kRefineRounds` 2, stop when the
+  changes repeat. The last tonal target is remembered (`last-target.txt`) and selected in a project without one.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

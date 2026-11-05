@@ -12,6 +12,7 @@
 #include "ma/Instrument.h"
 #include "ma/Saturator.h"
 #include "ma/Transient.h"
+#include "ma/Unmask.h"
 #include "ma/LoudnessMeter.h"
 #include "ma/SpectrumAnalyzer.h"
 
@@ -205,6 +206,17 @@ public:
     static constexpr const char* evenOnId = "evenOn";
     static constexpr const char* evenAmountId = "evenAmount";
     static constexpr const char* evenRefId = "evenRef";
+    // Phase 30: giving way to other channels without a cable, set by "Analizuj" in the Brain.
+    static constexpr const char* unmaskIds[ma::kMaxUnmask][5] { { "unmask1On", "unmask1Freq", "unmask1Q", "unmask1Depth", "unmask1Bands" },
+                                                                { "unmask2On", "unmask2Freq", "unmask2Q", "unmask2Depth", "unmask2Bands" } };
+    struct UnmaskStatus
+    {
+        bool on = false;
+        ma::UnmaskSettings settings {};
+        juce::String keyName;   // empty while the key's Agent is not found
+        double reductionDb = 0.0; // deepest over the last second
+    };
+    UnmaskStatus unmaskStatus(int index) const; // message thread
     double compressorReductionDb() const { return compShownDb; }
     double clipperDb() const { return clipShownDb; }
     double evenerGainDb() const { return evenerGain.load(); }
@@ -228,6 +240,11 @@ public:
         ma::BassEvenerSettings evener {};
         ma::StereoSettings stereo {};
         ma::SaturationSettings saturation {};
+        // Phase 30: dips for other channels; the keys (their AgentData::keyId) are not floats, so they
+        // stay out of the packed copies and travel next to them.
+        std::array<ma::UnmaskSettings, ma::kMaxUnmask> unmask {};
+        std::array<std::uint64_t, ma::kMaxUnmask> unmaskKey {};
+        std::uint64_t duckKey = 0; // phase 30: the duck's key without a cable
     };
     DynamicState currentDynamics() const;
     // Phase 23: tools the Brain set that are still as it left them, and tools changed by hand since
@@ -236,6 +253,8 @@ public:
     void toolOrigins(int& brain, int& changed, int& manual) const;
     bool sidechainConnected() const { return sidechainSeen; }
     double sidechainLevelDb() const { return sidechainShownDb; }
+    // Phase 30: the Agent the duck listens to without a cable (empty while none, or a cable is in).
+    juce::String duckKeyChannel() const { return sidechainSeen ? juce::String() : duckKeyName; }
     double duckReductionDb() const { return reductionShownDb; }
     double effectiveReleaseMs() const { return releaseInUse.load(); }
     double hostTempo() const { return hostBpm.load(); }
@@ -258,6 +277,7 @@ private:
     void setDynamics(const DynamicState& state);
     void updateDynamicMeters();
     void planWidthNow(ma::bus::Region& region, std::uint64_t now);
+    void updateKeys(ma::bus::Region& region, std::uint64_t now); // phase 30, message thread
     ma::WidthSettings liveWidth() const; // audio thread
 
     std::atomic<float>* trimParam = nullptr;
@@ -267,6 +287,23 @@ private:
     std::array<std::array<std::atomic<float>*, 3>, ma::kEqBands> eqParams {}; // freq, gain, q
 
     ma::Ducker ducker;
+    // Phase 30: the dips, the key this channel publishes for others, and where the keys are.
+    ma::Unmasker unmasker;
+    ma::KeyFollower keyFollower;
+    std::array<std::atomic<std::uint64_t>, ma::kMaxUnmask> unmaskKeyNow {}; // what currentDynamics() reports
+    std::array<std::atomic<int>, ma::kMaxUnmask> unmaskSlot {}, backupUnmaskSlot {}; // -1 = not found
+    std::atomic<std::uint64_t> duckKeyNow { 0 };
+    std::atomic<int> duckSlot { -1 }, backupDuckSlot { -1 };
+    std::atomic<bool> cableActive { false }; // a sidechain cable brought signal in the last seconds
+    juce::String duckKeyName;                // message thread
+    std::atomic<int> audioSlot { -1 };       // this Agent's slot, for the audio thread
+    std::atomic<std::uint64_t> keyId { 0 };  // kept in the project
+    std::uint64_t keySinceMs = 0;            // message thread
+    std::array<std::atomic<float>, ma::kMaxUnmask> unmaskHold {};
+    std::array<std::array<float, 10>, ma::kMaxUnmask> unmaskHistory {};
+    std::array<double, ma::kMaxUnmask> unmaskShownDb {};
+    std::array<juce::String, ma::kMaxUnmask> unmaskKeyName; // message thread
+    int keyTick = 0;
     ma::HarmonicEnhancer harmonics;
     ma::TransientEnhancer transients;
     ma::Saturator saturator;
@@ -363,8 +400,8 @@ private:
     std::atomic<float> backupTrimAudio { 0.0f };
     std::array<std::array<std::atomic<float>, 3>, ma::kEqBands> backupEqAudio {};
     // DuckSettings (8), sync, polarity, harmonics (3), transients (3), cleanup (5), compressor (7), clipper (3), evener (3)
-    // stereo (12 + the widener's 3, phase 25), saturation (4)
-    static constexpr int kDynamicValues = 62;
+    // stereo (12 + the widener's 3, phase 25), saturation (4), unmask (2 x 5, phase 30)
+    static constexpr int kDynamicValues = 72;
     std::array<std::atomic<float>, kDynamicValues> backupDynamicsAudio {};
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(AgentProcessor)

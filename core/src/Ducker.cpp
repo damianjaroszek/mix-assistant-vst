@@ -58,6 +58,7 @@ void Ducker::reset()
     peakReductionDb = 0.0;
     sidechainLevelDb = -200.0;
     appliedGain = 1.0;
+    keyReferenceDb = -200.0;
 }
 
 void Ducker::setSettings(const DuckSettings& newSettings)
@@ -125,32 +126,65 @@ void Ducker::process(float* const* main, int numMain, const float* const* sidech
         const double amount = std::clamp((envelopeDb - settings.thresholdDb) / kKneeDb, 0.0, 1.0);
         lastReductionDb = amount * settings.depthDb;
         peakReductionDb = std::max(peakReductionDb, lastReductionDb);
-
-        if (whole)
-        {
-            const double target = std::pow(10.0, -lastReductionDb / 20.0);
-            const double step = (target - appliedGain) / n;
-            for (int i = start; i < start + n; ++i)
-            {
-                appliedGain += step;
-                for (int c = 0; c < channels; ++c)
-                    main[c][i] = static_cast<float>(main[c][i] * appliedGain);
-            }
-        }
-        else
-        {
-            const auto bell = Biquad::peaking(sampleRate, std::clamp(static_cast<double>(settings.hz), 20.0, 0.45 * sampleRate),
-                                              -lastReductionDb, std::max(0.3, static_cast<double>(settings.q)));
-            for (int c = 0; c < channels; ++c)
-            {
-                auto& f = dip[static_cast<size_t>(c)];
-                copyCoefficients(f, bell);
-                for (int i = start; i < start + n; ++i)
-                    main[c][i] = static_cast<float>(f.process(main[c][i]));
-            }
-        }
+        applyReduction(main, channels, start, n);
     }
     sidechainLevelDb = 20.0 * std::log10(std::max(peakEnvelope * std::sqrt(2.0), 1e-10));
+}
+
+void Ducker::applyReduction(float* const* main, int channels, int start, int n)
+{
+    if (settings.wholeSignal > 0.5f)
+    {
+        const double target = std::pow(10.0, -lastReductionDb / 20.0);
+        const double step = (target - appliedGain) / n;
+        for (int i = start; i < start + n; ++i)
+        {
+            appliedGain += step;
+            for (int c = 0; c < channels; ++c)
+                main[c][i] = static_cast<float>(main[c][i] * appliedGain);
+        }
+        return;
+    }
+    const auto bell = Biquad::peaking(sampleRate, std::clamp(static_cast<double>(settings.hz), 20.0, 0.45 * sampleRate), -lastReductionDb,
+                                      std::max(0.3, static_cast<double>(settings.q)));
+    for (int c = 0; c < channels; ++c)
+    {
+        auto& f = dip[static_cast<size_t>(c)];
+        copyCoefficients(f, bell);
+        for (int i = start; i < start + n; ++i)
+            main[c][i] = static_cast<float>(f.process(main[c][i]));
+    }
+}
+
+void Ducker::processKeyed(float* const* main, int numMain, double keyDb, int numSamples)
+{
+    peakReductionDb = 0.0;
+    if (settings.on <= 0.5f)
+    {
+        lastReductionDb = 0.0;
+        appliedGain = 1.0;
+        keyReferenceDb = -200.0;
+        return;
+    }
+    // The key's recent loud level: jumps up with it, falls 1 dB a second.
+    if (keyDb > keyReferenceDb)
+        keyReferenceDb = keyDb;
+    else if (keyReferenceDb > -150.0)
+        keyReferenceDb -= numSamples / sampleRate;
+    const double amount = keyDb <= -150.0 || keyReferenceDb <= -150.0
+                              ? 0.0
+                              : std::clamp((keyDb - (keyReferenceDb - kKeyedStartUnderDb)) / (kKeyedStartUnderDb - kKeyedFullUnderDb), 0.0, 1.0);
+    const double target = amount * settings.depthDb;
+    sidechainLevelDb = keyDb + 3.0; // as the cable's detector would read a tone (peak, not RMS)
+    const int channels = std::min(numMain, kMaxChannels);
+    for (int start = 0; start < numSamples; start += kControlBlock)
+    {
+        const int n = std::min(kControlBlock, numSamples - start);
+        const double k = std::pow(target > lastReductionDb ? attackCoeff : releaseCoeff, n);
+        lastReductionDb = k * lastReductionDb + (1.0 - k) * target;
+        peakReductionDb = std::max(peakReductionDb, lastReductionDb);
+        applyReduction(main, channels, start, n);
+    }
 }
 
 } // namespace ma

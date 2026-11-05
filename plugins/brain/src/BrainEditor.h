@@ -78,8 +78,8 @@ private:
     bool effectReset = false;     // the Brain's drop measurement has started over since then
     juce::String effectNote;      // what was done, for the status once it is measured
     int highlighted = -1;
-    juce::ToggleButton adaptiveButton;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> adaptiveAttachment;
+    juce::ToggleButton adaptiveButton, autoRefineButton;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> adaptiveAttachment, autoRefineAttachment;
     brain::ProposalView proposalView;
     juce::Viewport proposalViewport;
     void layoutProposal();

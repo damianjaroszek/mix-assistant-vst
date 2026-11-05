@@ -40,6 +40,12 @@ void initialise(Region& region)
             slot.data = AgentData {};
             slot.commandSequence.store(0);
             slot.command = Command {};
+            slot.key.wantedUntilMs.store(0);
+            slot.key.stampMs.store(0);
+            slot.key.keyId.store(0);
+            slot.key.keySinceMs.store(0);
+            for (auto& level : slot.key.levelDb)
+                level.store(kKeySilentDb);
         }
         region.header.magic.store(kMagic);
     }
@@ -137,6 +143,38 @@ bool readCommand(const Slot& slot, Command& out)
             return before != 0;
     }
     return false;
+}
+
+void wantKey(Slot& slot, std::uint64_t nowMs)
+{
+    const auto until = nowMs + kKeyWantedMs;
+    auto current = slot.key.wantedUntilMs.load(std::memory_order_relaxed);
+    while (current < until && !slot.key.wantedUntilMs.compare_exchange_weak(current, until, std::memory_order_relaxed))
+    {
+    }
+}
+
+bool keyWanted(const Slot& slot, std::uint64_t nowMs)
+{
+    return nowMs < slot.key.wantedUntilMs.load(std::memory_order_relaxed);
+}
+
+void writeKey(Slot& slot, const float* levelDb, std::uint64_t nowMs)
+{
+    for (int b = 0; b < kKeyBands; ++b)
+        slot.key.levelDb[b].store(levelDb[b], std::memory_order_relaxed);
+    slot.key.stampMs.store(nowMs, std::memory_order_release);
+}
+
+double readKey(const Slot& slot, std::int32_t bands, std::uint64_t nowMs)
+{
+    const auto stamp = slot.key.stampMs.load(std::memory_order_acquire);
+    if (stamp == 0 || (nowMs > stamp && nowMs - stamp > kKeyStaleMs))
+        return kKeySilentDb;
+    float levels[kKeyBands];
+    for (int b = 0; b < kKeyBands; ++b)
+        levels[b] = slot.key.levelDb[b].load(std::memory_order_relaxed);
+    return keyLevelDb(levels, bands);
 }
 
 } // namespace ma::bus

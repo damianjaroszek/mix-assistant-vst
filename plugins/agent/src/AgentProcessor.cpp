@@ -18,6 +18,17 @@ const juce::Identifier statsProperty { "stats" };
 const juce::Identifier learnedProperty { "learned" };
 const juce::Identifier brainSetProperty { "brainSet" }; // phase 23: what the Brain last set // phase 22: the learn pass's level and true peak
 const juce::Identifier resonancesProperty { "resonances" };
+const juce::Identifier keyIdProperty { "keyId" };          // phase 30: how other Agents find this channel
+const juce::Identifier unmaskKeysProperty { "unmaskKeys" }; // phase 30: the channels its dips give way to
+const juce::Identifier duckKeyProperty { "duckKey" };       // phase 30: the duck's key without a cable
+
+std::uint64_t newKeyId()
+{
+    std::uint64_t id = 0;
+    while (id == 0)
+        id = static_cast<std::uint64_t>(juce::Random::getSystemRandom().nextInt64());
+    return id;
+}
 
 float toShared(double db)
 {
@@ -42,7 +53,9 @@ void take(const float*& in, Settings& settings)
 }
 
 // Phase 25: 62 since the stereo settings carry the widener (3 floats after the side bells).
-constexpr size_t kPackedDynamics = 62;
+// Phase 30: 72 with the two dips at the end.
+constexpr size_t kPackedDynamics = 72;
+constexpr size_t kPackedBeforeUnmask = 62;
 constexpr size_t kPackedBeforeWidener = 59;
 
 std::array<float, kPackedDynamics> packDynamics(const AgentProcessor::DynamicState& s)
@@ -60,6 +73,7 @@ std::array<float, kPackedDynamics> packDynamics(const AgentProcessor::DynamicSta
     put(out, s.evener);
     put(out, s.stereo);
     put(out, s.saturation);
+    put(out, s.unmask);
     jassert(out == v.data() + v.size());
     return v;
 }
@@ -79,6 +93,7 @@ AgentProcessor::DynamicState unpackDynamics(const std::array<float, kPackedDynam
     take(in, s.evener);
     take(in, s.stereo);
     take(in, s.saturation);
+    take(in, s.unmask);
     return s;
 }
 
@@ -111,6 +126,11 @@ bool anyOn(const ma::CleanupSettings& c)
 bool anyOn(const ma::StereoSettings& st)
 {
     return ma::widenOn(st) || std::any_of(st.side.begin(), st.side.end(), [](const auto& b) { return std::abs(b.db) > 0.05f; });
+}
+
+bool anyOn(const std::array<ma::UnmaskSettings, ma::kMaxUnmask>& u)
+{
+    return std::any_of(u.begin(), u.end(), [](const auto& d) { return ma::unmaskOn(d); });
 }
 
 template <typename Settings>
@@ -147,6 +167,7 @@ void toolBits(const ma::EqSettings& eq, const AgentProcessor::DynamicState& d, b
     compareTool(d.duck, setDynamics.duck, setValid, ma::bus::toolDuck, same, changed, manual);
     compareTool(d.harmonics, setDynamics.harmonics, setValid, ma::bus::toolHarmonics, same, changed, manual);
     compareTool(d.transients, setDynamics.transients, setValid, ma::bus::toolTransients, same, changed, manual);
+    compareTool(d.unmask, setDynamics.unmask, setValid, ma::bus::toolUnmask, same, changed, manual);
 }
 
 void storeMax(std::atomic<float>& target, float value)
@@ -185,6 +206,15 @@ AgentProcessor::AgentProcessor()
     }
     for (auto& f : widthFloats)
         f.store(0.0f); // fromHz 0: not planned, the width stays off
+    for (int d = 0; d < ma::kMaxUnmask; ++d)
+    {
+        unmaskKeyNow[static_cast<size_t>(d)].store(0);
+        unmaskSlot[static_cast<size_t>(d)].store(-1);
+        backupUnmaskSlot[static_cast<size_t>(d)].store(-1);
+        unmaskHold[static_cast<size_t>(d)].store(0.0f);
+    }
+    keyId.store(newKeyId());
+    keySinceMs = ma::SharedSession::nowMs();
     startTimerHz(10);
 }
 
@@ -402,6 +432,24 @@ juce::AudioProcessorValueTreeState::ParameterLayout AgentProcessor::createLayout
     widthFrom.setSkewForCentre(200.0f);
     layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { widthFromId, 11 }, "Width mono below", widthFrom, 150.0f,
                                                            juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    // Phase 30: the dips that give way to other channels (the key is kept in the state, not a parameter).
+    for (int d = 0; d < ma::kMaxUnmask; ++d)
+    {
+        const auto name = "Give way " + juce::String(d + 1);
+        const ma::UnmaskSettings off {};
+        layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { unmaskIds[d][0], 13 }, name, false));
+        Range freq { 100.0f, 12000.0f, 1.0f };
+        freq.setSkewForCentre(1500.0f);
+        layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { unmaskIds[d][1], 13 }, name + " freq", freq, off.hz,
+                                                               juce::AudioParameterFloatAttributes().withLabel("Hz")));
+        layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { unmaskIds[d][2], 13 }, name + " Q",
+                                                               Range { 0.3f, 4.0f, 0.01f }, off.q));
+        layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { unmaskIds[d][3], 13 }, name + " depth",
+                                                               Range { 0.0f, 12.0f, 0.1f }, off.depthDb,
+                                                               juce::AudioParameterFloatAttributes().withLabel("dB")));
+        layout.add(std::make_unique<juce::AudioParameterInt>(juce::ParameterID { unmaskIds[d][4], 13 }, name + " key bands", 0,
+                                                             (1 << ma::kKeyBands) - 1, 0));
+    }
 
     return layout;
 }
@@ -430,6 +478,8 @@ void AgentProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     liveSpectrum.prepare(sampleRate, ma::BandScale::erb);
     eq.prepare(sampleRate);
     ducker.prepare(sampleRate);
+    unmasker.prepare(sampleRate);
+    keyFollower.prepare(sampleRate);
     harmonics.prepare(sampleRate);
     transients.prepare(sampleRate);
     saturator.prepare(sampleRate);
@@ -659,9 +709,46 @@ void AgentProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     transients.setSettings(dynamics.transients);
     transients.process(mainBuffer.getArrayOfWritePointers(), numChannels, numSamples);
 
+    // Phase 30: without a cable the duck listens to its key over the bus.
+    auto* region = session->region();
+    const auto nowMs = ma::SharedSession::nowMs();
     ducker.setSettings(dynamics.duck);
-    ducker.process(mainBuffer.getArrayOfWritePointers(), numChannels, sidechain, numSidechain, numSamples);
+    const int keySlot = (before ? backupDuckSlot : duckSlot).load();
+    if (!cableActive.load() && region != nullptr && keySlot >= 0 && keySlot < ma::bus::kMaxSlots)
+    {
+        const auto& duck = dynamics.duck;
+        const auto keyBands = duck.wholeSignal > 0.5f ? (1 << ma::kKeyBands) - 1 : ma::keyBandsFor(duck.hz / 1.5, duck.hz * 1.5);
+        ducker.processKeyed(mainBuffer.getArrayOfWritePointers(), numChannels, ma::bus::readKey(region->slots[keySlot], keyBands, nowMs),
+                            numSamples);
+    }
+    else
+    {
+        ducker.process(mainBuffer.getArrayOfWritePointers(), numChannels, sidechain, numSidechain, numSamples);
+    }
     storeMax(reductionHold, static_cast<float>(ducker.reductionDb()));
+
+    // Phase 30: give way to the channels this one covers while they play (their envelope comes over
+    // the bus), and publish this channel's own envelope while another Agent listens to it.
+    {
+        double keyDb[ma::kMaxUnmask];
+        for (int d = 0; d < ma::kMaxUnmask; ++d)
+        {
+            unmasker.setSettings(d, dynamics.unmask[static_cast<size_t>(d)]);
+            const int slot = (before ? backupUnmaskSlot : unmaskSlot)[static_cast<size_t>(d)].load();
+            keyDb[d] = region != nullptr && slot >= 0 && slot < ma::bus::kMaxSlots && ma::unmaskOn(dynamics.unmask[static_cast<size_t>(d)])
+                           ? ma::bus::readKey(region->slots[slot], static_cast<std::int32_t>(dynamics.unmask[static_cast<size_t>(d)].keyBands), nowMs)
+                           : ma::kKeySilentDb;
+        }
+        unmasker.process(mainBuffer.getArrayOfWritePointers(), numChannels, numSamples, keyDb);
+        for (int d = 0; d < ma::kMaxUnmask; ++d)
+            storeMax(unmaskHold[static_cast<size_t>(d)], static_cast<float>(unmasker.reductionDb(d)));
+    }
+    const int ownSlot = audioSlot.load();
+    if (region != nullptr && ownSlot >= 0 && ownSlot < ma::bus::kMaxSlots && ma::bus::keyWanted(region->slots[ownSlot], nowMs))
+    {
+        keyFollower.process(mainBuffer.getArrayOfReadPointers(), numChannels, numSamples);
+        ma::bus::writeKey(region->slots[ownSlot], keyFollower.levels().data(), nowMs);
+    }
 
     if (brainWantsSpectra.load())
     {
@@ -813,6 +900,7 @@ void AgentProcessor::updateDynamicMeters()
     if (peakDb > -80.0)
         lastSidechainMs = now;
     sidechainSeen = lastSidechainMs > 0.0 && now - lastSidechainMs < 3000.0;
+    cableActive.store(sidechainSeen);
     // Peak hold that falls about 12 dB a second (the timer runs at 10 Hz).
     const double fallen = std::isfinite(sidechainShownDb) ? sidechainShownDb - 1.2 : -INFINITY;
     sidechainShownDb = std::max(peakDb, fallen);
@@ -825,6 +913,11 @@ void AgentProcessor::updateDynamicMeters()
     compHistory[reductionIndex] = compHold.exchange(0.0f);
     clipHistory[reductionIndex] = clipHold.exchange(0.0f);
     compShownDb = *std::max_element(compHistory.begin(), compHistory.end());
+    for (size_t d = 0; d < static_cast<size_t>(ma::kMaxUnmask); ++d)
+    {
+        unmaskHistory[d][reductionIndex] = unmaskHold[d].exchange(0.0f);
+        unmaskShownDb[d] = *std::max_element(unmaskHistory[d].begin(), unmaskHistory[d].end());
+    }
     clipShownDb = *std::max_element(clipHistory.begin(), clipHistory.end());
 }
 
@@ -840,9 +933,11 @@ void AgentProcessor::publishToBrain()
 
     if (slotIndex < 0 || region->slots[slotIndex].owner.load() != instanceId)
         slotIndex = ma::bus::claimSlot(*region, instanceId, now);
+    audioSlot.store(slotIndex);
     if (slotIndex < 0)
         return;
     handleBrainCommand(*region);
+    updateKeys(*region, now);
     // Every half second (every Agent runs the whole plan, so with many sliders this adds up), and at
     // once when this slider moves.
     const float widthNow = parameters.getRawParameterValue(widthId)->load();
@@ -937,6 +1032,17 @@ void AgentProcessor::publishToBrain()
     data.duckReductionDb = static_cast<float>(reductionShownDb);
     data.sidechainLowCorrelation = static_cast<float>(lowCorrelation.load());
     data.correlationValid = correlationValid() ? 1 : 0;
+    data.keyId = keyId.load();
+    data.duckKey = dynamics.duckKey;
+    data.duckKeyFound = !sidechainSeen && duckSlot.load() >= 0 ? 1 : 0;
+    data.keySinceMs = keySinceMs;
+    for (int d = 0; d < ma::kMaxUnmask; ++d)
+    {
+        data.unmask[d] = dynamics.unmask[static_cast<size_t>(d)];
+        data.unmaskKey[d] = dynamics.unmaskKey[static_cast<size_t>(d)];
+        data.unmaskKeyFound[d] = unmaskSlot[static_cast<size_t>(d)].load() >= 0 ? 1 : 0;
+        data.unmaskReductionDb[d] = static_cast<float>(unmaskShownDb[static_cast<size_t>(d)]);
+    }
     ma::bus::publish(region->slots[slotIndex], data, now);
 }
 
@@ -951,8 +1057,13 @@ void AgentProcessor::handleBrainCommand(ma::bus::Region& region)
         return;
     lastCommand = command.serial;
 
-    if (command.kind == ma::bus::CommandKind::apply)
+    // Phase 30: a refining round after "Zastosuj" sets everything like apply, but the backup from
+    // before the user's click stays, so one undo takes the whole refining back.
+    const bool refine = command.kind == ma::bus::CommandKind::refine;
+    if (command.kind == ma::bus::CommandKind::apply || refine)
     {
+      if (!refine || !backupValid)
+      {
         backupTrimDb = trimParam->load();
         backupInputShiftDb = inputShiftDb;
         inputShiftDb += command.inputShiftDb;
@@ -972,6 +1083,12 @@ void AgentProcessor::handleBrainCommand(ma::bus::Region& region)
             saved[1].store(backupBypass ? 0.0f : band.gainDb);
             saved[2].store(backupBypass ? 1.0f : band.q);
         }
+        brainSetBackup = brainSet;
+      }
+      else
+      {
+        inputShiftDb += command.inputShiftDb;
+      }
 
         ma::EqSettings next {};
         for (int b = 0; b < ma::kEqBands; ++b)
@@ -979,9 +1096,15 @@ void AgentProcessor::handleBrainCommand(ma::bus::Region& region)
         setParam(trimId, command.trimDb);
         setEqParams(next);
         setParam(eqBypassId, 0.0f);
-        setDynamics({ command.duck, command.duckSync, command.polarityInverted != 0, command.harmonics, command.transients,
-                      command.cleanup, command.compressor, command.clipper, command.evener, command.stereo, command.saturation });
-        brainSetBackup = brainSet;
+        DynamicState next2 { command.duck, command.duckSync, command.polarityInverted != 0, command.harmonics, command.transients,
+                             command.cleanup, command.compressor, command.clipper, command.evener, command.stereo, command.saturation };
+        for (int d = 0; d < ma::kMaxUnmask; ++d)
+        {
+            next2.unmask[static_cast<size_t>(d)] = command.unmask[d];
+            next2.unmaskKey[static_cast<size_t>(d)] = command.unmaskKey[d];
+        }
+        next2.duckKey = command.duckKey;
+        setDynamics(next2);
         rememberBrainSet();
     }
     else if (command.kind == ma::bus::CommandKind::adapt && !eqBypassed())
@@ -1007,6 +1130,86 @@ void AgentProcessor::handleBrainCommand(ma::bus::Region& region)
         brainSet = brainSetBackup;
         brainSetBackup = {};
     }
+}
+
+// Phase 30: where the keys of this channel's dips are (current settings and the A/B backup), keep
+// them publishing, and keep this channel's own key id unique (a cloned mixer track loads the same one).
+void AgentProcessor::updateKeys(ma::bus::Region& region, std::uint64_t now)
+{
+    auto& own = region.slots[slotIndex];
+    if (++keyTick >= 10)
+    {
+        keyTick = 0;
+        for (int i = 0; i < ma::bus::kMaxSlots; ++i)
+        {
+            const auto& other = region.slots[i];
+            if (i == slotIndex || other.owner.load() == 0 || !ma::bus::isAlive(other.heartbeatMs.load(), now)
+                || other.key.keyId.load() != keyId.load())
+                continue;
+            const auto since = other.key.keySinceMs.load();
+            if (since < keySinceMs || (since == keySinceMs && other.owner.load() < instanceId))
+            {
+                keyId.store(newKeyId());
+                keySinceMs = now;
+                break;
+            }
+        }
+    }
+    own.key.keyId.store(keyId.load());
+    own.key.keySinceMs.store(keySinceMs);
+
+    const auto find = [&](std::uint64_t key) {
+        if (key == 0)
+            return -1;
+        for (int i = 0; i < ma::bus::kMaxSlots; ++i)
+            if (i != slotIndex && region.slots[i].key.keyId.load() == key && region.slots[i].owner.load() != 0
+                && ma::bus::isAlive(region.slots[i].heartbeatMs.load(), now))
+                return i;
+        return -1;
+    };
+    const auto dynamics = currentDynamics();
+    for (int d = 0; d < ma::kMaxUnmask; ++d)
+    {
+        const auto i = static_cast<size_t>(d);
+        const bool on = ma::unmaskOn(dynamics.unmask[i]);
+        const int slot = on ? find(dynamics.unmaskKey[i]) : -1;
+        unmaskSlot[i].store(slot);
+        const bool backupOn = backupValid && ma::unmaskOn(backupDynamics.unmask[i]);
+        const int backupSlot = backupOn ? find(backupDynamics.unmaskKey[i]) : -1;
+        backupUnmaskSlot[i].store(backupSlot);
+        for (const int s : { slot, backupSlot })
+            if (s >= 0)
+                ma::bus::wantKey(region.slots[s], now);
+        unmaskKeyName[i] = {};
+        ma::bus::AgentData key {};
+        if (slot >= 0 && ma::bus::read(region.slots[slot], key, now))
+            unmaskKeyName[i] = juce::String::fromUTF8(key.name);
+    }
+    const int duck = dynamics.duck.on > 0.5f ? find(dynamics.duckKey) : -1;
+    duckSlot.store(duck);
+    const int backupDuck = backupValid && backupDynamics.duck.on > 0.5f ? find(backupDynamics.duckKey) : -1;
+    backupDuckSlot.store(backupDuck);
+    if (!sidechainSeen)
+        for (const int s : { duck, backupDuck })
+            if (s >= 0)
+                ma::bus::wantKey(region.slots[s], now);
+    duckKeyName = {};
+    ma::bus::AgentData key {};
+    if (duck >= 0 && ma::bus::read(region.slots[duck], key, now))
+        duckKeyName = juce::String::fromUTF8(key.name);
+}
+
+AgentProcessor::UnmaskStatus AgentProcessor::unmaskStatus(int index) const
+{
+    UnmaskStatus status;
+    if (index < 0 || index >= ma::kMaxUnmask)
+        return status;
+    const auto i = static_cast<size_t>(index);
+    status.settings = currentDynamics().unmask[i];
+    status.on = ma::unmaskOn(status.settings);
+    status.keyName = unmaskKeyName[i];
+    status.reductionDb = unmaskShownDb[i];
+    return status;
 }
 
 void AgentProcessor::rememberBrainSet()
@@ -1102,6 +1305,17 @@ void AgentProcessor::setDynamics(const DynamicState& state)
     setParam(satModeId, state.saturation.mode);
     setParam(satDriveId, state.saturation.driveDb);
     setParam(satMixId, state.saturation.mix * 100.0f);
+    for (int n = 0; n < ma::kMaxUnmask; ++n)
+    {
+        const auto& u = state.unmask[static_cast<size_t>(n)];
+        setParam(unmaskIds[n][0], ma::unmaskOn(u) ? 1.0f : 0.0f);
+        setParam(unmaskIds[n][1], u.hz);
+        setParam(unmaskIds[n][2], u.q);
+        setParam(unmaskIds[n][3], u.depthDb);
+        setParam(unmaskIds[n][4], u.keyBands);
+        unmaskKeyNow[static_cast<size_t>(n)].store(ma::unmaskOn(u) ? state.unmaskKey[static_cast<size_t>(n)] : 0);
+    }
+    duckKeyNow.store(state.duck.on > 0.5f ? state.duckKey : 0);
 }
 
 AgentProcessor::DynamicState AgentProcessor::currentDynamics() const
@@ -1160,6 +1374,17 @@ AgentProcessor::DynamicState AgentProcessor::currentDynamics() const
     state.stereo.widen.lowHz = value(widenLowId);
     state.stereo.widen.delayMs = value(widenDelayId);
     state.saturation = currentSaturation();
+    for (int d = 0; d < ma::kMaxUnmask; ++d)
+    {
+        auto& u = state.unmask[static_cast<size_t>(d)];
+        u.on = value(unmaskIds[d][0]) > 0.5f ? 1.0f : 0.0f;
+        u.hz = value(unmaskIds[d][1]);
+        u.q = value(unmaskIds[d][2]);
+        u.depthDb = value(unmaskIds[d][3]);
+        u.keyBands = static_cast<float>(juce::roundToInt(value(unmaskIds[d][4])));
+        state.unmaskKey[static_cast<size_t>(d)] = unmaskKeyNow[static_cast<size_t>(d)].load();
+    }
+    state.duckKey = duckKeyNow.load();
     return state;
 }
 
@@ -1380,6 +1605,12 @@ void AgentProcessor::getStateInformation(juce::MemoryBlock& destData)
             resonances.add(juce::String(r.hz, 1) + " " + juce::String(r.prominenceDb, 1) + " " + juce::String(r.q, 1) + " "
                            + juce::String(r.persistence, 2));
     state.setProperty(resonancesProperty, resonances.joinIntoString(" "), nullptr);
+    state.setProperty(keyIdProperty, juce::String::toHexString(static_cast<juce::int64>(keyId.load())), nullptr);
+    juce::StringArray keys;
+    for (const auto& key : unmaskKeyNow)
+        keys.add(juce::String::toHexString(static_cast<juce::int64>(key.load())));
+    state.setProperty(unmaskKeysProperty, keys.joinIntoString(" "), nullptr);
+    state.setProperty(duckKeyProperty, juce::String::toHexString(static_cast<juce::int64>(duckKeyNow.load())), nullptr);
 
     if (auto xml = state.createXml())
         copyXmlToBinary(*xml, destData);
@@ -1415,7 +1646,8 @@ void AgentProcessor::setStateInformation(const void* data, int sizeInBytes)
     brainSet = {};
     brainSetBackup = {};
     const int dynamicCount = setValues.size() - 3 * ma::kEqBands;
-    if (dynamicCount == static_cast<int>(kPackedDynamics) || dynamicCount == static_cast<int>(kPackedBeforeWidener))
+    if (dynamicCount == static_cast<int>(kPackedDynamics) || dynamicCount == static_cast<int>(kPackedBeforeUnmask)
+        || dynamicCount == static_cast<int>(kPackedBeforeWidener))
     {
         std::vector<float> floats;
         for (int i = 0; i < dynamicCount; ++i)
@@ -1425,6 +1657,13 @@ void AgentProcessor::setStateInformation(const void* data, int sizeInBytes)
             // Saved before phase 25: the widener (off) goes between the side bells and the saturation.
             const ma::StereoSettings::Widener off {};
             floats.insert(floats.end() - 4, { off.amountDb, off.lowHz, off.delayMs });
+        }
+        if (dynamicCount != static_cast<int>(kPackedDynamics))
+        {
+            // Saved before phase 30: no dips.
+            const ma::UnmaskSettings off {};
+            for (int d = 0; d < ma::kMaxUnmask; ++d)
+                floats.insert(floats.end(), { off.on, off.hz, off.q, off.depthDb, off.keyBands });
         }
         std::array<float, kPackedDynamics> packed {};
         std::copy(floats.begin(), floats.end(), packed.begin());
@@ -1448,6 +1687,18 @@ void AgentProcessor::setStateInformation(const void* data, int sizeInBytes)
     for (int r = 0; r < ma::kMaxResonances && r * 4 + 3 < found.size(); ++r)
         result.resonances[static_cast<size_t>(r)] = { found[r * 4].getFloatValue(), found[r * 4 + 1].getFloatValue(),
                                                       found[r * 4 + 2].getFloatValue(), found[r * 4 + 3].getFloatValue() };
+    // Phase 30: the id other Agents know this channel by (a clone that loads it while the original
+    // runs takes a new one in updateKeys), and the channels its dips give way to.
+    const auto savedKey = static_cast<std::uint64_t>(state.getProperty(keyIdProperty).toString().getHexValue64());
+    if (savedKey != 0)
+    {
+        keyId.store(savedKey);
+        keySinceMs = ma::SharedSession::nowMs();
+    }
+    const auto keys = juce::StringArray::fromTokens(state.getProperty(unmaskKeysProperty).toString(), " ", {});
+    for (int d = 0; d < ma::kMaxUnmask; ++d)
+        unmaskKeyNow[static_cast<size_t>(d)].store(d < keys.size() ? static_cast<std::uint64_t>(keys[d].getHexValue64()) : 0);
+    duckKeyNow.store(static_cast<std::uint64_t>(state.getProperty(duckKeyProperty).toString().getHexValue64()));
     parameters.replaceState(state);
 }
 
