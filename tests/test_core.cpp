@@ -33,6 +33,7 @@
 #include "ma/LoudnessMeter.h"
 #include "ma/SpectrumAnalyzer.h"
 #include "ma/TruePeakMeter.h"
+#include "ma/Unmask.h"
 #include "ma/Wav.h"
 
 #include <algorithm>
@@ -644,6 +645,122 @@ void testDucker()
     check(duck(bassSource.channels[0], off, true) == bassSource.channels[0], "duck switched off is bypassed");
 
     checkNear(ma::syncedReleaseMs(125.0, 1.0 / 16.0), 120.0, 0.01, "a sixteenth at 125 BPM is 120 ms");
+}
+
+// Phase 30: a channel gives way to another one without a sidechain cable.
+void testUnmask()
+{
+    constexpr double sr = 48000.0;
+    constexpr int block = 512;
+    const size_t n = static_cast<size_t>(sr * 3.0);
+
+    check(ma::keyBandsFor(800.0, 20000.0) == (0x1F << 3), "key bands 1-16 kHz cover 810 Hz to 20 kHz");
+    check(ma::keyBandsFor(700.0, 900.0) == (1 << 3), "a narrow range takes its nearest octave band");
+
+    // Key: a 2 kHz tone that plays the first second, stops, and plays again in the last second.
+    std::vector<float> key(n, 0.0f);
+    for (size_t i = 0; i < n; ++i)
+        if (i < 48000 || i >= 96000)
+            key[i] = static_cast<float>(0.3 * std::sin(2.0 * kPi * 2000.0 * i / sr));
+    const auto masker = sine(sr, 3.0, 1, 2000.0, 0.3).channels[0];
+
+    ma::KeyFollower follower;
+    follower.prepare(sr);
+    ma::Unmasker unmask;
+    unmask.prepare(sr);
+    ma::UnmaskSettings s;
+    s.on = 1.0f;
+    s.hz = 2000.0f;
+    s.q = 1.0f;
+    s.depthDb = 6.0f;
+    s.keyBands = static_cast<float>(ma::keyBandsFor(1000.0, 4000.0));
+    unmask.setSettings(0, s);
+
+    std::vector<float> out(masker);
+    double keyAt2k = -200.0;
+    for (size_t start = 0; start < n; start += block)
+    {
+        const int count = static_cast<int>(std::min<size_t>(block, n - start));
+        const float* k[] = { key.data() + start };
+        follower.process(k, 1, count);
+        const double levels[ma::kMaxUnmask] = { ma::keyLevelDb(follower.levels().data(), static_cast<std::int32_t>(s.keyBands)),
+                                               ma::kKeySilentDb };
+        if (start == 24576)
+            keyAt2k = follower.levels()[4];
+        float* m[] = { out.data() + start };
+        unmask.process(m, 1, count, levels);
+    }
+    checkNear(keyAt2k, 20.0 * std::log10(0.3) - 3.0, 1.0, "the key follower reads a tone's RMS in its octave band");
+    checkNear(rmsDb(out, 30000, 46000) - rmsDb(masker, 30000, 46000), -6.0, 0.7, "the masker dips by the depth while the key plays");
+    checkNear(rmsDb(out, 70000, 94000) - rmsDb(masker, 70000, 94000), 0.0, 0.3, "and comes back while the key is silent");
+    checkNear(rmsDb(out, 110000, 140000) - rmsDb(masker, 110000, 140000), -6.0, 0.7, "and dips again when it returns");
+
+    // Far from the dip nothing changes.
+    const auto low = sine(sr, 1.0, 1, 80.0, 0.3).channels[0];
+    std::vector<float> lowOut(low);
+    ma::Unmasker second;
+    second.prepare(sr);
+    second.setSettings(0, s);
+    for (size_t start = 0; start < low.size(); start += block)
+    {
+        const int count = static_cast<int>(std::min<size_t>(block, low.size() - start));
+        const double levels[ma::kMaxUnmask] = { -10.0, ma::kKeySilentDb };
+        float* m[] = { lowOut.data() + start };
+        second.process(m, 1, count, levels);
+    }
+    checkNear(rmsDb(lowOut, 24000, 47000) - rmsDb(low, 24000, 47000), 0.0, 0.3, "the dip leaves the low end alone");
+
+    checkNear(ma::Unmasker::amountFor(-10.0, -10.0), 1.0, 1e-9, "full dip at the key's loud level");
+    checkNear(ma::Unmasker::amountFor(-30.0, -10.0), 0.0, 1e-9, "no dip 20 dB under it");
+    checkNear(ma::Unmasker::amountFor(ma::kKeySilentDb, -10.0), 0.0, 1e-9, "no dip without a key");
+
+    // The duck without a cable: a kick key over the bus pulls the bass down on every hit.
+    {
+        std::vector<float> kickKey(n, 0.0f);
+        for (size_t i = 0; i < n; ++i)
+            if (i % 24000 < 3840)
+                kickKey[i] = static_cast<float>(0.8 * std::sin(2.0 * kPi * 55.0 * i / sr));
+        const auto bass = sine(sr, 3.0, 1, 55.0, 0.5).channels[0];
+        std::vector<float> ducked(bass);
+        ma::KeyFollower kickFollower;
+        kickFollower.prepare(sr);
+        ma::Ducker duck;
+        duck.prepare(sr);
+        ma::DuckSettings d;
+        d.on = 1.0f;
+        d.hz = 55.0f;
+        d.depthDb = 9.0f;
+        d.releaseMs = 60.0f;
+        duck.setSettings(d);
+        for (size_t start = 0; start < n; start += block)
+        {
+            const int count = static_cast<int>(std::min<size_t>(block, n - start));
+            const float* k[] = { kickKey.data() + start };
+            kickFollower.process(k, 1, count);
+            float* m[] = { ducked.data() + start };
+            duck.processKeyed(m, 1, ma::keyLevelDb(kickFollower.levels().data(), 1 << 0), count);
+        }
+        // Fourth beat (72000..75840): one block late at most, so the body of the hit is ducked.
+        checkNear(rmsDb(ducked, 73000, 75500) - rmsDb(bass, 73000, 75500), -9.0, 2.0, "the duck without a cable dips on the kick's body");
+        checkNear(rmsDb(ducked, 88000, 95000) - rmsDb(bass, 88000, 95000), 0.0, 0.5, "and lets go between hits");
+    }
+
+    // The bus feed: stale levels read as silence.
+    auto region = std::make_unique<ma::bus::Region>();
+    std::memset(static_cast<void*>(region.get()), 0, sizeof(ma::bus::Region));
+    ma::bus::initialise(*region);
+    auto& slot = region->slots[3];
+    check(!ma::bus::keyWanted(slot, 1000), "nobody wants a key at first");
+    ma::bus::wantKey(slot, 1000);
+    check(ma::bus::keyWanted(slot, 2000), "a wish lasts a while");
+    check(!ma::bus::keyWanted(slot, 1000 + ma::bus::kKeyWantedMs + 1), "and runs out");
+    float levels[ma::kKeyBands];
+    for (auto& l : levels)
+        l = -200.0f;
+    levels[4] = -12.0f;
+    ma::bus::writeKey(slot, levels, 5000);
+    checkNear(ma::bus::readKey(slot, 1 << 4, 5100), -12.0, 1e-6, "a fresh key is read");
+    check(ma::bus::readKey(slot, 1 << 4, 5000 + ma::bus::kKeyStaleMs + 10) <= -150.0, "a stale key is silence");
 }
 
 ma::SpectrumAnalyzer::Bands erbBands(const std::vector<float>& x, double sr)
@@ -1649,6 +1766,28 @@ void testStems()
         settled[g] = bandsOf(applied[g], second.gainDb[g]);
     check(!ma::planStemLevels(settled, all, simple).any, "planning again once it is in the corridor changes nothing");
 
+    // Phase 29: no references, the typical house balance. The corridors of the groups that play
+    // add up to the whole; a music group (pads) far too loud is turned down.
+    {
+        const std::array<bool, 4> noVocal { true, true, false, true };
+        const auto typical = ma::typicalLevelTarget(noVocal);
+        double sum = 0.0;
+        for (size_t g = 0; g < 4; ++g)
+            if (typical.level[g].valid)
+                sum += std::pow(10.0, typical.level[g].centre / 10.0);
+        check(!typical.valid() && typical.level[0].valid && !typical.level[2].valid && std::abs(10.0 * std::log10(sum)) < 0.01,
+              "typical corridors only for the groups that play, adding up to the whole");
+        auto loudPads = ref;
+        loudPads[2].fill(-200.0);
+        loudPads[3] = bandsOf(ref[3], 14.0);
+        auto plan = ma::planStemLevels(loudPads, noVocal, typical);
+        ma::anchorStemLevels(plan, static_cast<int>(ma::StemGroup::drums));
+        std::printf("      typical: music %.1f dB of the sum (corridor %.1f..%.1f), gain %.1f, drums %+.1f\n", plan.before[3],
+                    typical.level[3].low, typical.level[3].high, plan.gainDb[3], plan.gainDb[0]);
+        check(plan.any && plan.gainDb[3] < -1.0 && plan.gainDb[3] < plan.gainDb[0], "without references loud pads are turned down against the drums");
+        check(plan.gainDb[0] == 0.0, "the drums stay where Learn put them");
+    }
+
     // The solver gives the vocal its presence back on its own channel.
     auto thin = ref;
     for (int b = 0; b < 40; ++b)
@@ -2068,6 +2207,39 @@ void testWidth()
     for (const auto& plan : plain)
         none = none && !ma::widenOn(plan.settings);
     check(none, "width: no references, no widener");
+}
+
+// Phase 27: a band hovering just above 0 keeps the side cut it already has, and gets none if it has none.
+void testStereoHysteresis()
+{
+    auto flat = [](double db) { ma::SpectrumAnalyzer::Bands b {}; b.fill(db); return b; };
+    ma::StereoChannel pad { ma::Role::pad, 6, true, flat(-20.0), flat(-40.0) };
+    for (int b = 0; b < 40; ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        if (hz > 2500.0 && hz < 4000.0)
+            pad.sideDb[static_cast<size_t>(b)] = -20.6; // coherence about 0.07
+    }
+    ma::StereoChannel other { ma::Role::lead, 3, true, flat(-20.0), flat(-40.0) };
+    ma::StereoMaster master;
+    const auto fresh = ma::planStereo({ pad, other }, master);
+    check(fresh[0].fixes.empty(), "stereo hysteresis: just above 0 and no cut yet, nothing to do");
+    pad.current.side[0] = { 3100.0f, -4.0f, 2.0f };
+    const auto kept = ma::planStereo({ pad, other }, master);
+    check(!kept[0].fixes.empty() && kept[0].settings.side[0].db < -3.5f, "stereo hysteresis: the cut it has stays, as deep, while the band is near 0");
+    pad.current = kept[0].settings;
+    const auto again = ma::planStereo({ pad, other }, master);
+    check(!again[0].fixes.empty() && std::abs(again[0].settings.side[0].db - kept[0].settings.side[0].db) < 0.6f
+              && std::abs(std::log2(again[0].settings.side[0].hz / kept[0].settings.side[0].hz)) < 0.1,
+          "stereo hysteresis: planning again gives the same cut");
+    for (int b = 0; b < 40; ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        if (hz > 2500.0 && hz < 4000.0)
+            pad.sideDb[static_cast<size_t>(b)] = -24.0; // coherence about 0.43
+    }
+    const auto released = ma::planStereo({ pad, other }, master);
+    check(released[0].fixes.empty(), "stereo hysteresis: clearly back in phase, the cut goes");
 }
 
 // Phase 26: the width slider.
@@ -3222,6 +3394,52 @@ void testGhostNoise()
     check(std::abs(10.0 * std::log10(all / plain)) < 1.5, "and keeps the spectrum's average power");
 }
 
+// Phase 28: a loud master. The limiter works 5 dB at the target: the kick and percussion carrying
+// the peaks are clipped further, up to the cap; planning again with that clipper in place and the
+// limiter measured again lands on the same clipping.
+void testLoudMasterClip()
+{
+    constexpr double sr = 48000.0;
+    std::vector<ma::ChainChannel> mix = {
+        measuredChannel(ma::Role::kick, 1, 0.0, sr), measuredChannel(ma::Role::bass, 2, 0.0, sr),
+        measuredChannel(ma::Role::percussion, 4, 0.0, sr), measuredChannel(ma::Role::pad, 6, 0.0, sr),
+    };
+    mix[0].carriesMasterPeaks = mix[2].carriesMasterPeaks = true;
+    mix[1].carriesMasterPeaks = true; // not percussion: never clipped for it
+    ma::ChainContext context { 124.0, 0.0 };
+    const auto base = ma::planChains(mix, context);
+    check(base[0].loudMasterClipDb == 0.0, "no preview, no extra clipping");
+
+    context.limiterReductionDb = 5.0;
+    const auto plans = ma::planChains(mix, context);
+    std::printf("      loud master: kick %.1f dB (+%.1f), perc %.1f dB (+%.1f), bass +%.1f\n", plans[0].clipDb, plans[0].loudMasterClipDb,
+                plans[2].clipDb, plans[2].loudMasterClipDb, plans[1].loudMasterClipDb);
+    checkNear(plans[0].loudMasterClipDb, std::min(2.5, ma::kMaxLoudMasterClipDb - base[0].clipDb), 0.01, "the kick takes 2.5 dB more");
+    check(plans[0].clipper.on > 0.5f && plans[2].clipper.on > 0.5f && plans[2].loudMasterClipDb > 0.0, "kick and percussion both clipped");
+    check(plans[1].loudMasterClipDb == 0.0 && plans[3].loudMasterClipDb == 0.0, "bass and pad left alone");
+    check(plans[0].clipDb <= ma::kMaxLoudMasterClipDb + 1e-9, "within the cap");
+
+    // Applied: the Agents carry it and the limiter now works 2.6 dB. Same plan again.
+    auto after = mix;
+    for (size_t i : { size_t(0), size_t(2) })
+        after[i].currentClipDb = after[i].truePeakDb - plans[i].clipper.ceilingDb;
+    context.limiterReductionDb = 2.6;
+    const auto again = ma::planChains(after, context);
+    checkNear(again[0].clipDb, plans[0].clipDb, 0.01, "planning again keeps the kick's clipping");
+    checkNear(again[2].clipDb, plans[2].clipDb, 0.01, "and the percussion's");
+
+    // Not enough: the limiter still at 4 dB with the clippers in. More, up to the cap, then capped.
+    context.limiterReductionDb = 6.0;
+    const auto more = ma::planChains(after, context);
+    check(more[0].clipDb > plans[0].clipDb && more[0].clipDb <= ma::kMaxLoudMasterClipDb + 1e-9 && more[0].loudMasterCapped,
+          "a limiter still too busy takes the clipping to the cap (" + std::to_string(more[0].clipDb).substr(0, 4) + " dB)");
+
+    // A quiet target: what was added for a loud one comes off again.
+    context.limiterReductionDb = 0.5;
+    const auto quiet = ma::planChains(after, context);
+    check(quiet[0].loudMasterClipDb < plans[0].loudMasterClipDb, "a relaxed limiter gives the clipping back");
+}
+
 int main()
 {
     testLoudness();
@@ -3240,6 +3458,7 @@ int main()
     testTonalSolver();
     testCorrelation();
     testDucker();
+    testUnmask();
     testHarmonics();
     testTranslation();
     testTransients();
@@ -3261,6 +3480,8 @@ int main()
     testCentreZones();
     testWidth();
     testWidthSlider();
+    testStereoHysteresis();
+    testLoudMasterClip();
     testSectionAutomation();
     testEnergyMap();
     testGhostNoise();

@@ -204,6 +204,58 @@ publikują, i gdy pasmo sumy zeszłoby poniżej 0,2 przez suwaki (z zapasem tam,
 poszerzenia grające w tym paśmie ustępują razem. Działa to także bez Mózgu. Mózg liczy kanał z suwakiem w sumie, nie
 proponuje mu zmian stereo i pisze w werdykcie, że szerokość jest ustawiona ręcznie.
 
+### Stabilność (faza 27)
+
+- Kroki translacji (miejsce u mniej ważnego kanału, obecność, harmoniczne, atak) nie wypychają balansu tonalnego dalej
+  poza korytarz celu, a harmoniczne dostają tylko tyle, ile balans zniesie. Gdy kroki translacji i tak ruszają balans
+  o więcej niż 0,5 dB, Mózg liczy propozycję drugi raz i wtedy korekcja tonalna już je uwzględnia. Jedno „Zastosuj”
+  trafia więc tam, gdzie celowało, zamiast podbić Low i zostawić poprawkę na drugą rundę.
+- Cięcie side'u w paśmie, które wpadło w przeciwfazę, zostaje (tak głębokie, jak jest), dopóki pasmo nie wróci wyraźnie
+  do fazy (korelacja 0,15). Pasmo, które krąży wokół zera, nie dostaje już raz cięcia, a raz nie.
+- Plan szerokości (faza 26) liczy się 3–4 razy szybciej i co pół sekundy (od razu po ruchu suwaka), żeby duży projekt z
+  wieloma suwakami nie obciążał FL.
+
+### Domknięcie po analizie (faza 28)
+
+- Kolizje: jedno „Analizuj” liczy kolizje na miksie takim, jaki będzie po całej propozycji. Gdzie cięcia EQ z
+  propozycji nie wystarczą, od razu dokłada ściszenie kanału (do 2 dB zaznaczone, do 3 dB do decyzji). Po „Zastosuj”
+  pomarańczowe są tylko kolizje, przy których jest jeszcze co zrobić (np. nowa kolizja, którą usunie ściszenie o kilka
+  dB). Niebieskie to rejestr albo brzmienie, czyli aranż, oraz większe ściszenie, które zmienia balans, więc zostaje
+  Twoją decyzją.
+- Głośny master: „Analizuj” (cały łańcuch) patrzy, ile limiter podglądu mastera ścina w głośnej części przy celu (np.
+  -8 LUFS). Gdy więcej niż 3 dB, dokłada clipper na stopie i perkusji, które dają najwyższe szczyty miksu (razem z
+  clipperem od szczytów najwyżej 6 dB na kanale), celując w ok. 2,5 dB pracy limitera. Kolejna analiza uwzględnia to,
+  co clipper już ścina, więc nie dokłada w kółko i oddaje clipping, gdy cel jest cichszy. Gdy clippery są na limicie,
+  raport mówi wprost, że reszta to gęstość dropu albo niższy cel.
+- Werdykt, Raport i Propozycja nie wracają już same na górę przy przewijaniu.
+
+### Proporcje bez referencji (faza 29)
+
+- „Naucz poziom” ustawia kanał względem celu według roli: stopa na celu, bas 2 dB niżej, wokal 4, lead i perkusja 6, pad
+  8, efekty i powroty 10 dB niżej (rola „Inny” i bus zostają na celu). Stopa ma niskie RMS jak na to, jak głośno brzmi
+  (krótkie uderzenia, głównie sub), a pad czy lead grają bez przerwy w paśmie, które ucho słyszy najlepiej, więc ten
+  sam poziom RMS stawiał pad nad stopą. Przełącznik „Poziom według roli” obok przycisku nauki to wyłącza.
+- Bez referencji ze stemów „Analizuj” (cały łańcuch) wyrównuje grupy (perkusja, bas, wokal, reszta) do typowych proporcji
+  house'u (korytarz ±1,5 dB, uszny udział w całości). Perkusja zostaje tam, gdzie postawiła ją nauka, reszta przesuwa
+  się względem niej, najwyżej 3 dB na analizę. Głośność całości dopasuje cel mastera. Po wgraniu referencji ze stemów
+  proporcje biorą się z nich.
+
+### Ustępowanie bez kabla i dopracowanie (faza 30)
+
+- Kolizję, której EQ ani mały krok poziomu nie usuną (np. jasny bas nad leadem w 1-4 kHz), Mózg rozwiązuje dynamicznie:
+  kanał zasłaniający przycisza dzwonem zakres zasłanianego tylko wtedy, gdy ten gra (do 6 dB, głębokość dobrana z
+  przewidywania maskowania). Nie trzeba kabla sidechain w FL: Agent zasłanianego kanału mierzy swoje wyjście w ośmiu
+  pasmach oktawowych i podaje obwiednię przez wspólną pamięć, a Agent zasłaniający czyta ją co blok. Każdy kanał może tak
+  ustępować dwóm innym; widać to w Agencie na karcie „EQ i ustępowanie” („Ustępowanie bez kabla”, przycisk „Wyłącz”).
+- Ustępowanie na stopę (bas, pady pod stopą) też działa bez kabla, gdy na wejściu sidechain nie ma sygnału. Podłączony
+  kabel ma pierwszeństwo, bo jest co do próbki dokładny; bez niego dip spóźnia się najwyżej o jeden blok bufora.
+- Gdy Mózg planuje proporcje grup, kolizje nie dostają już osobnych kroków poziomu kanału (następna analiza i tak
+  oddawała grupę na miejsce), tylko ustępowanie dynamiczne.
+- „Dopracuj sam” (pod przyciskami, domyślnie włączone): po „Zastosuj” Mózg mierzy drop jeszcze raz i, jeśli coś zostało
+  (np. clipper pod głośny master, kolizja), sam analizuje i stosuje, najwyżej 2 rundy. Odznaczone pozycje zostają
+  odznaczone. „Analizuj”, „Cofnij” albo „Przed / po” przerywają. Jedno „Cofnij” cofa wszystko razem z rundami.
+- Nowy projekt bierze cel tonalny używany ostatnio (`last-target.txt` w folderze celów).
+
 ### Przed masteringiem (Ozone)
 
 „Cel mastera” w Mózgu to głośność, do której Ozone podciągnie master (domyślnie -8 LUFS). Mózg w tle robi

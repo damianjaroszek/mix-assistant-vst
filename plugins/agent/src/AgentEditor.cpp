@@ -87,6 +87,10 @@ AgentEditor::AgentEditor(AgentProcessor& p)
     learnButton.setColour(juce::TextButton::buttonColourId, colours::panel);
     learnButton.setColour(juce::TextButton::buttonOnColourId, colours::accent);
     learnButton.onClick = [this] { toggleLearning(); };
+    roleLevelButton.setButtonText(pl("Poziom według roli"));
+    roleLevelButton.setTooltip(pl("Nauka ustawia kanał względem celu według roli: stopa na celu, bas 2 dB niżej, wokal 4, "
+                                  "lead i perkusja 6, pad 8, efekty 10 dB niżej. Bez tego każdy kanał dostaje ten sam poziom."));
+    roleLevelButton.setColour(juce::ToggleButton::textColourId, colours::text);
 
     showProfileButton.setButtonText(pl("Pokaż nauczony profil"));
     showProfileButton.setColour(juce::ToggleButton::textColourId, colours::quiet);
@@ -94,6 +98,16 @@ AgentEditor::AgentEditor(AgentProcessor& p)
     styleLabel(duckLabel, pl("Ustępowanie (sidechain)"), colours::quiet);
     styleLabel(duckStatus, {}, colours::quiet, 13.0f);
     duckStatus.setJustificationType(juce::Justification::topLeft);
+    styleLabel(unmaskLabel, pl("Ustępowanie bez kabla"), colours::quiet);
+    styleLabel(unmaskStatus, {}, colours::quiet, 13.0f);
+    unmaskStatus.setJustificationType(juce::Justification::topLeft);
+    unmaskOffButton.setButtonText(pl("Wyłącz"));
+    unmaskOffButton.setTooltip(pl("Wyłącza ustępowanie innym kanałom. Mózg może je zaproponować znowu przy następnym „Analizuj”."));
+    unmaskOffButton.onClick = [this] {
+        for (int d = 0; d < ma::kMaxUnmask; ++d)
+            if (auto* param = processor.parameters.getParameter(AgentProcessor::unmaskIds[d][0]))
+                param->setValueNotifyingHost(0.0f);
+    };
     styleLabel(duckFreqLabel, pl("Pasmo"), colours::quiet, 13.0f);
     styleLabel(duckDepthLabel, pl("Głębokość"), colours::quiet, 13.0f);
     styleLabel(duckThresholdLabel, pl("Próg"), colours::quiet, 13.0f);
@@ -263,6 +277,7 @@ AgentEditor::AgentEditor(AgentProcessor& p)
     attackFreqAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::attackFreqId, attackFreqSlider);
     attackAmountAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::attackAmountId, attackAmountSlider);
     satOnAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(state, AgentProcessor::satOnId, satOnButton);
+    roleLevelAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(state, AgentProcessor::roleLevelId, roleLevelButton);
     intentionalAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         state, AgentProcessor::intentionalDriveId, intentionalButton);
     satModeAttachment = std::make_unique<ComboAttachment>(state, AgentProcessor::satModeId, satModeBox);
@@ -282,14 +297,14 @@ AgentEditor::AgentEditor(AgentProcessor& p)
     page(levelPage, pl("Poziom"),
          { &roleLabel, &roleBox, &priorityLabel, &prioritySlider, &inputLabel, &inputValue, &inputBar, &lufsLabel, &lufsValue,
            &outputLabel, &outputValue, &outputBar, &measureLabel, &measureBox, &targetSlider, &trimLabel, &trimSlider,
-           &ceilingLabel, &ceilingSlider, &learnTimeLabel, &learnTimeSlider, &learnButton, &status, &spectrumLabel,
+           &ceilingLabel, &ceilingSlider, &learnTimeLabel, &learnTimeSlider, &learnButton, &roleLevelButton, &status, &spectrumLabel,
            &showProfileButton, &spectrumView },
          [this](auto area) { layoutLevel(area); });
     page(eqPage, pl("EQ i ustępowanie"),
          { &eqLabel, &origins[0], &origins[7], &eqStatus, &eqCurve, &eqBypassButton, &eqClearButton, &duckLabel, &duckOnButton, &duckModeBox,
            &polarityButton, &duckFreqLabel, &duckFreqSlider, &duckDepthLabel, &duckDepthSlider, &duckThresholdLabel,
            &duckThresholdSlider, &duckAttackLabel, &duckAttackSlider, &duckReleaseLabel, &duckReleaseSlider, &duckSyncBox,
-           &duckStatus },
+           &duckStatus, &unmaskLabel, &origins[10], &unmaskStatus, &unmaskOffButton },
          [this](auto area) { layoutEq(area); });
     page(tonePage, pl("Barwa"),
          { &harmonicsLabel, &origins[8], &origins[9], &origins[6], &harmonicsOnButton, &harmonicsFreqLabel, &harmonicsFreqSlider, &harmonicsAmountLabel,
@@ -348,6 +363,9 @@ void AgentEditor::showResult(const AgentProcessor::LearnResult& r)
     juce::String text = pl("Zmierzone: ") + ma::ui::formatDb(r.measuredDb, unit.toRawUTF8())
                         + ", true peak " + ma::ui::formatDb(r.truePeakDb, "dBTP")
                         + pl(". Ustawiono trim ") + signedDb(r.trimDb) + ".";
+    if (std::abs(r.roleOffsetDb) > 0.05)
+        text += pl(" Cel dla roli: ") + ma::ui::formatDb(r.targetDb, unit.toRawUTF8()) + " (" + signedDb(r.roleOffsetDb)
+                + pl(" względem stopy).");
     if (r.limitedByPeak)
     {
         // Nauka ustawia tylko trim. Kompresor i clipper z zakładki „Inżynier miksu” ustawia Mózg,
@@ -436,6 +454,7 @@ void AgentEditor::timerCallback()
     }
 
     updateDuckStatus();
+    updateUnmaskStatus();
     updateChainStatus();
 
     std::array<double, ma::ui::SpectrumView::kMaxBands> levels {}, centres {};
@@ -458,7 +477,14 @@ void AgentEditor::updateDuckStatus()
 
     juce::String text;
     auto colour = colours::quiet;
-    if (!processor.sidechainConnected())
+    if (!processor.sidechainConnected() && on && processor.duckKeyChannel().isNotEmpty())
+    {
+        // Phase 30: no cable, the key comes over the bus.
+        text = pl("Bez kabla: słucha „") + processor.duckKeyChannel() + pl("” przez wspólną pamięć, ustępuje o ")
+               + juce::String(processor.duckReductionDb(), 1) + " dB";
+        colour = colours::good;
+    }
+    else if (!processor.sidechainConnected())
     {
         text = on ? pl("Brak sygnału na wejściu sidechain. W mikserze FL: na kanale stopy kliknij prawym strzałkę "
                        "wysyłki do tego kanału, wybierz „Sidechain to this track”, potem w oknie wtyczki (ikona "
@@ -491,6 +517,35 @@ void AgentEditor::updateDuckStatus()
     }
     duckStatus.setText(text, juce::dontSendNotification);
     duckStatus.setColour(juce::Label::textColourId, colour);
+}
+
+// Phase 30: what the channel gives way to, and how much it takes off right now.
+void AgentEditor::updateUnmaskStatus()
+{
+    juce::StringArray lines;
+    bool any = false, missing = false;
+    for (int d = 0; d < ma::kMaxUnmask; ++d)
+    {
+        const auto dip = processor.unmaskStatus(d);
+        if (!dip.on)
+            continue;
+        any = true;
+        const auto& s = dip.settings;
+        const auto where = s.hz >= 1000.0f ? juce::String(s.hz / 1000.0f, 1) + " kHz" : juce::String(juce::roundToInt(s.hz)) + " Hz";
+        if (dip.keyName.isEmpty())
+        {
+            missing = true;
+            lines.add(pl("Ustępuje kanałowi, którego Agent teraz nie działa (") + where + pl("): nic nie ścina."));
+            continue;
+        }
+        lines.add(pl("Ustępuje „") + dip.keyName + pl("” wokół ") + where + pl(" do ") + juce::String(s.depthDb, 1)
+                  + pl(" dB, gdy tamten gra; teraz ") + juce::String(dip.reductionDb, 1) + " dB.");
+    }
+    if (!any)
+        lines.add(pl("Wyłączone. Mózg włącza je, gdy ten kanał zasłania inny, a EQ i poziom tego nie usuną. Działa bez routingu w FL."));
+    unmaskStatus.setText(lines.joinIntoString("\n"), juce::dontSendNotification);
+    unmaskStatus.setColour(juce::Label::textColourId, missing ? colours::warning : any ? colours::good : colours::quiet);
+    unmaskOffButton.setEnabled(any);
 }
 
 void AgentEditor::updateChainStatus()
@@ -655,7 +710,10 @@ void AgentEditor::layoutLevel(juce::Rectangle<int> area)
     sliderRow(learnTimeLabel, learnTimeSlider);
 
     area.removeFromTop(8);
-    learnButton.setBounds(area.removeFromTop(32).removeFromLeft(200));
+    row = area.removeFromTop(32);
+    learnButton.setBounds(row.removeFromLeft(200));
+    row.removeFromLeft(12);
+    roleLevelButton.setBounds(row.removeFromLeft(220));
     area.removeFromTop(6);
     status.setBounds(area);
 
@@ -707,7 +765,15 @@ void AgentEditor::layoutEq(juce::Rectangle<int> area)
     halfRow(row.removeFromLeft(row.getWidth() / 2).withTrimmedRight(16), duckReleaseLabel, duckReleaseSlider);
     duckSyncBox.setBounds(row.removeFromLeft(110).reduced(0, 1));
     area.removeFromTop(8);
-    duckStatus.setBounds(area);
+    duckStatus.setBounds(area.removeFromTop(48));
+    area.removeFromTop(6);
+    row = area.removeFromTop(24);
+    unmaskLabel.setBounds(row.removeFromLeft(180));
+    unmaskOffButton.setBounds(row.removeFromLeft(80).reduced(0, 1));
+    row.removeFromLeft(12);
+    origin(ma::bus::toolUnmask).setBounds(row.removeFromLeft(170));
+    area.removeFromTop(4);
+    unmaskStatus.setBounds(area);
 }
 
 void AgentEditor::layoutTone(juce::Rectangle<int> area)

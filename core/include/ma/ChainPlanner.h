@@ -37,12 +37,26 @@ struct ChainChannel
     // Buses are left out of every sum over the mix, since their sources are channels of their own.
     Role contentRole = Role::other;
     double contentConfidence = 0.0;
+    // Phase 28: a kick or percussion part whose hits are the master's highest peaks, and how
+    // far its clipper (as the Agent has it now) takes them down: what a loud master needs.
+    bool carriesMasterPeaks = false;
+    double currentClipDb = 0.0;
 };
+
+// Phase 28: a loud master. When the limiter of the master preview works too hard at the target
+// loudness (it flattens the hits), the percussion carrying the peaks is clipped further, up to
+// kMaxLoudMasterClipDb in all, aiming the limiter at kLoudMasterAimDb on the loud part.
+constexpr double kLoudMasterLimitDb = 3.0;   // above this the limiter costs the hits their punch
+constexpr double kLoudMasterAimDb = 2.5;
+constexpr double kMaxLoudMasterClipDb = 6.0; // a clipper on a kick or percussion, in all
 
 struct ChainContext
 {
     double bpm = 0.0;            // releases follow the tempo when known
     double headroomShortDb = 0.0; // the mix's peak over the pre-master ceiling: clip percussion a little more
+    // Phase 28: the master preview's limiter on the loud part (dB, 95th percentile), measured with
+    // the clippers the Agents have now; negative = not measured.
+    double limiterReductionDb = -1.0;
 };
 
 struct ChainPlan
@@ -71,6 +85,9 @@ struct ChainPlan
     bool peakKnown = false;         // phase 23: the learn pass's true peak is there; without it crest and clipping are unknown
     double maxCrestDb = 0.0;
     double clipDb = 0.0;
+    // Phase 28: the part of clipDb that is there for a loud master (beyond the crest rule).
+    double loudMasterClipDb = 0.0;
+    bool loudMasterCapped = false;  // at kMaxLoudMasterClipDb: more has to come from elsewhere
 
     // Phase 13: saturation where a tonal part is too thin in overtones (a sine-like sub, a
     // dull pad) to be heard and felt in the mix; the shaper and how hard it works are chosen

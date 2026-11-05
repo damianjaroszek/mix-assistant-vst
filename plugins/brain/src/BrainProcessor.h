@@ -1,6 +1,8 @@
 #pragma once
 
 #include "SharedSession.h"
+
+#include <map>
 #include "ma/ChainPlanner.h"
 #include "ma/StereoPlanner.h"
 #include "ma/StemReference.h"
@@ -162,7 +164,8 @@ struct Proposal
             transients,
             chain,
             level, // phase 9: a stem group's level, on every channel of the group
-            channelLevel // phase 23: one channel quieter, for a collision EQ has taken as far as it goes
+            channelLevel, // phase 23: one channel quieter, for a collision EQ has taken as far as it goes
+            unmask // phase 30: the masker dips while the masked channel plays (no cable)
         };
         // Phase 7: the engineer pass ("Analizuj", whole chain) sets the channel's chain.
         enum class ChainTool
@@ -186,10 +189,15 @@ struct Proposal
         Action action = Action::solver;
         ma::DuckSettings duck {};
         int duckSync = 0;
+        std::uint64_t duckKey = 0; // phase 30: the kick's keyId, the duck's key without a cable
         ma::HarmonicSettings harmonics {};
         ma::TransientSettings transients {};
         int group = -1;      // level: which ma::StemGroup
         double gainDb = 0.0; // level
+        ma::UnmaskSettings unmask {}; // unmask: the dip (owner = the masker, maskedOwner = the key)
+        std::uint64_t unmaskKey = 0;  // unmask: the masked channel's AgentData::keyId
+        bool partial = false;         // unmask: makes it smaller, does not clear it
+        int unmaskIndex = 0;          // unmask: which of the Agent's dips
     };
 
     std::vector<Item> items;
@@ -307,17 +315,47 @@ public:
         // Phase 23, from the last analysis:
         pending,    // the proposal has a change for it that is not applied yet
         levelStep,  // EQ has done what it can; the proposal makes the masker a little quieter
-        settled     // EQ has done what it can and only a big level change would help: register / sound
+        settled,    // EQ has done what it can and only a big level change would help: register / sound
+        unmasked    // phase 30: the masker dips there while the masked channel plays (no cable)
     };
     // Phase 23: for collisions EQ cannot take further, what the last analysis found (kept after apply).
     struct CollisionStep
     {
         std::uint64_t masker = 0, masked = 0;
         double levelDb = 0.0; // how much quieter the masker must be; 0 = more than kMaxCollisionLevelDb
+        bool clearedByProposal = false; // phase 28: the proposal's own changes were predicted to clear it
+        bool applied = false;           // phase 28: its level step went in with "Zastosuj"
+        bool unmask = false;            // phase 30: a dynamic dip in the proposal takes it
     };
     static constexpr double kMaxCollisionLevelDb = 3.0;
+    static constexpr double kSmallLevelStepDb = 2.0;   // a level step this small goes in ticked
+    static constexpr double kMaxUnmaskDb = 6.0;        // phase 30: deepest dip the Brain sets
+    static constexpr double kUnmaskLowestHz = 150.0;   // dips stay above the low end (the duck's place)
+    static constexpr double kUnmaskHighestHz = 10000.0;
     IssueHandling issueHandling(const ma::MaskingIssue& issue) const;
     void planCollisionSteps(); // phase 23, at the end of propose()
+    // Phase 28: the mix after the ticked proposal, for the collision steps.
+    ma::EqSettings proposedEqFor(const MixSnapshot::Channel& channel, bool& changes) const;
+    std::array<double, ma::bus::kBands> predictedHeard(const MixSnapshot::Channel& channel) const;
+    std::vector<ma::MaskingChannel> maskingInput(bool afterProposal) const;
+    // Phase 28: clipping on the percussion for a loud master, from the master preview.
+    void markMasterPeakCarriers(std::vector<ma::ChainChannel>& chain, ma::ChainContext& context);
+    static constexpr double kPeakCarrierRangeDb = 6.0;
+    static constexpr double kPeakSettleSeconds = 1.0;
+    struct LoudMasterPlan
+    {
+        bool made = false;          // the last whole-mix analysis had the preview measured
+        juce::StringArray carriers; // the percussion carrying the master's peaks
+        std::vector<std::uint64_t> owners;
+        double clipDb = 0.0;        // what it planned beyond the crest rule
+        bool capped = false;        // and that none of them could give more
+        juce::String loudest;       // the channel with the highest peaks then (without the clippers)
+    };
+    LoudMasterPlan loudMasterPlan;
+    bool duckedCollision(int maskerIndex, int maskedIndex, double lowHz, double highHz) const;
+    double liveLevelStep(const ma::MaskingIssue& issue) const;
+    static constexpr juce::uint32 kLiveStepMs = 2000;
+    mutable std::map<std::pair<std::uint64_t, std::uint64_t>, std::pair<double, juce::uint32>> liveSteps;
     static bool isPendingFor(const Proposal::Item& item, std::uint64_t masker, std::uint64_t masked, double lowHz, double highHz);
     juce::String describeIssue(const ma::MaskingIssue& issue) const;
     static juce::String glueText(const ma::ChainPlan& plan, double bpm);
@@ -339,7 +377,20 @@ public:
     // Phase 22: what "Analizuj" runs (0 = corrections only, the old "Zaproponuj"; 1 = the whole chain).
     int analysisScope = 1;
     void toggleProposalItem(int index);
-    int applySelected(); // returns how many Agents got a command
+    int applySelected(bool refine = false); // returns how many Agents got a command
+    // Phase 30: after "Zastosuj" the Brain measures the drop again and, while there is something
+    // left, analyses and applies once more by itself (at most kRefineRounds times); the user's
+    // click, "Analizuj", "Cofnij" or "Przed / po" stop it. One undo takes everything back.
+    static constexpr const char* autoRefineId = "autoRefine";
+    static constexpr int kRefineRounds = 2;
+    static constexpr std::uint64_t kRefinePreviewWaitMs = 15000;
+    bool autoRefineOn() const;
+    int applyByUser(); // the user's "Zastosuj": apply, then refine by itself when that is on
+    void stopRefining();
+    bool isRefining() const { return refine.active; }
+    juce::String refineStatus() const { return refine.status; }
+    // Phase 30: the collision's masker dips there while the masked channel plays.
+    bool unmaskedCollision(int maskerIndex, int maskedIndex, double lowHz, double highHz) const;
     int undoLast();
     bool canUndo() const;
     void setComparing(bool shouldCompare);
@@ -352,6 +403,8 @@ public:
     const ma::TonalTarget& target() const { return currentTarget; }
     bool selectTarget(const juce::String& name);
     bool createTarget(const juce::String& name);
+    bool selectLastTarget();
+    bool targetChosenAutomatically() const { return autoSelectedTarget; } // phase 30
     void removeLastReference();
     // Capture: reset the measurement, play a reference through the master, then finish.
     void startCapture();
@@ -465,6 +518,10 @@ private:
     void updateLoudnessMatch(std::uint64_t now);
     void sendCommand(std::uint64_t owner, const ma::bus::Command& command);
     void propose(const std::array<double, ma::kStemGroups>* groupGain);
+    void proposeOnce(const std::array<double, ma::kStemGroups>* groupGain);
+    // Phase 27: what the translation steps of the last pass add per channel (owner -> dB per band),
+    // and what the solver counts in its tonal prediction (filled for the second pass).
+    std::map<std::uint64_t, ma::SpectrumAnalyzer::Bands> translationDelta, translationExtra;
     void proposeDynamics();
     void proposeHarmonics(); // translation steps and harmonics for tonal holes
     static void applyCleanup(MixSnapshot::Channel& channel, const ma::CleanupSettings& cleanup);
@@ -515,10 +572,12 @@ private:
     // (more than 3 dB of it): the report does not ask for it back.
     bool cutOnPurpose(int group, int region) const;
     bool stemsReady() const;
+    bool typicalLevelsReady() const; // phase 29
     ma::StemShapeInput stemShapeInput() const; // per channel of mix.channels
 
     std::atomic<float>* peakCeiling = nullptr;
     std::atomic<float>* adaptive = nullptr;
+    std::atomic<float>* autoRefine = nullptr; // phase 30
     std::atomic<float>* masterTarget = nullptr;
 
     ma::LoudnessMeter loudness;
@@ -576,6 +635,28 @@ private:
     bool comparing = false;
     std::uint64_t compareSwitchedMs = 0;
     std::uint64_t resetAtMs = 0; // re-measure once the Agents have switched (they poll at 10 Hz)
+    struct Refine
+    {
+        bool active = false;
+        int roundsLeft = 0;      // applies still allowed
+        int round = 0;           // applies done by itself so far
+        int scope = 1;           // analysisScope at the user's click
+        bool sawReset = false;   // the drop measurement restarted after the last apply
+        std::uint64_t readyMs = 0; // when the drop was measured enough (the preview gets a little longer)
+        // Items the user unticked (owner, action, tool, group, solver kind): they stay unticked.
+        std::vector<std::array<std::int64_t, 5>> unticked;
+        juce::String status;
+        juce::StringArray lastApplied; // the changes of the last round, sorted
+    };
+    Refine refine;
+    bool autoSelectedTarget = false;
+    bool groupLevelsPlanned = false; // phase 30: the analysis plans group levels (no per-channel level steps then)
+    static juce::File lastTargetFile();
+    static void rememberLastTarget(const juce::String& name);
+    void updateRefine(std::uint64_t now);
+    static std::array<std::int64_t, 5> itemSignature(const Proposal::Item& item);
+    void planUnmask(const std::vector<ma::MaskingChannel>& masking, const ma::MaskingIssue& issue, CollisionStep& step,
+                    std::map<int, std::vector<Proposal::Item>>& dips) const;
     double loudnessBefore = -INFINITY, loudnessAfter = -INFINITY;
     ma::TonalTarget currentTarget;
     bool capturing = false;

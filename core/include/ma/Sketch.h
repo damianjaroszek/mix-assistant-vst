@@ -44,6 +44,15 @@ struct Arrangement
 Arrangement arrangementFromStems(const StemTarget& target);
 // A typical house / tech house drop: drums, bass and the rest; a vocal is not expected.
 Arrangement typicalArrangement();
+// Phase 29: the typical house balance of the groups as level corridors (+-kTypicalLevelSpanDb
+// around typicalArrangement's levels, moved together so the groups that play add up to the
+// whole), for planStemLevels when there are no stem references. No profiles: only `level`.
+constexpr double kTypicalLevelSpanDb = 1.5;
+StemTarget typicalLevelTarget(const std::array<bool, kStemGroups>& present);
+// planStemLevels keeps the overall loudness, so pads far too loud come out as everything else
+// raised. With the typical balance the drums stay where Learn put them (the kick is the anchor of
+// the gain staging) and the rest moves against them; the master target makes up the loudness.
+void anchorStemLevels(StemLevelPlan& plan, int group);
 
 struct SketchChannel
 {

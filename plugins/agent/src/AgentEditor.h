@@ -38,6 +38,7 @@ private:
     juce::Slider targetSlider, trimSlider, ceilingSlider, learnTimeSlider;
 
     juce::TextButton learnButton;
+    juce::ToggleButton roleLevelButton; // phase 29
     juce::Label status;
 
     juce::Label eqLabel, eqStatus;
@@ -47,6 +48,8 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> eqBypassAttachment;
 
     juce::Label duckLabel, duckStatus;
+    juce::Label unmaskLabel, unmaskStatus; // phase 30
+    juce::TextButton unmaskOffButton;
     juce::ToggleButton duckOnButton, polarityButton;
     juce::ComboBox duckModeBox, duckSyncBox;
     juce::Label duckFreqLabel, duckDepthLabel, duckThresholdLabel, duckAttackLabel, duckReleaseLabel;
@@ -66,13 +69,13 @@ private:
     juce::ToggleButton satOnButton, intentionalButton;
     juce::ComboBox satModeBox;
     juce::Slider satDriveSlider, satMixSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> satOnAttachment, intentionalAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> satOnAttachment, intentionalAttachment, roleLevelAttachment;
 
     // Phase 7: the engineer's chain.
     juce::Label chainTitle, cleanLabel, compLabel, clipLabel, evenLabel;
     // Phase 23: per tool (bit order of ma::bus::ToolBit) whether the Brain set it, it was changed by hand
     // since, or it was set by hand only.
-    std::array<juce::Label, 10> origins;
+    std::array<juce::Label, 11> origins;
     juce::Label& origin(int bit);
     void updateOrigins();
     juce::Label hpfLabel, monoLabel, mudFreqLabel, mudGainLabel;
@@ -104,6 +107,7 @@ private:
         duckReleaseAttachment, harmonicsFreqAttachment, harmonicsAmountAttachment,
         attackFreqAttachment, attackAmountAttachment, satDriveAttachment, satMixAttachment;
     void updateDuckStatus();
+    void updateUnmaskStatus();
 
     // Fixed window: a header plus one tab of controls at a time.
     ma::ui::Page levelPage, eqPage, tonePage, chainPage, stereoPage;
