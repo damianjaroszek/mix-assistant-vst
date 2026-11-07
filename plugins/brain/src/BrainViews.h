@@ -82,6 +82,128 @@ private:
     juce::String note;
 };
 
+// Phase 31: "Jak zacząć". What to do, in order, for the best result; each step ticks itself off from
+// what the Brain sees (Agents, roles, learned levels, the target, the drop, analysis and apply).
+class GuideView : public juce::Component
+{
+public:
+    enum class State
+    {
+        todo,     // later
+        now,      // the next thing to do
+        done,     // seen done
+        optional, // recommended, not required, not done
+        info      // advice, nothing to tick
+    };
+    struct Step
+    {
+        State state = State::todo;
+        juce::String title, detail;
+    };
+    struct Section
+    {
+        juce::String title, subtitle;
+        std::vector<Step> steps;
+    };
+
+    void setSections(std::vector<Section> newSections)
+    {
+        bool same = newSections.size() == sections.size();
+        for (size_t s = 0; same && s < sections.size(); ++s)
+        {
+            same = sections[s].steps.size() == newSections[s].steps.size() && sections[s].title == newSections[s].title;
+            for (size_t i = 0; same && i < sections[s].steps.size(); ++i)
+                same = sections[s].steps[i].state == newSections[s].steps[i].state && sections[s].steps[i].title == newSections[s].steps[i].title
+                       && sections[s].steps[i].detail == newSections[s].steps[i].detail;
+        }
+        if (same)
+            return;
+        sections = std::move(newSections);
+        repaint();
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        namespace colours = ma::ui::colours;
+        using ma::ui::pl;
+        // Sections 0 and 2 on the left, 1 on the right (the loop is what the user comes back to).
+        auto area = getLocalBounds().reduced(10, 6);
+        auto left = area.removeFromLeft(area.getWidth() / 2 - 8);
+        area.removeFromLeft(16);
+        int number = 1;
+        for (size_t s = 0; s < sections.size(); ++s)
+        {
+            auto& column = s == 1 ? area : left;
+            const auto& section = sections[s];
+            g.setColour(colours::text);
+            g.setFont(juce::FontOptions(15.0f, juce::Font::bold));
+            g.drawText(section.title, column.removeFromTop(20), juce::Justification::centredLeft);
+            g.setColour(colours::quiet);
+            g.setFont(juce::FontOptions(12.5f));
+            g.drawFittedText(section.subtitle, column.removeFromTop(18), juce::Justification::centredLeft, 1, 0.9f);
+            column.removeFromTop(4);
+            for (const auto& step : section.steps)
+            {
+                const int lines = step.detail.isEmpty() ? 0 : juce::jlimit(1, 4, lineCount(step.detail, column.getWidth() - 34));
+                auto row = column.removeFromTop(22 + lines * 15 + 5);
+                if (step.state == State::now)
+                {
+                    g.setColour(colours::accent.withAlpha(0.14f));
+                    g.fillRoundedRectangle(row.toFloat(), 4.0f);
+                }
+                row.reduce(4, 3);
+                auto mark = row.removeFromLeft(26);
+                juce::String symbol;
+                juce::Colour colour = colours::quiet;
+                switch (step.state)
+                {
+                    case State::done: symbol = pl("✓"); colour = colours::good; break;
+                    case State::now: symbol = juce::String(number); colour = colours::accent; break;
+                    case State::optional: symbol = juce::String(number); colour = colours::warning; break;
+                    case State::info: symbol = pl("•"); colour = colours::quiet; break;
+                    case State::todo: symbol = juce::String(number); colour = colours::quiet.withAlpha(0.6f); break;
+                }
+                if (step.state != State::info)
+                    ++number;
+                g.setColour(colour);
+                g.setFont(juce::FontOptions(15.0f, juce::Font::bold));
+                g.drawText(symbol, mark.removeFromTop(20), juce::Justification::centred);
+                g.setColour(step.state == State::todo ? colours::text.withAlpha(0.6f) : colours::text);
+                g.setFont(juce::FontOptions(14.0f, step.state == State::now ? juce::Font::bold : juce::Font::plain));
+                auto titleRow = row.removeFromTop(20);
+                g.drawText(step.title, titleRow, juce::Justification::centredLeft);
+                if (step.state == State::optional || step.state == State::now)
+                {
+                    g.setFont(juce::FontOptions(12.0f));
+                    g.setColour(colour);
+                    g.drawText(step.state == State::now ? pl("teraz") : pl("zalecane"), titleRow, juce::Justification::centredRight);
+                }
+                if (lines > 0)
+                {
+                    g.setColour(colours::quiet);
+                    g.setFont(juce::FontOptions(12.5f));
+                    g.drawFittedText(step.detail, row.withTrimmedTop(1), juce::Justification::topLeft, lines, 0.95f);
+                }
+            }
+            column.removeFromTop(6);
+        }
+    }
+
+private:
+    static int lineCount(const juce::String& text, int width)
+    {
+        juce::GlyphArrangement glyphs;
+        glyphs.addJustifiedText(juce::Font(juce::FontOptions(12.5f)), text, 0.0f, 0.0f, static_cast<float>(std::max(50, width)),
+                                juce::Justification::topLeft);
+        if (glyphs.getNumGlyphs() == 0)
+            return 0;
+        const auto bounds = glyphs.getBoundingBox(0, -1, true);
+        return std::max(1, juce::roundToInt(bounds.getHeight() / juce::Font(juce::FontOptions(12.5f)).getHeight()));
+    }
+
+    std::vector<Section> sections;
+};
+
 // The correctness report: one line per check, with a coloured status dot. Phase 22: problems first,
 // grouped into what the mix can fix, what belongs to the arrangement and the plugin's own state;
 // what is fine folds into one line that opens on click.

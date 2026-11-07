@@ -123,10 +123,7 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     analyseButton.onClick = [this] {
         processor.stopRefining();
         const bool chain = processor.analysisScope == 1;
-        if (chain)
-            processor.proposeWholeMix();
-        else
-            processor.propose();
+        processor.analyse(processor.analysisScope);
         measuringEffect = false;
         proposalStatus.setText({}, juce::dontSendNotification);
         tabs.setCurrentTabIndex(static_cast<int>(chain ? Tab::verdict : Tab::proposal));
@@ -283,6 +280,8 @@ BrainEditor::BrainEditor(BrainProcessor& p)
         tabs.add(name, target, tooltip);
     };
     const auto fill = [](juce::Component& c) { return [&c](juce::Rectangle<int> area) { c.setBounds(area.reduced(10)); }; };
+    page(Tab::guide, pl("Jak zacząć"), pl("Co zrobić po kolei, żeby wtyczka dała najlepszy wynik. Kroki odhaczają się same."), { &guideView },
+         fill(guideView));
     page(Tab::report, pl("Raport"), pl("Raport poprawności: co jest w porządku, a co trzeba poprawić."), { &reportViewport },
          [this](juce::Rectangle<int> area) {
              reportViewport.setBounds(area.reduced(10));
@@ -421,6 +420,158 @@ void BrainEditor::select(std::uint64_t owner)
 {
     selected = owner;
     timerCallback();
+}
+
+// Phase 31: the guide. Each step reads what the Brain sees, so it ticks itself off.
+void BrainEditor::updateGuide()
+{
+    using State = brain::GuideView::State;
+    const auto& mix = processor.snapshot();
+    const auto roles = ma::ui::roleNames();
+    const auto list = [](const juce::StringArray& names) {
+        juce::StringArray quotedNames;
+        for (int i = 0; i < names.size() && i < 6; ++i)
+            quotedNames.add(pl("„") + names[i] + pl("”"));
+        return quotedNames.joinIntoString(", ") + (names.size() > 6 ? pl(" i ") + juce::String(names.size() - 6) + pl(" innych") : juce::String());
+    };
+
+    std::vector<brain::GuideView::Section> sections(3);
+    auto& setup = sections[0];
+    setup.title = pl("Przygotowanie (raz na projekt)");
+    setup.subtitle = pl("Bez tego Mózg zgaduje. Każdy krok odhacza się sam.");
+    juce::StringArray all, noRole, notLearned;
+    for (const auto& channel : mix.channels)
+    {
+        all.add(channel.name);
+        if (channel.data.role == 0)
+            noRole.add(channel.name);
+        if (channel.data.statsValid == 0 && channel.data.role != static_cast<int>(ma::Role::send))
+            notLearned.add(channel.name);
+    }
+    {
+        brain::GuideView::Step step;
+        step.title = pl("Agent na każdym kanale miksera");
+        step.state = all.size() >= 2 ? State::done : State::now;
+        step.detail = all.isEmpty() ? pl("Wstaw wtyczkę Agent jako pierwszy efekt na każdym kanale miksera FL (stopa, bas, wokal, synthy, busy). "
+                                         "Kanał bez Agenta jest dla Mózgu niewidoczny.")
+                                    : pl("Mózg widzi ") + juce::String(all.size()) + pl(" kan.: ") + list(all)
+                                          + pl(". Jeśli któregoś brakuje, wstaw na nim Agenta.");
+        setup.steps.push_back(step);
+    }
+    {
+        brain::GuideView::Step step;
+        step.title = pl("„Naucz poziom” na dropie w każdym Agencie");
+        step.state = all.isEmpty() ? State::todo : notLearned.isEmpty() ? State::done : State::now;
+        step.detail = notLearned.isEmpty() && !all.isEmpty()
+                          ? pl("Wszystkie kanały nauczone: trim, rola i dynamika są znane.")
+                          : pl("Zapętl najgęstszy fragment i kliknij „Naucz poziom” (można w kilku Agentach naraz). Ustawia trim, "
+                               "rozpoznaje rolę, zapamiętuje dynamikę i szczyty.")
+                                + (notLearned.isEmpty() ? juce::String() : pl(" Jeszcze bez nauki: ") + list(notLearned) + ".");
+        setup.steps.push_back(step);
+    }
+    {
+        brain::GuideView::Step step;
+        step.title = pl("Sprawdź rolę i priorytet kanałów");
+        step.state = all.isEmpty() || !notLearned.isEmpty() ? State::todo : noRole.isEmpty() ? State::done : State::now;
+        step.detail = noRole.isEmpty() ? pl("Od roli zależy prawie wszystko: kompresja, saturacja, kto komu ustępuje. W Agencie: „Poziom” → „Rola”.")
+                                       : pl("Rola „") + roles[0] + pl("” na: ") + list(noRole)
+                                             + pl(". Ustaw właściwą w Agencie („Poziom” → „Rola”), a priorytet 1 dla najważniejszych.");
+        setup.steps.push_back(step);
+    }
+    {
+        brain::GuideView::Step step;
+        step.title = pl("Cel brzmienia: referencje");
+        const bool tonal = processor.target().valid();
+        const bool stems = !processor.stemTarget().profiles.empty();
+        step.state = tonal || stems ? State::done : State::optional;
+        step.detail = tonal || stems
+                          ? (tonal ? pl("Cel tonalny „") + juce::String::fromUTF8(processor.target().name.c_str()) + pl("” wybrany. ") : juce::String())
+                                + (stems ? pl("Stemy referencji wczytane.") : pl("Stemy referencji (zakładka „Referencje”) dadzą jeszcze proporcje grup i szerokość."))
+                          : pl("Raz na gatunek: „Balans tonalny” → „Nowy cel” → nagraj 3–10 utworów (jak Capture w TBC). Bez tego Mózg "
+                               "trzyma się typowych proporcji house'u, a balansu tonalnego nie ocenia.");
+        setup.steps.push_back(step);
+    }
+
+    // The loop the user comes back to.
+    auto& loop = sections[1];
+    loop.title = pl("Miks (powtarzaj po każdej większej zmianie)");
+    loop.subtitle = pl("Mózg porównuje tylko głośny fragment, więc zawsze graj drop.");
+    const bool changedSinceAnalysis = processor.lastChangeTime() > processor.lastAnalysisTime();
+    const auto& proposal = processor.proposal();
+    const auto toApply = std::count_if(proposal.items.begin(), proposal.items.end(), [](const auto& i) { return !i.advisory && i.selected != i.inPlace; });
+    const bool dropHeard = mix.dropSeconds >= BrainProcessor::kMinimumDropSeconds;
+    const bool refining = processor.isRefining();
+    const bool autoRefine = processor.autoRefineOn();
+    int problems = 0;
+    for (const auto& item : mix.report)
+        problems += item.status == MixSnapshot::Status::problem ? 1 : 0;
+    // 0 drop, 1 analyse, 2 apply, 3 listen again / refine, 4 report
+    int current = 4;
+    if (refining || measuringEffect)
+        current = 3;
+    else if (!dropHeard)
+        current = 0;
+    else if (proposal.made && toApply > 0)
+        current = 2;
+    else if (processor.lastAnalysisTime() == 0 || changedSinceAnalysis)
+        current = 1;
+    const auto stateOf = [&](int index) { return index < current ? State::done : index == current ? State::now : State::todo; };
+    const auto add = [&](int index, const juce::String& heading, const juce::String& detail) {
+        brain::GuideView::Step step;
+        step.state = stateOf(index);
+        step.title = heading;
+        step.detail = detail;
+        loop.steps.push_back(step);
+    };
+    add(0, pl("Zapętl drop i graj"),
+        dropHeard ? pl("Drop zmierzony (") + juce::String(juce::roundToInt(mix.dropSeconds)) + pl(" s).")
+                  : pl("Najgęstszy fragment, w pętli. Mózg potrzebuje ") + juce::String(juce::roundToInt(BrainProcessor::kMinimumDropSeconds))
+                        + pl(" s dropu, teraz ") + juce::String(juce::roundToInt(mix.dropSeconds)) + " s.");
+    add(1, changedSinceAnalysis ? pl("„Analizuj” jeszcze raz") : pl("„Analizuj” (zakres „Cały miks”)"),
+        changedSinceAnalysis ? pl("Po zmianach sprawdza, czy trafiły; zostaje to, czego jeszcze brakuje. Nic nie zmienia sam z siebie.")
+                             : pl("Nic nie zmienia. Pokazuje propozycję i werdykt na każdy kanał; w Agentach zakładka „Decyzje Mózgu” mówi, "
+                                  "co postanowił przy każdym narzędziu i dlaczego."));
+    add(2, pl("Przejrzyj propozycję i „Zastosuj”"),
+        pl("Odznacz to, czego nie chcesz. „Przed / po” porównuje z wyrównaną głośnością, „Cofnij” zdejmuje wszystko naraz."));
+    add(3, autoRefine ? pl("Graj dalej: Mózg dopracowuje sam") : pl("Puść drop jeszcze raz"),
+        autoRefine ? (refining ? processor.refineStatus()
+                               : pl("Po „Zastosuj” mierzy drop na nowo i sam poprawia, co zostało (do ")
+                                     + juce::String(BrainProcessor::kRefineRounds) + pl(" rund). Graj drop, aż skończy."))
+                   : pl("Zmiany słychać dopiero na nowym pomiarze: graj drop ") + juce::String(juce::roundToInt(BrainProcessor::kMinimumDropSeconds))
+                         + pl(" s, potem znowu „Analizuj”. Albo włącz „Dopracuj sam”."));
+    add(4, pl("Sprawdź „Raport”"),
+        problems > 0 ? pl("Czerwonych pozycji: ") + juce::String(problems)
+                           + pl(". Część to aranż albo brzmienie (do zrobienia w FL), nie miks; każda mówi, co dalej.")
+                     : pl("Nic czerwonego. Żółte to rzeczy do decyzji, nie błędy."));
+    if (current == 4 && problems == 0)
+        loop.steps.back().state = State::done;
+
+    auto& extra = sections[2];
+    extra.title = pl("Dodatkowo");
+    extra.subtitle = pl("Gdy miks już siedzi.");
+    {
+        brain::GuideView::Step step;
+        step.title = pl("Cały utwór od początku w trybie Song");
+        // Long enough to hold an intro, a build and a drop: not just the loop.
+        step.state = mix.energy.ours.valid && mix.energy.ours.levelDb.size() >= 90 && mix.energy.comparison.valid ? State::done : State::optional;
+        step.detail = pl("Raz, od początku do końca: mapa energii, intro, build i break wobec referencji (zakładki „Energia” i „Referencje”).");
+        extra.steps.push_back(step);
+    }
+    {
+        brain::GuideView::Step step;
+        step.title = pl("Przed masteringiem: „Raport dla Ozone”");
+        step.state = State::info;
+        step.detail = pl("W zakładce „Raport”: poziom, szczyty i uwagi do masteringu w jednym pliku.");
+        extra.steps.push_back(step);
+    }
+    {
+        brain::GuideView::Step step;
+        step.title = pl("Nowy kanał albo inna barwa");
+        step.state = State::info;
+        step.detail = pl("„Naucz poziom” na tym kanale, potem znowu od „Zapętl drop”.");
+        extra.steps.push_back(step);
+    }
+    guideView.setSections(std::move(sections));
 }
 
 void BrainEditor::timerCallback()
@@ -700,6 +851,8 @@ void BrainEditor::timerCallback()
         analyseButton.setColour(juce::TextButton::buttonColourId, next == 0 ? colours::accent.darker(0.5f) : colours::panel);
         applyButton.setColour(juce::TextButton::buttonColourId, next == 1 ? colours::accent.darker(0.5f) : colours::panel);
     }
+
+    updateGuide();
 
     // Phase 30: while the Brain refines by itself, it tells where it is.
     const auto refineNote = processor.refineStatus();

@@ -2495,6 +2495,29 @@ ma::ChainChannel toneChannel(ma::Role role, int priority, double hz, int harmoni
     return c;
 }
 
+// Phase 31: the Brain's notes per tool travel through the slot and come back whole.
+void testToolNotes()
+{
+    auto region = std::make_unique<ma::bus::Region>();
+    std::memset(static_cast<void*>(region.get()), 0, sizeof(ma::bus::Region));
+    ma::bus::initialise(*region);
+    auto& slot = region->slots[3];
+    ma::bus::ToolNotes in {};
+    check(!ma::bus::readNotes(slot, in), "no notes before the Brain writes any");
+    ma::bus::ToolNotes out {};
+    out.target = 42;
+    out.madeMs = 1234567890123;
+    out.wholeMix = 1;
+    out.decision[8] = static_cast<std::int32_t>(ma::bus::ToolDecision::notNeeded);
+    std::strcpy(out.text[8], "na telefonie s\xc5\x82ycha\xc4\x87 go dobrze");
+    ma::bus::sendNotes(slot, out);
+    check(ma::bus::readNotes(slot, in) && in.target == 42 && in.madeMs == 1234567890123 && in.wholeMix == 1
+              && in.decision[8] == static_cast<std::int32_t>(ma::bus::ToolDecision::notNeeded)
+              && std::strcmp(in.text[8], out.text[8]) == 0,
+          "the notes come back as written");
+    check(in.text[0][0] == '\0' && in.decision[0] == 0, "untouched tools stay empty");
+}
+
 void testSaturationPlan()
 {
     constexpr double sr = 48000.0;
@@ -2532,12 +2555,35 @@ void testSaturationPlan()
                     int(plans[i].saturation.on), int(plans[i].saturation.mode), plans[i].saturation.driveDb,
                     plans[i].saturation.mix * 100.0f, plans[i].saturationWouldCover);
     check(plans[0].saturation.on < 0.5f && !plans[0].saturationConsidered, "the kick is left to the clipper");
-    check(plans[1].saturation.on > 0.5f && static_cast<int>(plans[1].saturation.mode) == static_cast<int>(ma::SaturationMode::tube)
-              && plans[1].overtonesAfterDb > plans[1].overtonesDb + 10.0,
-          "a sine sub gets the tube's overtones");
+    // Phase 31: a near-sine sub takes the harmonic enhancer (its fundamental stays clean), not the tube.
+    std::printf("      sine sub: enhancer %d below %.0f Hz at %.0f dB, overtones -> %.1f dB\n", int(plans[1].harmonics.on),
+                plans[1].harmonics.hz, plans[1].harmonics.amountDb, plans[1].harmonicsAfterDb);
+    check(plans[1].sineSub && plans[1].harmonics.on > 0.5f && plans[1].saturation.on < 0.5f
+              && plans[1].overtonesAfterDb > plans[1].overtonesDb + 10.0 && plans[1].overtonesAfterDb >= plans[1].overtonesTargetDb - 0.5,
+          "a sine sub gets the enhancer's overtones, not the tube");
+    check(plans[1].harmonics.hz >= 70.0f && plans[1].harmonics.hz <= 120.0f && plans[1].harmonics.amountDb <= -6.0f,
+          "the enhancer listens to the sub only, at a sane amount");
+    // A bass with a little body already gets the tube's density instead.
+    {
+        auto body = mix;
+        int band = 0;
+        for (int b = 0; b < 40; ++b)
+            if (std::abs(std::log(ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b) / 220.0))
+                < std::abs(std::log(ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, band) / 220.0)))
+                band = b;
+        const double loudest = *std::max_element(body[1].bandsDb.begin(), body[1].bandsDb.begin() + 40);
+        body[1].bandsDb[static_cast<size_t>(band)] = loudest - 30.0;
+        const auto bodyPlans = ma::planChains(body, { 124.0, 0.0 });
+        std::printf("      bass with body: overtones %.1f, saturation %d mode %d, enhancer %d\n", bodyPlans[1].overtonesDb,
+                    int(bodyPlans[1].saturation.on), int(bodyPlans[1].saturation.mode), int(bodyPlans[1].harmonics.on));
+        check(!bodyPlans[1].sineSub && bodyPlans[1].saturation.on > 0.5f && bodyPlans[1].harmonics.on < 0.5f
+                  && static_cast<int>(bodyPlans[1].saturation.mode) == static_cast<int>(ma::SaturationMode::tube),
+              "a bass with some body gets the tube");
+    }
     check(plans[2].saturationConsidered && plans[2].saturation.on < 0.5f, "a saw lead is rich enough already");
     check(plans[3].saturation.on > 0.5f && plans[3].saturation.mix <= 0.55f, "a dull pad gets some tape");
     check(plans[1].overtonesAfterDb <= plans[1].overtonesTargetDb + 6.0, "no more than the role needs");
+    check(plans[3].harmonics.on < 0.5f, "the enhancer is for the bass; a pad's tone comes from saturation");
 
     // The same pad under a quiet, more important vocal right where its overtones land: gentler or none.
     auto crowded = mix;
@@ -3472,6 +3518,7 @@ int main()
     testKey();
     testStemBreak();
     testSaturationPlan();
+    testToolNotes();
     testKickTuning();
     testBusGlue();
     testStemSections();

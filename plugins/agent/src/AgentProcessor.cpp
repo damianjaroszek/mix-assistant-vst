@@ -20,6 +20,7 @@ const juce::Identifier brainSetProperty { "brainSet" }; // phase 23: what the Br
 const juce::Identifier resonancesProperty { "resonances" };
 const juce::Identifier keyIdProperty { "keyId" };          // phase 30: how other Agents find this channel
 const juce::Identifier unmaskKeysProperty { "unmaskKeys" }; // phase 30: the channels its dips give way to
+const juce::Identifier notesProperty { "brainNotes" };   // phase 31: "<made ms> <whole mix> <decision x 11>"
 const juce::Identifier duckKeyProperty { "duckKey" };       // phase 30: the duck's key without a cable
 
 std::uint64_t newKeyId()
@@ -937,6 +938,7 @@ void AgentProcessor::publishToBrain()
     if (slotIndex < 0)
         return;
     handleBrainCommand(*region);
+    readBrainNotes(*region);
     updateKeys(*region, now);
     // Every half second (every Agent runs the whole plan, so with many sliders this adds up), and at
     // once when this slider moves.
@@ -1044,6 +1046,20 @@ void AgentProcessor::publishToBrain()
         data.unmaskReductionDb[d] = static_cast<float>(unmaskShownDb[static_cast<size_t>(d)]);
     }
     ma::bus::publish(region->slots[slotIndex], data, now);
+}
+
+void AgentProcessor::readBrainNotes(ma::bus::Region& region)
+{
+    ma::bus::ToolNotes in {};
+    if (slotIndex < 0 || !ma::bus::readNotes(region.slots[slotIndex], in) || in.target != instanceId || in.madeMs == brainNotesNow.madeMs)
+        return;
+    brainNotesNow.madeMs = in.madeMs;
+    brainNotesNow.wholeMix = in.wholeMix != 0;
+    for (int t = 0; t < ma::bus::kToolCount; ++t)
+    {
+        brainNotesNow.decision[static_cast<size_t>(t)] = juce::jlimit(0, 5, static_cast<int>(in.decision[t]));
+        brainNotesNow.text[static_cast<size_t>(t)] = juce::String::fromUTF8(in.text[t]);
+    }
 }
 
 void AgentProcessor::handleBrainCommand(ma::bus::Region& region)
@@ -1611,6 +1627,15 @@ void AgentProcessor::getStateInformation(juce::MemoryBlock& destData)
         keys.add(juce::String::toHexString(static_cast<juce::int64>(key.load())));
     state.setProperty(unmaskKeysProperty, keys.joinIntoString(" "), nullptr);
     state.setProperty(duckKeyProperty, juce::String::toHexString(static_cast<juce::int64>(duckKeyNow.load())), nullptr);
+    if (brainNotesNow.madeMs != 0)
+    {
+        juce::StringArray head { juce::String(brainNotesNow.madeMs), brainNotesNow.wholeMix ? "1" : "0" };
+        for (const int d : brainNotesNow.decision)
+            head.add(juce::String(d));
+        state.setProperty(notesProperty, head.joinIntoString(" "), nullptr);
+        for (int t = 0; t < ma::bus::kToolCount; ++t)
+            state.setProperty("brainNote" + juce::String(t), brainNotesNow.text[static_cast<size_t>(t)], nullptr);
+    }
 
     if (auto xml = state.createXml())
         copyXmlToBinary(*xml, destData);
@@ -1699,6 +1724,18 @@ void AgentProcessor::setStateInformation(const void* data, int sizeInBytes)
     for (int d = 0; d < ma::kMaxUnmask; ++d)
         unmaskKeyNow[static_cast<size_t>(d)].store(d < keys.size() ? static_cast<std::uint64_t>(keys[d].getHexValue64()) : 0);
     duckKeyNow.store(static_cast<std::uint64_t>(state.getProperty(duckKeyProperty).toString().getHexValue64()));
+    const auto head = juce::StringArray::fromTokens(state.getProperty(notesProperty).toString(), " ", {});
+    brainNotesNow = {};
+    if (head.size() == 2 + ma::bus::kToolCount)
+    {
+        brainNotesNow.madeMs = head[0].getLargeIntValue();
+        brainNotesNow.wholeMix = head[1] == "1";
+        for (int t = 0; t < ma::bus::kToolCount; ++t)
+        {
+            brainNotesNow.decision[static_cast<size_t>(t)] = juce::jlimit(0, 5, head[2 + t].getIntValue());
+            brainNotesNow.text[static_cast<size_t>(t)] = state.getProperty("brainNote" + juce::String(t)).toString();
+        }
+    }
     parameters.replaceState(state);
 }
 

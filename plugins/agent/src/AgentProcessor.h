@@ -251,6 +251,16 @@ public:
     // (ma::bus::ToolBit), for the Brain's verdict and this editor's section headers.
     // `manual`: on, but never set by the Brain.
     void toolOrigins(int& brain, int& changed, int& manual) const;
+    // Phase 31: what the Brain decided about each tool at its last "Analizuj" (message thread), kept
+    // with the project so it still reads after reopening.
+    struct BrainNotes
+    {
+        std::int64_t madeMs = 0; // 0 = the Brain has not analysed this channel yet
+        bool wholeMix = false;
+        std::array<int, ma::bus::kToolCount> decision {}; // ma::bus::ToolDecision
+        std::array<juce::String, ma::bus::kToolCount> text;
+    };
+    const BrainNotes& brainNotes() const { return brainNotesNow; }
     bool sidechainConnected() const { return sidechainSeen; }
     double sidechainLevelDb() const { return sidechainShownDb; }
     // Phase 30: the Agent the duck listens to without a cable (empty while none, or a cable is in).
@@ -393,6 +403,8 @@ private:
         DynamicState dynamics {};
     };
     BrainSet brainSet, brainSetBackup;
+    BrainNotes brainNotesNow;
+    void readBrainNotes(ma::bus::Region& region);
     void rememberBrainSet();
     std::uint32_t lastCommand = 0;
     // Audio thread copy of the backup, used while the Brain compares before/after.

@@ -201,6 +201,14 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   an existing backup; `applyByUser` starts `Refine` (param `autoRefine`, default on): after the drop (and preview, <= 15 s more) is
   measured again, analyse with the same scope, keep the user's unticked items unticked, apply, at most `kRefineRounds` 2, stop when the
   changes repeat. The last tonal target is remembered (`last-target.txt`) and selected in a project without one.
+  Phase 31 decisions: `ma::bus::ToolNotes` (slot, own seqlock, `kVersion` 17): per tool (ToolBit order) a `ToolDecision`
+  (proposed / kept / notNeeded / notChecked / yours) and a UTF-8 reason. `BrainProcessor::analyse(scope)` (editor and refine)
+  runs the analysis, then `buildToolNotes` (decision sites fill `toolWhy` during the pass: translation steps, duck; the rest
+  from the proposal, `lastPlans`/`lastStereoPlans` and the Agent's state), `addToolLinesToVerdicts`, `publishToolNotes`. The Agent
+  keeps them (`brainNotes`, saved), shows them on the "Decyzje Mózgu" tab, in the origin labels and under the "Barwa" tools.
+  Brain tab "Jak zacząć" (`GuideView`, `updateGuide`). `planChains` step 4: a near-sine bass (overtones > 12 dB under target)
+  gets the harmonic enhancer (`ChainPlan::harmonics`, `sineSub`) instead of saturation; each is the other's fallback when it
+  would cover a more important channel; `proposeWholeMix` adds its predicted overtones to the mix copy the proposal sees.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

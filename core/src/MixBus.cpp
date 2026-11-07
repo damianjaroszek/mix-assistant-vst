@@ -46,6 +46,8 @@ void initialise(Region& region)
             slot.key.keySinceMs.store(0);
             for (auto& level : slot.key.levelDb)
                 level.store(kKeySilentDb);
+            slot.notesSequence.store(0);
+            slot.notes = ToolNotes {};
         }
         region.header.magic.store(kMagic);
     }
@@ -141,6 +143,35 @@ bool readCommand(const Slot& slot, Command& out)
         std::atomic_thread_fence(std::memory_order_acquire);
         if (slot.commandSequence.load(std::memory_order_relaxed) == before)
             return before != 0;
+    }
+    return false;
+}
+
+void sendNotes(Slot& slot, const ToolNotes& notes)
+{
+    const auto seq = slot.notesSequence.load(std::memory_order_relaxed);
+    slot.notesSequence.store(seq + 1, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
+    std::memcpy(&slot.notes, &notes, sizeof(ToolNotes));
+    std::atomic_thread_fence(std::memory_order_release);
+    slot.notesSequence.store(seq + 2, std::memory_order_release);
+}
+
+bool readNotes(const Slot& slot, ToolNotes& out)
+{
+    for (int attempt = 0; attempt < 8; ++attempt)
+    {
+        const auto before = slot.notesSequence.load(std::memory_order_acquire);
+        if (before & 1u)
+            continue;
+        std::memcpy(&out, &slot.notes, sizeof(ToolNotes));
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (slot.notesSequence.load(std::memory_order_relaxed) == before)
+        {
+            for (auto& line : out.text)
+                line[kNoteLength - 1] = '\0';
+            return before != 0;
+        }
     }
     return false;
 }

@@ -25,6 +25,19 @@ inline juce::StringArray roleNames()
              pl("Pad"), pl("Efekty"), pl("Bus"), pl("Wysyłka (pogłos, delay)") };
 }
 
+// Phase 31: the Agent's tools in ma::bus::ToolBit order, and the Brain's decisions (ma::bus::ToolDecision).
+inline juce::StringArray toolNames()
+{
+    return { pl("Korekcja EQ"), pl("Porządki (HPF, mono, błoto)"), pl("Kompresor"), pl("Clipper"), pl("Wyrównanie nut basu"),
+             pl("Stereo (mid/side)"), pl("Saturacja"), pl("Ustępowanie stopie"), pl("Harmoniczne"), pl("Podkreślenie ataku"),
+             pl("Ustępowanie bez kabla") };
+}
+
+inline juce::StringArray decisionNames()
+{
+    return { {}, pl("w propozycji"), pl("zostaje, jak jest"), pl("niepotrzebne"), pl("nie sprawdzone"), pl("Twoje ustawienie") };
+}
+
 inline juce::String formatDb(double db, const char* unit, int decimals = 1)
 {
     if (!std::isfinite(db))
