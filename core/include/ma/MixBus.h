@@ -8,6 +8,7 @@
 #include "Harmonics.h"
 #include "Saturator.h"
 #include "Transient.h"
+#include "Unmask.h"
 
 #include <atomic>
 #include <cstdint>
@@ -27,7 +28,7 @@ namespace ma::bus
 {
 
 constexpr std::uint32_t kMagic = 0x4D414255; // "MABU"
-constexpr std::uint32_t kVersion = 15; // phase 26: the width slider in AgentData
+constexpr std::uint32_t kVersion = 16; // phase 30: unmasking without a cable (key feed, AgentData, Command)
 constexpr int kMaxSlots = 128;
 constexpr int kNameLength = 48;
 constexpr int kBands = 40;            // ERB bands, as SpectrumAnalyzer with BandScale::erb
@@ -36,6 +37,7 @@ constexpr std::uint64_t kAliveTimeoutMs = 2000;
 
 static_assert(std::atomic<std::uint64_t>::is_always_lock_free, "shared-memory atomics must be lock-free");
 static_assert(std::atomic<std::uint32_t>::is_always_lock_free, "shared-memory atomics must be lock-free");
+static_assert(std::atomic<float>::is_always_lock_free, "shared-memory atomics must be lock-free");
 
 // What an Agent publishes. Plain data, copied whole.
 struct AgentData
@@ -106,6 +108,17 @@ struct AgentData
     float widthLimitHz;
     float widthWorstCoherence;  // its own worst audible band after the width
     float widthWorstHz;
+    // Phase 30: the id other Agents know this channel by (kept in the project, unlike the slot's
+    // owner), when it took it (a clone that loads the same id while the original runs takes a new
+    // one), and its dynamic dips for other channels.
+    std::uint64_t keyId;
+    std::uint64_t keySinceMs;
+    UnmaskSettings unmask[kMaxUnmask];
+    std::uint64_t unmaskKey[kMaxUnmask];   // keyId of the channel each dip gives way to
+    std::int32_t unmaskKeyFound[kMaxUnmask]; // that channel's Agent is running and publishing
+    float unmaskReductionDb[kMaxUnmask];   // most each dip took, about the last second
+    std::uint64_t duckKey;                 // the duck's key without a cable (the kick's keyId), 0 = cable only
+    std::int32_t duckKeyFound;             // that Agent runs and the duck listens to it (no cable signal)
 };
 
 // Phase 23: the tools of an Agent, for AgentData::brainTools / changedTools.
@@ -120,7 +133,8 @@ enum ToolBit : std::int32_t
     toolSaturation = 1 << 6,
     toolDuck = 1 << 7,
     toolHarmonics = 1 << 8,
-    toolTransients = 1 << 9
+    toolTransients = 1 << 9,
+    toolUnmask = 1 << 10 // phase 30
 };
 
 // Note lengths for a tempo-synced duck release, indexed by AgentData::duckSync.
@@ -136,7 +150,8 @@ enum class CommandKind : std::int32_t
     none = 0,
     apply = 1, // remember the current settings, then set trim, EQ, duck and polarity
     undo = 2,  // go back to the remembered settings
-    adapt = 3  // adaptive mode: set the EQ only, keep the remembered settings as they are
+    adapt = 3, // adaptive mode: set the EQ only, keep the remembered settings as they are
+    refine = 4 // phase 30: like apply, but an existing backup stays (one undo for the whole refining)
 };
 
 struct Command
@@ -160,6 +175,21 @@ struct Command
     // Phase 15: how far a bus's sources moved (dB) with this command; its learned levels follow,
     // so a second plan sees what now reaches it. 0 for every other channel.
     float inputShiftDb;
+    // Phase 30: the dynamic dips (keys by AgentData::keyId).
+    UnmaskSettings unmask[kMaxUnmask];
+    std::uint64_t unmaskKey[kMaxUnmask];
+    std::uint64_t duckKey; // the duck listens to this Agent when no cable brings a sidechain
+};
+
+// Phase 30: an Agent's output envelope per octave band, written from its audio thread every block
+// while another Agent listens to it (outside the sequence lock: single floats, read as they come).
+struct KeyFeed
+{
+    std::atomic<std::uint64_t> wantedUntilMs; // a listener asked for it until then (any Agent writes)
+    std::atomic<std::uint64_t> stampMs;       // when the owner last wrote the levels
+    std::atomic<std::uint64_t> keyId;         // the owner's AgentData::keyId, so listeners find it cheaply
+    std::atomic<std::uint64_t> keySinceMs;    // and since when it has it
+    std::atomic<float> levelDb[kKeyBands];
 };
 
 struct Slot
@@ -172,6 +202,7 @@ struct Slot
     std::atomic<std::uint32_t> commandSequence;
     std::uint32_t reserved2;
     Command command;
+    KeyFeed key; // phase 30
 };
 
 struct Header
@@ -206,5 +237,16 @@ void sendCommand(Slot& slot, const Command& command);
 bool readCommand(const Slot& slot, Command& out);
 
 bool isAlive(std::uint64_t heartbeatMs, std::uint64_t nowMs);
+
+// Phase 30: the key feed. A listener renews its wish every timer tick; the owner writes the levels
+// from its audio thread while wished for; a reader treats levels older than kKeyStaleMs as silence
+// (the key's Agent stopped, was bypassed or the host stopped processing it).
+constexpr std::uint64_t kKeyWantedMs = 3000;
+constexpr std::uint64_t kKeyStaleMs = 250;
+void wantKey(Slot& slot, std::uint64_t nowMs);
+bool keyWanted(const Slot& slot, std::uint64_t nowMs);
+void writeKey(Slot& slot, const float* levelDb, std::uint64_t nowMs);
+// The key's level in the given octave bands (keyLevelDb), kKeySilentDb when stale.
+double readKey(const Slot& slot, std::int32_t bands, std::uint64_t nowMs);
 
 } // namespace ma::bus

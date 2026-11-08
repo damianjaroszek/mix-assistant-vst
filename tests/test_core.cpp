@@ -33,6 +33,7 @@
 #include "ma/LoudnessMeter.h"
 #include "ma/SpectrumAnalyzer.h"
 #include "ma/TruePeakMeter.h"
+#include "ma/Unmask.h"
 #include "ma/Wav.h"
 
 #include <algorithm>
@@ -644,6 +645,122 @@ void testDucker()
     check(duck(bassSource.channels[0], off, true) == bassSource.channels[0], "duck switched off is bypassed");
 
     checkNear(ma::syncedReleaseMs(125.0, 1.0 / 16.0), 120.0, 0.01, "a sixteenth at 125 BPM is 120 ms");
+}
+
+// Phase 30: a channel gives way to another one without a sidechain cable.
+void testUnmask()
+{
+    constexpr double sr = 48000.0;
+    constexpr int block = 512;
+    const size_t n = static_cast<size_t>(sr * 3.0);
+
+    check(ma::keyBandsFor(800.0, 20000.0) == (0x1F << 3), "key bands 1-16 kHz cover 810 Hz to 20 kHz");
+    check(ma::keyBandsFor(700.0, 900.0) == (1 << 3), "a narrow range takes its nearest octave band");
+
+    // Key: a 2 kHz tone that plays the first second, stops, and plays again in the last second.
+    std::vector<float> key(n, 0.0f);
+    for (size_t i = 0; i < n; ++i)
+        if (i < 48000 || i >= 96000)
+            key[i] = static_cast<float>(0.3 * std::sin(2.0 * kPi * 2000.0 * i / sr));
+    const auto masker = sine(sr, 3.0, 1, 2000.0, 0.3).channels[0];
+
+    ma::KeyFollower follower;
+    follower.prepare(sr);
+    ma::Unmasker unmask;
+    unmask.prepare(sr);
+    ma::UnmaskSettings s;
+    s.on = 1.0f;
+    s.hz = 2000.0f;
+    s.q = 1.0f;
+    s.depthDb = 6.0f;
+    s.keyBands = static_cast<float>(ma::keyBandsFor(1000.0, 4000.0));
+    unmask.setSettings(0, s);
+
+    std::vector<float> out(masker);
+    double keyAt2k = -200.0;
+    for (size_t start = 0; start < n; start += block)
+    {
+        const int count = static_cast<int>(std::min<size_t>(block, n - start));
+        const float* k[] = { key.data() + start };
+        follower.process(k, 1, count);
+        const double levels[ma::kMaxUnmask] = { ma::keyLevelDb(follower.levels().data(), static_cast<std::int32_t>(s.keyBands)),
+                                               ma::kKeySilentDb };
+        if (start == 24576)
+            keyAt2k = follower.levels()[4];
+        float* m[] = { out.data() + start };
+        unmask.process(m, 1, count, levels);
+    }
+    checkNear(keyAt2k, 20.0 * std::log10(0.3) - 3.0, 1.0, "the key follower reads a tone's RMS in its octave band");
+    checkNear(rmsDb(out, 30000, 46000) - rmsDb(masker, 30000, 46000), -6.0, 0.7, "the masker dips by the depth while the key plays");
+    checkNear(rmsDb(out, 70000, 94000) - rmsDb(masker, 70000, 94000), 0.0, 0.3, "and comes back while the key is silent");
+    checkNear(rmsDb(out, 110000, 140000) - rmsDb(masker, 110000, 140000), -6.0, 0.7, "and dips again when it returns");
+
+    // Far from the dip nothing changes.
+    const auto low = sine(sr, 1.0, 1, 80.0, 0.3).channels[0];
+    std::vector<float> lowOut(low);
+    ma::Unmasker second;
+    second.prepare(sr);
+    second.setSettings(0, s);
+    for (size_t start = 0; start < low.size(); start += block)
+    {
+        const int count = static_cast<int>(std::min<size_t>(block, low.size() - start));
+        const double levels[ma::kMaxUnmask] = { -10.0, ma::kKeySilentDb };
+        float* m[] = { lowOut.data() + start };
+        second.process(m, 1, count, levels);
+    }
+    checkNear(rmsDb(lowOut, 24000, 47000) - rmsDb(low, 24000, 47000), 0.0, 0.3, "the dip leaves the low end alone");
+
+    checkNear(ma::Unmasker::amountFor(-10.0, -10.0), 1.0, 1e-9, "full dip at the key's loud level");
+    checkNear(ma::Unmasker::amountFor(-30.0, -10.0), 0.0, 1e-9, "no dip 20 dB under it");
+    checkNear(ma::Unmasker::amountFor(ma::kKeySilentDb, -10.0), 0.0, 1e-9, "no dip without a key");
+
+    // The duck without a cable: a kick key over the bus pulls the bass down on every hit.
+    {
+        std::vector<float> kickKey(n, 0.0f);
+        for (size_t i = 0; i < n; ++i)
+            if (i % 24000 < 3840)
+                kickKey[i] = static_cast<float>(0.8 * std::sin(2.0 * kPi * 55.0 * i / sr));
+        const auto bass = sine(sr, 3.0, 1, 55.0, 0.5).channels[0];
+        std::vector<float> ducked(bass);
+        ma::KeyFollower kickFollower;
+        kickFollower.prepare(sr);
+        ma::Ducker duck;
+        duck.prepare(sr);
+        ma::DuckSettings d;
+        d.on = 1.0f;
+        d.hz = 55.0f;
+        d.depthDb = 9.0f;
+        d.releaseMs = 60.0f;
+        duck.setSettings(d);
+        for (size_t start = 0; start < n; start += block)
+        {
+            const int count = static_cast<int>(std::min<size_t>(block, n - start));
+            const float* k[] = { kickKey.data() + start };
+            kickFollower.process(k, 1, count);
+            float* m[] = { ducked.data() + start };
+            duck.processKeyed(m, 1, ma::keyLevelDb(kickFollower.levels().data(), 1 << 0), count);
+        }
+        // Fourth beat (72000..75840): one block late at most, so the body of the hit is ducked.
+        checkNear(rmsDb(ducked, 73000, 75500) - rmsDb(bass, 73000, 75500), -9.0, 2.0, "the duck without a cable dips on the kick's body");
+        checkNear(rmsDb(ducked, 88000, 95000) - rmsDb(bass, 88000, 95000), 0.0, 0.5, "and lets go between hits");
+    }
+
+    // The bus feed: stale levels read as silence.
+    auto region = std::make_unique<ma::bus::Region>();
+    std::memset(static_cast<void*>(region.get()), 0, sizeof(ma::bus::Region));
+    ma::bus::initialise(*region);
+    auto& slot = region->slots[3];
+    check(!ma::bus::keyWanted(slot, 1000), "nobody wants a key at first");
+    ma::bus::wantKey(slot, 1000);
+    check(ma::bus::keyWanted(slot, 2000), "a wish lasts a while");
+    check(!ma::bus::keyWanted(slot, 1000 + ma::bus::kKeyWantedMs + 1), "and runs out");
+    float levels[ma::kKeyBands];
+    for (auto& l : levels)
+        l = -200.0f;
+    levels[4] = -12.0f;
+    ma::bus::writeKey(slot, levels, 5000);
+    checkNear(ma::bus::readKey(slot, 1 << 4, 5100), -12.0, 1e-6, "a fresh key is read");
+    check(ma::bus::readKey(slot, 1 << 4, 5000 + ma::bus::kKeyStaleMs + 10) <= -150.0, "a stale key is silence");
 }
 
 ma::SpectrumAnalyzer::Bands erbBands(const std::vector<float>& x, double sr)
@@ -3341,6 +3458,7 @@ int main()
     testTonalSolver();
     testCorrelation();
     testDucker();
+    testUnmask();
     testHarmonics();
     testTranslation();
     testTransients();
