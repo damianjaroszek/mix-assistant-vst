@@ -5918,6 +5918,25 @@ void BrainProcessor::updateRefine(std::uint64_t now)
     if (left == 0 || refine.roundsLeft <= 0 || repeating)
     {
         refine.active = false;
+        // mixcheck: the last round's other changes (levels, EQ, a vocal rider) can lift the peak past what
+        // its give-back left as margin. The rounds end inside the ceiling: only the analysis's own ceiling
+        // cut goes out then, everything else stays as it is.
+        const double peak = truePeakDb();
+        const auto cut = std::find_if(currentProposal.items.begin(), currentProposal.items.end(), [](const auto& i) {
+            return !i.advisory && i.action == Proposal::Item::Action::solver && i.change.kind == ma::SolverChange::Kind::globalGain
+                   && i.change.gainDb < 0.0;
+        });
+        if (std::isfinite(peak) && peak > peakCeilingDb() && cut != currentProposal.items.end())
+        {
+            for (auto& item : currentProposal.items)
+                item.selected = &item == &*cut ? true : item.inPlace;
+            const double cutDb = cut->change.gainDb;
+            applySelected(true);
+            refine.status = pl("Dopracowane (") + juce::String(refine.round) + (refine.round == 1 ? pl(" runda") : pl(" rundy"))
+                            + pl("). Szczyt wyszedł ") + juce::String(peak, 1) + pl(" dBTP, ponad limit pre-master: ściszyłem wszystko o ")
+                            + juce::String(-cutDb, 1) + pl(" dB.");
+            return;
+        }
         if (left == 0)
             refine.status = refine.round == 0 ? pl("Efekt zmierzony: nic więcej do zmiany.")
                                               : pl("Dopracowane (") + juce::String(refine.round)
