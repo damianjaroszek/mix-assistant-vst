@@ -218,6 +218,8 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   drops the stats) of a part that hardly played (`LearnResult::barelyPlayed`: < -60 dB or active < 15% of the passage).
   mixcheck keeps its drop loop's phase across calls (short calls used to replay the drop's first 4 s), prints each Agent's learn
   result, and its channel table shows each part's change over the drop per TBC range.
+  Group levels count what each Agent's chain takes away over the drop (`chainLossDb`: K-weighted output vs heard, summed in
+  `DropSum::chainIn/chainOut`, only losses, <= 15 dB), so a refining round gives back what compressors, ducks and dips took.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

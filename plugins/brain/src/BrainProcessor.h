@@ -582,7 +582,15 @@ private:
     struct DropSum
     {
         ma::SpectrumAnalyzer::Bands power {}, side {};
+        // What the Agent's chain does to the level over the drop: K-weighted power before it (input,
+        // trim, cleanup, EQ) and after it (its output), summed over the updates where both were known.
+        double chainIn = 0.0, chainOut = 0.0;
+        long chainUpdates = 0;
     };
+    // mixcheck: compressors, ducks and dips took 5-15 dB off parts the group levels were planned
+    // without, so after the whole chain everything sat far under the kick. The group levels count it.
+    double chainLossDb(std::uint64_t owner) const;
+    static constexpr double kMaxChainLossDb = 15.0;
     // Phase 12 and 16: the same over a section, with its loudness for the contrast to the drop.
     struct SectionSums
     {

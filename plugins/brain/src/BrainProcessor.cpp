@@ -1174,6 +1174,20 @@ void BrainProcessor::accumulateDrop()
             if (channel.data.stereoValid != 0)
                 sum.side[at] += std::pow(10.0, (channel.data.sideDb[b] + channel.data.trimDb) / 10.0);
         }
+        if (channel.outputValid && channel.spectrumValid)
+        {
+            double in = 0.0, out = 0.0;
+            for (int b = 0; b < ma::bus::kBands; ++b)
+            {
+                const auto at = static_cast<size_t>(b);
+                const double w = ma::kWeightingDb(ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b));
+                in += std::pow(10.0, (channel.heardDb[at] + w) / 10.0);
+                out += std::pow(10.0, (channel.outputDb[at] + w) / 10.0);
+            }
+            sum.chainIn += in;
+            sum.chainOut += out;
+            ++sum.chainUpdates;
+        }
     }
     ++dropUpdates;
     mix.dropSeconds = static_cast<double>(dropUpdates) / kUpdateHz;
@@ -1342,11 +1356,12 @@ BrainProcessor::stemGroupDb(bool withEq, std::array<bool, ma::kStemGroups>& pres
             for (int b = 0; b < ma::kEqBands; ++b)
                 eq[static_cast<size_t>(b)] = channel.data.eq[b];
         bool any = false;
+        const double loss = chainLossDb(channel.owner);
         for (int b = 0; b < ma::bus::kBands; ++b)
         {
             const auto at = static_cast<size_t>(b);
             const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
-            const double gain = std::pow(10.0, (ma::cleanupResponseDb(cleanup, hz) + ma::eqResponseDb(eq, hz)) / 10.0);
+            const double gain = std::pow(10.0, (ma::cleanupResponseDb(cleanup, hz) + ma::eqResponseDb(eq, hz) + loss) / 10.0);
             const double p = found->second.power[at] / updates * gain;
             power[static_cast<size_t>(group)][at] += p;
             sidePower[static_cast<size_t>(group)][at] += found->second.side[at] / updates * gain
@@ -1369,6 +1384,16 @@ BrainProcessor::stemGroupDb(bool withEq, std::array<bool, ma::kStemGroups>& pres
             (*side)[static_cast<size_t>(g)] = toDb(sidePower[static_cast<size_t>(g)]);
     }
     return out;
+}
+
+double BrainProcessor::chainLossDb(std::uint64_t owner) const
+{
+    const auto found = drop.find(owner);
+    if (found == drop.end() || found->second.chainUpdates < static_cast<long>(kMinimumDropSeconds * kUpdateHz) / 2
+        || found->second.chainIn <= 1e-20 || found->second.chainOut <= 1e-20)
+        return 0.0;
+    // Only what the chain takes away: what it adds (saturation, harmonics) is counted where it lands.
+    return std::clamp(10.0 * std::log10(found->second.chainOut / found->second.chainIn), -kMaxChainLossDb, 0.0);
 }
 
 ma::StemShapeInput BrainProcessor::stemShapeInput() const
