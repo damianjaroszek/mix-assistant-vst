@@ -22,6 +22,7 @@ add_library(ma_core STATIC
     src/Instrument.cpp
     src/ChannelChain.cpp
     src/DynamicEq.cpp
+    src/Pan.cpp
     src/ChainPlanner.cpp
     src/Resonance.cpp
     src/Stereo.cpp

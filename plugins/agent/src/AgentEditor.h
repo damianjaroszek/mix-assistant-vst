@@ -107,6 +107,9 @@ private:
     // Phase 26: the width slider.
     juce::Label widthLabel, widthFromLabel, widthStatusLabel, widthMonoMark, widthNeutralMark, widthMaxMark;
     juce::Slider widthSlider, widthFromSlider;
+    // Phase 33: the pan.
+    juce::Label panLabel, panMonoLabel, panStatus;
+    juce::Slider panSlider, panMonoSlider;
     ma::ui::CoherenceView stereoView;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> compOnAttachment, clipOnAttachment, evenOnAttachment;
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>> chainAttachments;
@@ -137,6 +140,7 @@ private:
     juce::Slider riderTargetSlider, riderRangeSlider;
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>> dynamicButtonAttachments;
     void updateDynamicStatus();
+    void updatePanStatus();
     void layoutDynamics(juce::Rectangle<int> area);
 
     // Fixed window: a header plus one tab of controls at a time.

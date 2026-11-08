@@ -7,6 +7,7 @@
 #include "ma/Decibels.h"
 #include "ma/Ducker.h"
 #include "ma/DynamicEq.h"
+#include "ma/Pan.h"
 #include "ma/Harmonics.h"
 #include "ma/Translation.h"
 #include "ma/Transient.h"
@@ -3683,6 +3684,125 @@ void testDynamicEq()
     }
 }
 
+void testPan()
+{
+    // The law: unity in the centre, constant power, silent on the far side.
+    double l = 0.0, r = 0.0;
+    ma::panGains(0.0, l, r);
+    check(std::abs(l - 1.0) < 1e-9 && std::abs(r - 1.0) < 1e-9, "pan 1");
+    ma::panGains(0.5, l, r);
+    check(std::abs(l * l + r * r - 2.0) < 1e-9 && r > l, "pan 2");
+    ma::panGains(-1.0, l, r);
+    check(std::abs(r) < 1e-9, "pan 3");
+    check(ma::panMonoLossDb(0.5) < -0.5 && ma::panMonoLossDb(0.5) > -1.0, "pan 4");
+
+    // The panner: the highs move, the low end stays in the centre, the centre is untouched.
+    const double sr = 48000.0;
+    const auto rmsRatioDb = [&](double hz, float position) {
+        std::vector<float> left(static_cast<size_t>(sr)), right(left.size());
+        for (size_t i = 0; i < left.size(); ++i)
+            left[i] = right[i] = static_cast<float>(0.25 * std::sin(2.0 * kPi * hz * static_cast<double>(i) / sr));
+        ma::Panner pan;
+        pan.prepare(sr);
+        pan.setSettings({ position, 150.0f });
+        float* ch[] = { left.data(), right.data() };
+        pan.process(ch, 2, static_cast<int>(left.size()));
+        double pl = 0.0, pr = 0.0;
+        for (size_t i = left.size() / 2; i < left.size(); ++i)
+        {
+            pl += left[i] * left[i];
+            pr += right[i] * right[i];
+        }
+        return 10.0 * std::log10(pr / pl);
+    };
+    ma::panGains(0.5, l, r);
+    check(std::abs(rmsRatioDb(2000.0, 0.5f) - 20.0 * std::log10(r / l)) < 0.3, "pan 5");
+    check(std::abs(rmsRatioDb(50.0, 0.5f)) < 0.5, "pan 6");
+    {
+        std::vector<float> left(4800), right(4800);
+        for (size_t i = 0; i < left.size(); ++i)
+            left[i] = right[i] = static_cast<float>(std::sin(0.01 * static_cast<double>(i)));
+        const auto copy = left;
+        ma::Panner pan;
+        pan.prepare(sr);
+        float* ch[] = { left.data(), right.data() };
+        pan.process(ch, 2, static_cast<int>(left.size()));
+        check(left == copy && right == copy, "pan 7");
+    }
+    // A split at 150 Hz sums flat: a centred signal through the filters keeps its level.
+    check(std::abs(rmsRatioDb(150.0, 0.0001f)) < 0.1, "pan 8");
+
+    // The input's lean.
+    {
+        std::vector<float> left(static_cast<size_t>(sr * 3)), right(left.size());
+        for (size_t i = 0; i < left.size(); ++i)
+        {
+            right[i] = static_cast<float>(0.2 * std::sin(2.0 * kPi * 1000.0 * static_cast<double>(i) / sr));
+            left[i] = 2.0f * right[i];
+        }
+        ma::BalanceMeter meter;
+        meter.prepare(sr);
+        meter.process(left.data(), right.data(), static_cast<int>(left.size()));
+        check(meter.valid() && std::abs(meter.balanceDb() - 6.02) < 0.3, "pan 9");
+    }
+
+    // Planning.
+    const auto part = [](ma::Role role, double lowHz, double highHz, double db, double sideBelowDb = 20.0) {
+        ma::PanChannel c;
+        c.role = role;
+        c.priority = ma::defaultPriority(role);
+        c.valid = true;
+        c.balanceKnown = true;
+        for (int b = 0; b < ma::bus::kBands; ++b)
+        {
+            const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+            const bool in = hz >= lowHz && hz <= highHz;
+            c.midDb[static_cast<size_t>(b)] = in ? db : -200.0;
+            c.sideDb[static_cast<size_t>(b)] = in ? db - sideBelowDb : -200.0;
+        }
+        return c;
+    };
+    std::vector<ma::PanChannel> mix { part(ma::Role::kick, 40.0, 300.0, -10.0), part(ma::Role::bass, 40.0, 400.0, -12.0),
+                                      part(ma::Role::vocal, 300.0, 5000.0, -14.0), part(ma::Role::percussion, 6000.0, 16000.0, -24.0),
+                                      part(ma::Role::percussion, 5500.0, 16000.0, -25.0) };
+    auto planned = ma::planPan(mix);
+    for (int c = 0; c < 3; ++c)
+        check(planned.plans[static_cast<size_t>(c)].considered && !ma::panOn(planned.plans[static_cast<size_t>(c)].settings), "pan 10");
+    const auto& hat1 = planned.plans[3];
+    const auto& hat2 = planned.plans[4];
+    check(hat1.reason == ma::PanPlan::Reason::paired && hat2.reason == ma::PanPlan::Reason::paired && hat1.partner == 4, "pan 11");
+    check(hat1.settings.position * hat2.settings.position < 0.0f, "pan 12");
+    check(std::abs(hat1.settings.position) >= 0.3f && std::abs(hat2.settings.position) >= 0.3f, "pan 13");
+    check(std::abs(planned.balancePlannedDb) <= ma::kMaxMixBalanceDb + 0.05, "pan 14");
+    check(std::abs(planned.worstRegionPlannedDb) <= ma::kMaxRegionBalanceDb + 0.1, "pan 15");
+    // Again with the Brain's pans in place: the same places.
+    auto again = mix;
+    again[3].current = hat1.settings;
+    again[4].current = hat2.settings;
+    const auto replanned = ma::planPan(again);
+    check(replanned.plans[3].settings.position == hat1.settings.position && replanned.plans[4].settings.position == hat2.settings.position, "pan 16");
+    check(std::abs(replanned.balanceNowDb - planned.balancePlannedDb) < 0.01, "pan 17");
+
+    // One loud pad and nothing to balance it: it stays in the centre.
+    std::vector<ma::PanChannel> lonely { part(ma::Role::kick, 40.0, 300.0, -10.0), part(ma::Role::pad, 300.0, 8000.0, -14.0) };
+    const auto alone = ma::planPan(lonely);
+    check(!ma::panOn(alone.plans[1].settings) && alone.plans[1].reason == ma::PanPlan::Reason::alone, "pan 18");
+    check(std::abs(alone.balancePlannedDb) <= ma::kMaxMixBalanceDb + 0.05, "pan 19");
+
+    // The user's pan stays, a part that arrives panned is left alone, a wide pad is not moved.
+    auto own = mix;
+    own[3].userPan = true;
+    own[3].current.position = -0.8f;
+    own[4].inputBalanceDb = -6.0;
+    own.push_back(part(ma::Role::pad, 400.0, 8000.0, -20.0, 1.0));
+    const auto kept = ma::planPan(own);
+    check(kept.plans[3].reason == ma::PanPlan::Reason::user && kept.plans[3].settings.position == -0.8f, "pan 20");
+    check(kept.plans[4].reason == ma::PanPlan::Reason::prePanned && !ma::panOn(kept.plans[4].settings), "pan 21");
+    check(kept.plans[5].reason == ma::PanPlan::Reason::wide, "pan 22");
+    std::printf("pan: hats %.2f / %.2f, balance %.2f dB (region %.2f)\n", hat1.settings.position, hat2.settings.position,
+                planned.balancePlannedDb, planned.worstRegionPlannedDb);
+}
+
 int main()
 {
     testLoudness();
@@ -3694,6 +3814,7 @@ int main()
     testTrimPlan();
     testPercussionLevel();
     testDynamicEq();
+    testPan();
     testChannelAnalyzerSpeed();
     testMixBus();
     testMasking();

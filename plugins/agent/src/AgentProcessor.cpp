@@ -55,7 +55,9 @@ void take(const float*& in, Settings& settings)
 
 // Phase 25: 62 since the stereo settings carry the widener (3 floats after the side bells).
 // Phase 30: 72 with the two dips at the end. Phase 32: 97 with the dynamic EQ after them.
-constexpr size_t kPackedDynamics = 97;
+// Phase 33: 99 with the pan last.
+constexpr size_t kPackedDynamics = 99;
+constexpr size_t kPackedBeforePan = 97;
 constexpr size_t kPackedBeforeDynamicEq = 72;
 constexpr size_t kPackedBeforeUnmask = 62;
 constexpr size_t kPackedBeforeWidener = 59;
@@ -77,6 +79,7 @@ std::array<float, kPackedDynamics> packDynamics(const AgentProcessor::DynamicSta
     put(out, s.saturation);
     put(out, s.unmask);
     put(out, s.dynamicEq);
+    put(out, s.pan);
     jassert(out == v.data() + v.size());
     return v;
 }
@@ -98,6 +101,7 @@ AgentProcessor::DynamicState unpackDynamics(const std::array<float, kPackedDynam
     take(in, s.saturation);
     take(in, s.unmask);
     take(in, s.dynamicEq);
+    take(in, s.pan);
     return s;
 }
 
@@ -135,6 +139,11 @@ bool anyOn(const ma::StereoSettings& st)
 bool anyOn(const ma::DynamicEqSettings& d)
 {
     return ma::dynamicEqOn(d);
+}
+
+bool anyOn(const ma::PanSettings& p)
+{
+    return ma::panOn(p);
 }
 
 bool anyOn(const std::array<ma::UnmaskSettings, ma::kMaxUnmask>& u)
@@ -178,6 +187,7 @@ void toolBits(const ma::EqSettings& eq, const AgentProcessor::DynamicState& d, b
     compareTool(d.transients, setDynamics.transients, setValid, ma::bus::toolTransients, same, changed, manual);
     compareTool(d.unmask, setDynamics.unmask, setValid, ma::bus::toolUnmask, same, changed, manual);
     compareTool(d.dynamicEq, setDynamics.dynamicEq, setValid, ma::bus::toolDynamicEq, same, changed, manual);
+    compareTool(d.pan, setDynamics.pan, setValid, ma::bus::toolPan, same, changed, manual);
 }
 
 // Phase 32: the probes appended to the saved stats ("1 p50 p95 ..." or "0 ...").
@@ -476,6 +486,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout AgentProcessor::createLayout
     layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { riderRangeId, 14 }, "Vocal rider range",
                                                            Range { 0.0f, 12.0f, 0.5f }, 4.0f,
                                                            juce::AudioParameterFloatAttributes().withLabel("dB")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { panId, 15 }, "Pan", Range { -100.0f, 100.0f, 1.0f }, 0.0f,
+                                                           juce::AudioParameterFloatAttributes().withLabel("%")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { panMonoBelowId, 15 }, "Pan centre below",
+                                                           Range { 0.0f, 400.0f, 5.0f }, 150.0f,
+                                                           juce::AudioParameterFloatAttributes().withLabel("Hz")));
     for (int d = 0; d < ma::kMaxUnmask; ++d)
     {
         const auto name = "Give way " + juce::String(d + 1);
@@ -532,6 +547,8 @@ void AgentProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     clipper.prepare(sampleRate);
     evener.prepare(sampleRate);
     stereoShaper.prepare(sampleRate);
+    panner.prepare(sampleRate);
+    balanceMeter.prepare(sampleRate);
     liveStereo.prepare(sampleRate);
     learnFeatures.prepare(sampleRate);
     outputSpectrum.prepare(sampleRate, ma::BandScale::erb);
@@ -606,6 +623,9 @@ void AgentProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         if (numChannels >= 2)
         {
             liveStereo.process(input[0], input[1], numSamples);
+            balanceMeter.process(input[0], input[1], numSamples);
+            inputBalance.store(static_cast<float>(balanceMeter.balanceDb()));
+            balanceSeen.store(balanceMeter.valid());
             const auto mid = liveStereo.recentMidDb(), side = liveStereo.recentSideDb();
             for (size_t b = 0; b < kBands; ++b)
             {
@@ -809,6 +829,11 @@ void AgentProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         for (size_t b = 0; b < kBands; ++b)
             outputBands[b].store(heard[b]);
     }
+
+    // Phase 33: the pan last. The output spectrum above is the mono sum before it: a place between
+    // the speakers is not a change of tone, so the Brain's chain loss and level plans do not count it.
+    panner.setSettings(dynamics.pan);
+    panner.process(mainBuffer.getArrayOfWritePointers(), numChannels, numSamples);
 
     double outPeak = 0.0;
     for (int c = 0; c < numChannels; ++c)
@@ -1093,6 +1118,9 @@ void AgentProcessor::publishToBrain()
         data.dynamicReductionDb[p] = static_cast<float>(dynamicShown[static_cast<size_t>(p)].load());
     }
     data.riderGainDb = static_cast<float>(riderGain.load());
+    data.pan = dynamics.pan;
+    data.balanceValid = balanceSeen.load() ? 1 : 0;
+    data.inputBalanceDb = inputBalance.load();
     for (int r = 0; r < ma::kMaxResonances; ++r)
         data.resonances[r] = result.resonances[static_cast<size_t>(r)];
     data.sidechainConnected = sidechainSeen ? 1 : 0;
@@ -1181,6 +1209,7 @@ void AgentProcessor::handleBrainCommand(ma::bus::Region& region)
         DynamicState next2 { command.duck, command.duckSync, command.polarityInverted != 0, command.harmonics, command.transients,
                              command.cleanup, command.compressor, command.clipper, command.evener, command.stereo, command.saturation };
         next2.dynamicEq = command.dynamicEq;
+        next2.pan = command.pan;
         for (int d = 0; d < ma::kMaxUnmask; ++d)
         {
             next2.unmask[static_cast<size_t>(d)] = command.unmask[d];
@@ -1410,6 +1439,8 @@ void AgentProcessor::setDynamics(const DynamicState& state)
     setParam(riderOnId, ma::riderOn(state.dynamicEq.rider) ? 1.0f : 0.0f);
     setParam(riderTargetId, state.dynamicEq.rider.targetDb);
     setParam(riderRangeId, state.dynamicEq.rider.rangeDb);
+    setParam(panId, state.pan.position * 100.0f);
+    setParam(panMonoBelowId, state.pan.monoBelowHz);
 }
 
 AgentProcessor::DynamicState AgentProcessor::currentDynamics() const
@@ -1491,6 +1522,8 @@ AgentProcessor::DynamicState AgentProcessor::currentDynamics() const
     state.dynamicEq.rider.on = value(riderOnId) > 0.5f ? 1.0f : 0.0f;
     state.dynamicEq.rider.targetDb = value(riderTargetId);
     state.dynamicEq.rider.rangeDb = value(riderRangeId);
+    state.pan.position = value(panId) / 100.0f;
+    state.pan.monoBelowHz = value(panMonoBelowId);
     return state;
 }
 
@@ -1793,7 +1826,8 @@ void AgentProcessor::setStateInformation(const void* data, int sizeInBytes)
     brainSet = {};
     brainSetBackup = {};
     const int dynamicCount = setValues.size() - 3 * ma::kEqBands;
-    if (dynamicCount == static_cast<int>(kPackedDynamics) || dynamicCount == static_cast<int>(kPackedBeforeDynamicEq)
+    if (dynamicCount == static_cast<int>(kPackedDynamics) || dynamicCount == static_cast<int>(kPackedBeforePan)
+        || dynamicCount == static_cast<int>(kPackedBeforeDynamicEq)
         || dynamicCount == static_cast<int>(kPackedBeforeUnmask)
         || dynamicCount == static_cast<int>(kPackedBeforeWidener))
     {
@@ -1806,19 +1840,26 @@ void AgentProcessor::setStateInformation(const void* data, int sizeInBytes)
             const ma::StereoSettings::Widener off {};
             floats.insert(floats.end() - 4, { off.amountDb, off.lowHz, off.delayMs });
         }
-        if (dynamicCount != static_cast<int>(kPackedDynamics) && dynamicCount != static_cast<int>(kPackedBeforeDynamicEq))
+        if (dynamicCount != static_cast<int>(kPackedDynamics) && dynamicCount != static_cast<int>(kPackedBeforePan)
+            && dynamicCount != static_cast<int>(kPackedBeforeDynamicEq))
         {
             // Saved before phase 30: no dips.
             const ma::UnmaskSettings off {};
             for (int d = 0; d < ma::kMaxUnmask; ++d)
                 floats.insert(floats.end(), { off.on, off.hz, off.q, off.depthDb, off.keyBands });
         }
-        if (dynamicCount != static_cast<int>(kPackedDynamics))
+        if (dynamicCount != static_cast<int>(kPackedDynamics) && dynamicCount != static_cast<int>(kPackedBeforePan))
         {
             // Saved before phase 32: no dynamic EQ.
             const ma::DynamicEqSettings off {};
             const auto* f = reinterpret_cast<const float*>(&off);
             floats.insert(floats.end(), f, f + sizeof(off) / sizeof(float));
+        }
+        if (dynamicCount != static_cast<int>(kPackedDynamics))
+        {
+            // Saved before phase 33: in the centre.
+            const ma::PanSettings centre {};
+            floats.insert(floats.end(), { centre.position, centre.monoBelowHz });
         }
         std::array<float, kPackedDynamics> packed {};
         std::copy(floats.begin(), floats.end(), packed.begin());
@@ -1856,11 +1897,11 @@ void AgentProcessor::setStateInformation(const void* data, int sizeInBytes)
     duckKeyNow.store(static_cast<std::uint64_t>(state.getProperty(duckKeyProperty).toString().getHexValue64()));
     const auto head = juce::StringArray::fromTokens(state.getProperty(notesProperty).toString(), " ", {});
     brainNotesNow = {};
-    if (head.size() == 2 + ma::bus::kToolCount)
+    if (head.size() >= 2 + 12 && head.size() <= 2 + ma::bus::kToolCount) // 12 tools before phase 33
     {
         brainNotesNow.madeMs = head[0].getLargeIntValue();
         brainNotesNow.wholeMix = head[1] == "1";
-        for (int t = 0; t < ma::bus::kToolCount; ++t)
+        for (int t = 0; t < head.size() - 2; ++t)
         {
             brainNotesNow.decision[static_cast<size_t>(t)] = juce::jlimit(0, 5, head[2 + t].getIntValue());
             brainNotesNow.text[static_cast<size_t>(t)] = state.getProperty("brainNote" + juce::String(t)).toString();

@@ -242,6 +242,16 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   range <= 4). Part of `Command` (rider target moves with the channel's gain on apply), the A/B backup and `brainSet` (packed
   dynamics 97 floats; 72 = before phase 32), `ToolBit::toolDynamicEq`, `kToolCount` 12, `bus::kVersion` 18. Agent tab "Dynamika";
   the Brain's chain item `ChainTool::dynamicEq` (a Brain-made setting the plan drops goes off, the user's stays), notes and verdict line.
+- Phase 33 panning (`ma/Pan.h`): `Panner` is the Agent's last stage (after the dips; the output spectrum is measured before it, so
+  chain loss and level plans ignore a pan; the peak after it): constant power, unity in the centre (sqrt2 cos/sin), below
+  `monoBelowHz` (default 150, LR4 split that sums flat) the signal stays put. `BalanceMeter` publishes the input's lean
+  (`AgentData::inputBalanceDb`, L minus R above 150 Hz). `planPan` (whole-mix analysis, after `planStereo`, from the same pre-pan
+  mid/side): kick, bass, bus, send and the loudest vocal and lead stay centred; user pans (on but not in `brainTools`) and inputs
+  leaning >= 3 dB are counted where they are; wide (coherence < 0.3) and quiet (< -40 dB of the mix) parts stay; the rest by role
+  (perc/fx 0.45, other 0.35, pad/lead 0.3, vocal 0.25, less when partly wide): pairs sharing >= 35% of their 150 Hz-16 kHz spectrum go
+  opposite, then singles where they balance the mix; then the loudest leaning part steps back 0.05 until the mix is within 0.5 dB and
+  each region (150-2k, 2-9k, 9-16k) within 1.5 dB. Part of `Command`, the A/B backup and `brainSet` (packed dynamics 99 floats, 97 =
+  before phase 33), `ToolBit::toolPan`, `kToolCount` 13, `bus::kVersion` 19; Agent "Stereo" tab, Brain `ChainTool::pan`, notes, verdict.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

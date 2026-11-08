@@ -227,6 +227,12 @@ public:
     static constexpr const char* riderOnId = "riderOn";
     static constexpr const char* riderTargetId = "riderTarget";
     static constexpr const char* riderRangeId = "riderRange";
+    // Phase 33: the channel's place between the speakers (percent, -100 left .. 100 right) and the
+    // frequency under which it stays in the centre (0 = the whole signal moves).
+    static constexpr const char* panId = "pan";
+    static constexpr const char* panMonoBelowId = "panMonoBelow";
+    double inputBalanceDb() const { return inputBalance.load(); }
+    bool inputBalanceKnown() const { return balanceSeen.load(); }
     double dynamicReductionDb(int band) const { return dynamicShown[static_cast<size_t>(band)].load(); }
     double riderGainDb() const { return riderGain.load(); }
     static constexpr const char* unmaskIds[ma::kMaxUnmask][5] { { "unmask1On", "unmask1Freq", "unmask1Q", "unmask1Depth", "unmask1Bands" },
@@ -268,6 +274,7 @@ public:
         std::array<std::uint64_t, ma::kMaxUnmask> unmaskKey {};
         std::uint64_t duckKey = 0; // phase 30: the duck's key without a cable
         ma::DynamicEqSettings dynamicEq {}; // phase 32: dynamic bands and the rider
+        ma::PanSettings pan {};             // phase 33
     };
     DynamicState currentDynamics() const;
     // Phase 23: tools the Brain set that are still as it left them, and tools changed by hand since
@@ -346,6 +353,10 @@ private:
     ma::Clipper clipper;
     ma::BassEvener evener;
     ma::StereoShaper stereoShaper;
+    ma::Panner panner;             // phase 33: the last stage
+    ma::BalanceMeter balanceMeter; // the input's lean
+    std::atomic<float> inputBalance { 0.0f };
+    std::atomic<bool> balanceSeen { false };
     ma::StereoAnalyzer liveStereo; // on the input, while the Brain or the editor looks
     std::array<std::atomic<float>, kBands> liveMid, liveSide;
     std::atomic<bool> stereoSeen { false };
@@ -441,7 +452,7 @@ private:
     std::array<std::array<std::atomic<float>, 3>, ma::kEqBands> backupEqAudio {};
     // DuckSettings (8), sync, polarity, harmonics (3), transients (3), cleanup (5), compressor (7), clipper (3), evener (3)
     // stereo (12 + the widener's 3, phase 25), saturation (4), unmask (2 x 5, phase 30)
-    static constexpr int kDynamicValues = 97; // phase 32: the dynamic EQ after the dips
+    static constexpr int kDynamicValues = 99; // phase 32: the dynamic EQ after the dips (25), phase 33: the pan (2)
     std::array<std::atomic<float>, kDynamicValues> backupDynamicsAudio {};
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(AgentProcessor)

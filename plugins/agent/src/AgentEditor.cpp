@@ -322,12 +322,19 @@ AgentEditor::AgentEditor(AgentProcessor& p)
                              "suwaki ustępują, gdy suma zeszłaby poniżej 0,2. W mono nic się nie zmienia."));
     styleLabel(widthFromLabel, pl("Mono poniżej"), colours::quiet, 13.0f);
     widthFromLabel.setTooltip(pl("Gdy suwak szerokości jest w użyciu, poniżej tej częstotliwości kanał gra w mono."));
+    styleLabel(panLabel, "Panorama", colours::text, 13.0f);
+    panLabel.setTooltip(pl("Miejsce kanału między głośnikami (od -100% lewo do 100% prawo). „Analizuj” (cały łańcuch) rozstawia "
+                           "kanały: części grające w tym samym zakresie idą na przeciwne strony, a miks zostaje w równowadze lewo/prawo. "
+                           "Stopa, bas, główny wokal i lead zostają w środku. Panoramę w mikserze FL zostaw na środku, "
+                           "żeby Mózg wiedział, gdzie kanał gra. Dwuklik: środek."));
+    styleLabel(panMonoLabel, pl("Środek poniżej"), colours::quiet, 13.0f);
+    panMonoLabel.setTooltip(pl("Poniżej tej częstotliwości kanał zostaje w środku (dół razem ze stopą i basem). 0 = przesuwa cały sygnał."));
     styleLabel(widthMonoMark, "mono", colours::quiet, 11.0f);
     styleLabel(widthNeutralMark, pl("bez zmian"), colours::quiet, 11.0f);
     styleLabel(widthMaxMark, "max", colours::quiet, 11.0f);
     widthNeutralMark.setJustificationType(juce::Justification::centred);
     widthMaxMark.setJustificationType(juce::Justification::centredRight);
-    for (auto* label : { &cleanStatus, &compStatus, &clipStatus, &evenStatus, &stereoStatus, &widthStatusLabel })
+    for (auto* label : { &cleanStatus, &compStatus, &clipStatus, &evenStatus, &stereoStatus, &widthStatusLabel, &panStatus })
     {
         styleLabel(*label, {}, colours::quiet, 13.0f);
         label->setJustificationType(juce::Justification::topLeft);
@@ -356,6 +363,8 @@ AgentEditor::AgentEditor(AgentProcessor& p)
         { &evenRefSlider, AgentProcessor::evenRefId },
         { &widthSlider, AgentProcessor::widthId },
         { &widthFromSlider, AgentProcessor::widthFromId },
+        { &panSlider, AgentProcessor::panId },
+        { &panMonoSlider, AgentProcessor::panMonoBelowId },
     };
     for (const auto& [slider, id] : chainSliders)
     {
@@ -500,13 +509,15 @@ AgentEditor::AgentEditor(AgentProcessor& p)
     }
     page(stereoPage, "Stereo",
          { &stereoLabel, &origins[5], &stereoView, &stereoStatus, &widthLabel, &widthSlider, &widthMonoMark, &widthNeutralMark, &widthMaxMark,
-           &widthFromLabel, &widthFromSlider, &widthStatusLabel },
+           &widthFromLabel, &widthFromSlider, &widthStatusLabel, &panLabel, &panSlider, &panMonoLabel, &panMonoSlider, &panStatus,
+           &origins[12] },
          [this](auto area) { layoutStereo(area); });
     toneDecisions.setJustificationType(juce::Justification::topLeft);
     toneDecisions.setFont(juce::FontOptions(13.0f));
     toneDecisions.setColour(juce::Label::textColourId, colours::quiet);
     page(decisionsPage, pl("Decyzje Mózgu"), { &decisionsView }, [this](auto area) { decisionsView.setBounds(area); });
     widthSlider.setDoubleClickReturnValue(true, ma::kWidthNeutral);
+    panSlider.setDoubleClickReturnValue(true, 0.0);
     tabs.setCurrentTabIndex(juce::jlimit(0, tabs.getNumTabs() - 1, processor.editorTab), false);
     tabs.onChange = [this](int index) { processor.editorTab = index; };
 
@@ -587,6 +598,7 @@ void AgentEditor::timerCallback()
 {
     updateOrigins();
     updateDynamicStatus();
+    updatePanStatus();
     const bool connected = processor.isConnectedToBrain();
     connection.setText(connected ? pl("Połączony z Mózgiem") : pl("Brak Mózgu na masterze"), juce::dontSendNotification);
     connection.setColour(juce::Label::textColourId, connected ? colours::good : colours::quiet);
@@ -1193,6 +1205,28 @@ void AgentEditor::updateDynamicStatus()
         dynamicDecision.setText(text, juce::dontSendNotification);
 }
 
+void AgentEditor::updatePanStatus()
+{
+    const auto& notes = processor.brainNotes();
+    int t = 0;
+    while ((1 << t) != ma::bus::toolPan)
+        ++t;
+    const int decision = notes.decision[static_cast<size_t>(t)];
+    juce::String text;
+    if (processor.inputBalanceKnown())
+    {
+        const double lean = processor.inputBalanceDb();
+        text = std::abs(lean) < 1.0 ? pl("Wejście gra w środku. ")
+                                     : pl("Wejście przechyla się w ") + (lean > 0.0 ? pl("lewo") : pl("prawo")) + " o "
+                                           + juce::String(std::abs(lean), 1) + " dB. ";
+    }
+    text += notes.madeMs == 0 || decision <= 0
+                ? pl("Mózg ma dostęp do panoramy. Po „Analizuj” zobaczysz tu, gdzie postawił kanał i dlaczego.")
+                : pl("Decyzja Mózgu: ") + ma::ui::decisionNames()[decision] + ", " + notes.text[static_cast<size_t>(t)];
+    if (panStatus.getText() != text)
+        panStatus.setText(text, juce::dontSendNotification);
+}
+
 void AgentEditor::layoutStereo(juce::Rectangle<int> area)
 {
     area.reduce(12, 12);
@@ -1220,6 +1254,17 @@ void AgentEditor::layoutStereo(juce::Rectangle<int> area)
     area.removeFromTop(4);
     widthStatusLabel.setBounds(area.removeFromTop(36));
     area.removeFromTop(6);
+    {
+        auto row = area.removeFromTop(24);
+        origin(ma::bus::toolPan).setBounds(row.removeFromRight(170));
+        panLabel.setBounds(row.removeFromLeft(110));
+        panSlider.setBounds(row.removeFromLeft(330));
+        row.removeFromLeft(16);
+        panMonoLabel.setBounds(row.removeFromLeft(110));
+        panMonoSlider.setBounds(row);
+    }
+    panStatus.setBounds(area.removeFromTop(34));
+    area.removeFromTop(4);
     stereoStatus.setBounds(area.removeFromBottom(40));
     area.removeFromBottom(6);
     stereoView.setBounds(area);
