@@ -52,7 +52,7 @@ struct SolverOptions
 {
     double maxCutDb = 6.0;        // deepest cut the solver may set on one band
     double minimumScore = 0.3;    // collisions weaker than this are left alone
-    double headroomGainDb = 0.0;  // <= 0: gain for every channel to get back under the ceiling
+    double headroomGainDb = 0.0;  // gain for every channel: < 0 back under the ceiling, > 0 back up to it
     double maxBoostDb = 4.0;      // highest boost for filling a tonal hole
     const TonalComparison* tonal = nullptr; // the measured mix against a target, if there is one
     // Phase 18: with the target and the measured master (any scale, the channels' current EQ in),

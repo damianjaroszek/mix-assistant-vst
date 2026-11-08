@@ -493,8 +493,17 @@ int main(int argc, char** argv)
 
     // 3. "Zastosuj", then the refining rounds by themselves.
     brain->applyByUser();
+    String lastStatus;
     for (int s = 0; s < 240 && (s < 4 || brain->isRefining()); s += 4)
+    {
         play(dropStart, 4.0, true, nullptr);
+        // Each refining step and where the peak stands.
+        if (brain->refineStatus() != lastStatus)
+        {
+            lastStatus = brain->refineStatus();
+            std::printf("  %s (peak %.1f dBTP)\n", lastStatus.toRawUTF8(), brain->truePeakDb());
+        }
+    }
     std::printf("refined: %s\n", brain->refineStatus().toRawUTF8());
     play(dropStart, 1.2 * kDropSeconds, true, nullptr);
     const auto after = brain->snapshot();

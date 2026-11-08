@@ -2953,9 +2953,19 @@ void BrainProcessor::proposeOnce(const std::array<double, ma::kStemGroups>* grou
 
     const double peak = truePeakDb();
     const double over = std::isfinite(peak) ? peak - peakCeilingDb() : 0.0;
+    double headroomGain = over > 0.0 ? -std::ceil((over + 0.5) * 2.0) / 2.0 : 0.0;
+    // mixcheck: the cut for the ceiling is sized on the peaks before the planned clippers, which
+    // then take the kick's and hats' peaks down too, so the master landed ~5 dB under the ceiling.
+    // While refining, what the clippers freed comes back (never more than was taken, 1 dB kept).
+    if (over <= 0.0 && std::isfinite(peak) && refine.active && refine.globalGainDb < 0.0)
+    {
+        const double room = std::floor((-over - kRestoreMarginDb) * 2.0) / 2.0;
+        const double back = std::min(-refine.globalGainDb, room);
+        if (back >= 0.5)
+            headroomGain = back;
+    }
     const auto stems = stemShapeInput();
-    const auto solved = solveNow(over > 0.0 ? -std::ceil((over + 0.5) * 2.0) / 2.0 : 0.0, stems.target != nullptr ? &stems : nullptr,
-                                 groupGain);
+    const auto solved = solveNow(headroomGain, stems.target != nullptr ? &stems : nullptr, groupGain);
     currentProposal.crowdingBefore = solved.crowdingBefore;
     currentProposal.crowdingAfter = solved.crowdingAfter;
     for (size_t c = 0; c < mix.channels.size(); ++c)
@@ -2970,8 +2980,12 @@ void BrainProcessor::proposeOnce(const std::array<double, ma::kStemGroups>* grou
         const auto range = hzText(change.lowHz) + pl("–") + hzText(change.highHz);
         if (change.kind == ma::SolverChange::Kind::globalGain)
         {
-            item.text = pl("Wszystkie kanały: ") + juce::String(change.gainDb, 1) + pl(" dB, bo szczyt sumy jest ")
-                        + juce::String(over, 1) + pl(" dB ponad limitem pre-master");
+            if (change.gainDb > 0.0)
+                item.text = pl("Wszystkie kanały: +") + juce::String(change.gainDb, 1) + pl(" dB z powrotem: po zastosowaniu szczyt sumy jest ")
+                            + juce::String(-over, 1) + pl(" dB pod limitem pre-master, bo clippery ścięły szczyty. Oddaję część ściszenia, zapas 1.5 dB zostaje");
+            else
+                item.text = pl("Wszystkie kanały: ") + juce::String(change.gainDb, 1) + pl(" dB, bo szczyt sumy jest ")
+                            + juce::String(over, 1) + pl(" dB ponad limitem pre-master");
         }
         else if (change.kind == ma::SolverChange::Kind::tonalAdvice)
         {
@@ -3023,11 +3037,23 @@ void BrainProcessor::proposeOnce(const std::array<double, ma::kStemGroups>* grou
             const auto& ghost = mix.sketch.analysis.ghosts[static_cast<size_t>(change.maskedChannel) - mix.channels.size()];
             item.owner = masker.owner;
             item.band = solved.eq[static_cast<size_t>(change.channel)][static_cast<size_t>(change.eqSlot)];
-            item.text = quoted(masker.name) + ": " + juce::String(item.band.gainDb, 1) + pl(" dB przy ") + hzText(item.band.hz)
+            // Room for a ghost is at most 3 dB; a band that ends deeper is shared with a real collision's cut.
+            const double own = std::max(static_cast<double>(item.band.gainDb), change.gainDb < 0.0 ? change.gainDb : -1e9);
+            item.text = quoted(masker.name) + ": " + juce::String(own, 1) + pl(" dB przy ") + hzText(item.band.hz)
                         + " (Q " + juce::String(item.band.q, 1) + pl("), zostawia miejsce na partię, której jeszcze nie ma: ")
                         + ghostName(ghost) + pl(" w ") + hzText(change.lowHz) + pl("–") + hzText(change.highHz) + " ("
                         + juce::String(juce::roundToInt(change.scoreBefore * 100.0)) + pl("% → ")
                         + juce::String(juce::roundToInt(change.scoreAfter * 100.0)) + "%)";
+            if (item.band.gainDb < own - 0.05)
+                for (const auto& other : solved.changes)
+                    if (other.kind == ma::SolverChange::Kind::eqCut && other.channel == change.channel && other.eqSlot == change.eqSlot
+                        && static_cast<size_t>(other.maskedChannel) < mix.channels.size())
+                    {
+                        item.text += pl(". To samo pasmo pogłębia cięcie dla ")
+                                     + quoted(mix.channels[static_cast<size_t>(other.maskedChannel)].name) + pl(", razem ")
+                                     + juce::String(item.band.gainDb, 1) + " dB";
+                        break;
+                    }
         }
         else
         {
@@ -5399,6 +5425,7 @@ int BrainProcessor::applySelected(bool refining)
     for (const auto& item : currentProposal.items)
         if (item.selected && item.action == Proposal::Item::Action::solver && item.change.kind == ma::SolverChange::Kind::globalGain)
             globalGain += item.change.gainDb;
+    refine.globalGainDb += globalGain;
 
     // Phase 9: a stem group's level moves every channel of the group, its thresholds with it.
     std::array<double, ma::kStemGroups> groupGain {};
@@ -5581,6 +5608,7 @@ int BrainProcessor::applyByUser()
         if (!item.advisory && !item.selected && !item.inPlace)
             unticked.push_back(itemSignature(item));
     const int scope = analysisScope;
+    refine.globalGainDb = 0.0;
     const int sent = applySelected(false);
     if (sent > 0 && autoRefineOn())
     {

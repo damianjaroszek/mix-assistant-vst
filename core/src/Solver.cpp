@@ -510,8 +510,11 @@ SolverResult solve(const std::vector<SolverChannel>& channels, const SolverOptio
         const double q = qForRange(issue->lowHz, issue->highHz);
 
         // Reuse a band already close to this range (half an octave), else take a free one.
+        // A collision worked on before keeps its own band, so each change knows the band it deepens.
         int slot = -1;
-        for (int b = 0; b < kEqBands; ++b)
+        if (const auto known = changeFor.find(key); known != changeFor.end())
+            slot = result.changes[known->second].eqSlot;
+        for (int b = 0; b < kEqBands && changeFor.count(key) == 0; ++b)
         {
             const auto& band = eq[static_cast<size_t>(b)];
             if (band.gainDb < 0.0f && std::abs(std::log2(band.hz / centre)) <= 0.5)
@@ -558,6 +561,9 @@ SolverResult solve(const std::vector<SolverChannel>& channels, const SolverOptio
             changeFor[key] = result.changes.size();
             result.changes.push_back(change);
         }
+        // How deep this collision took the band: a cut dropped below gives the band back to the
+        // depth the changes that stay asked for.
+        result.changes[changeFor[key]].gainDb = band.gainDb;
     }
 
     const auto final = analyseMasking(withEq(channels, result.eq), options.minimumScore);
@@ -574,12 +580,28 @@ SolverResult solve(const std::vector<SolverChannel>& channels, const SolverOptio
         else
         {
             bool shared = false;
+            double needed = 0.0; // the deepest the changes that stay set the band to
             for (const auto& other : result.changes)
-                shared = shared || (&other != &change && other.channel == change.channel && other.eqSlot == change.eqSlot
-                                    && other.scoreBefore - other.scoreAfter >= 0.05);
+                if (&other != &change && other.channel == change.channel && other.eqSlot == change.eqSlot
+                    && other.scoreBefore - other.scoreAfter >= 0.05)
+                {
+                    shared = true;
+                    needed = std::min(needed, other.gainDb);
+                }
+            auto& band = result.eq[static_cast<size_t>(change.channel)][static_cast<size_t>(change.eqSlot)];
             if (!shared)
-                result.eq[static_cast<size_t>(change.channel)][static_cast<size_t>(change.eqSlot)] = EqBand {};
+                band = EqBand {};
+            else
+                band.gainDb = std::max(band.gainDb, static_cast<float>(needed)); // a ghost's room stays within its cap
         }
+    }
+    if (kept.size() != result.changes.size())
+    {
+        // Bands given back above: the scores of what stays, measured again.
+        const auto again = analyseMasking(withEq(channels, result.eq), options.minimumScore);
+        result.crowdingAfter = totalScore(again, channels, options.minimumScore);
+        for (auto& change : kept)
+            change.scoreAfter = again.amount[static_cast<size_t>(change.channel)][static_cast<size_t>(change.maskedChannel)];
     }
     result.changes = std::move(kept);
 
@@ -835,7 +857,7 @@ SolverResult solve(const std::vector<SolverChannel>& channels, const SolverOptio
         }
     }
 
-    if (options.headroomGainDb < -0.05)
+    if (std::abs(options.headroomGainDb) > 0.05)
     {
         SolverChange change;
         change.kind = SolverChange::Kind::globalGain;

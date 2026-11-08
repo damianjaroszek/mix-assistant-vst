@@ -3090,6 +3090,25 @@ void testSketch()
         }
     }
     check(leadCut && !ghostChanged, "sketch: the lead makes room for the ghost vocal, the ghost is left alone");
+    // A real collision near the ghost's range: a ghost's band goes deeper than 3 dB only for a
+    // real collision that stays in the proposal (a useless one gives the depth back).
+    std::vector<ma::SolverChannel> crowded { solverBand(45.0, 90.0, -14.0, 1), solverBand(250.0, 4000.0, -12.0, 4),
+                                             solverBand(300.0, 700.0, -22.0, 3) };
+    auto ghostSnare = solverBand(250.0, 700.0, -20.0, 2);
+    ghostSnare.ghost = true;
+    crowded.push_back(ghostSnare);
+    const auto crowdedSolved = ma::solve(crowded);
+    for (const auto& change : crowdedSolved.changes)
+    {
+        if (change.kind != ma::SolverChange::Kind::eqCut || change.maskedChannel != 3)
+            continue;
+        bool realShares = false;
+        for (const auto& other : crowdedSolved.changes)
+            realShares = realShares || (other.kind == ma::SolverChange::Kind::eqCut && other.maskedChannel != 3
+                                        && other.channel == change.channel && other.eqSlot == change.eqSlot);
+        check(realShares || crowdedSolved.eq[static_cast<size_t>(change.channel)][static_cast<size_t>(change.eqSlot)].gainDb >= -3.0f,
+              "sketch: a ghost's room stays within 3 dB unless a real collision needs the band");
+    }
     // A ghost covering a real channel is not cut either.
     std::vector<ma::SolverChannel> covered { solverBand(500.0, 4000.0, -24.0, 2), solverBand(400.0, 5000.0, -12.0, 6) };
     covered[1].ghost = true;
@@ -3105,6 +3124,18 @@ void testSketch()
     const auto with = ma::planStemLevels(groups, { true, true, true, true }, target, &fixed);
     check(!with.any && with.gainDb[2] == 0.0, "sketch: with the ghost in, the groups already stand as in the references");
     check(without.before[0] > with.before[0] + 0.5, "sketch: without it every group reads louder against the sum");
+}
+
+// mixcheck: hats go further back than a clap on "Naucz poziom".
+void testPercussionLevel()
+{
+    const auto hats = solverBand(6000.0, 16000.0, -20.0, 5).rawDb;
+    const auto clap = solverBand(300.0, 6000.0, -20.0, 5).rawDb;
+    check(ma::powerShareAbove(hats, 5000.0) > 0.9 && ma::powerShareAbove(clap, 5000.0) < 0.3, "percussion: share of power up top");
+    checkNear(ma::roleLevelOffsetDb(ma::Role::percussion, &hats), -12.0, 1e-9, "percussion: hats sit 12 dB under the kick");
+    checkNear(ma::roleLevelOffsetDb(ma::Role::percussion, &clap), -6.0, 1e-9, "percussion: a clap stays at -6 dB");
+    checkNear(ma::roleLevelOffsetDb(ma::Role::percussion), -6.0, 1e-9, "percussion: without a spectrum -6 dB");
+    checkNear(ma::roleLevelOffsetDb(ma::Role::kick, &hats), 0.0, 1e-9, "percussion: other roles ignore the spectrum");
 }
 
 // Phase 18: the tonal stage works on the master as the proposal leaves it.
@@ -3495,6 +3526,7 @@ int main()
     testErbSpectrum();
     testEqualLoudness();
     testTrimPlan();
+    testPercussionLevel();
     testChannelAnalyzerSpeed();
     testMixBus();
     testMasking();

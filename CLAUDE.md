@@ -209,6 +209,11 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   Brain tab "Jak zacząć" (`GuideView`, `updateGuide`). `planChains` step 4: a near-sine bass (overtones > 12 dB under target)
   gets the harmonic enhancer (`ChainPlan::harmonics`, `sineSub`) instead of saturation; each is the other's fallback when it
   would cover a more important channel; `proposeWholeMix` adds its predicted overtones to the mix copy the proposal sees.
+  mixcheck fixes (`tools/mixcheck`, `synth_song.py` makes its synthetic test song): while refining, `proposeOnce` gives back up to
+  `Refine::globalGainDb` (the ceiling cut since the click, sized before the planned clippers) as a positive `globalGain`, leaving
+  `kRestoreMarginDb` 1.5 dB (a refine round measures 8 s of the drop). The solver keeps each collision on its own EQ slot, records the
+  depth it set (`SolverChange::gainDb`) and gives a dropped cut's depth back on a shared band; a ghost item shows its own <= 3 dB and
+  names the real cut sharing the band. `roleLevelOffsetDb(role, raw)`: percussion with >= 60% of its power above 5 kHz (hats) -12 dB.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

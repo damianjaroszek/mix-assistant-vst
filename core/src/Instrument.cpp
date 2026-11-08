@@ -12,6 +12,9 @@ constexpr double kOnsetRiseDb = 6.0;   // hop over the slow envelope that counts
 constexpr int kMinOnsetGapHops = 12;   // 60 ms
 constexpr int kDecayHops = 30;         // level measured 150 ms after the onset
 constexpr int kErbBands = 40;
+constexpr double kTopPercussionHz = 5000.0;      // hats, shakers, rides live above this
+constexpr double kTopPercussionShare = 0.6;      // ... with at least this share of their power
+constexpr double kTopPercussionOffsetDb = -12.0; // where "Naucz poziom" puts them against the kick
 constexpr int kTailStartHops = 30, kTailEndHops = 60; // 150-300 ms after an onset: past a kick's pitch sweep
 constexpr double kTailLowHz = 30.0, kTailHighHz = 130.0;
 constexpr long long kMinTailHops = 40;              // about two seconds of hits
@@ -332,7 +335,20 @@ RoleGuess recogniseRole(const InstrumentFeatures::Summary& f, const SpectrumAnal
     return guess;
 }
 
-double roleLevelOffsetDb(Role role)
+double powerShareAbove(const SpectrumAnalyzer::Bands& rawBandsDb, double hz)
+{
+    double above = 0.0, total = 0.0;
+    for (int b = 0; b < SpectrumAnalyzer::numBandsFor(BandScale::erb); ++b)
+    {
+        const double power = std::pow(10.0, rawBandsDb[static_cast<size_t>(b)] / 10.0);
+        total += power;
+        if (SpectrumAnalyzer::bandCentreHz(BandScale::erb, b) >= hz)
+            above += power;
+    }
+    return total > 1e-30 ? above / total : 0.0;
+}
+
+double roleLevelOffsetDb(Role role, const SpectrumAnalyzer::Bands* rawBandsDb)
 {
     switch (role)
     {
@@ -340,7 +356,10 @@ double roleLevelOffsetDb(Role role)
     case Role::vocal: return -4.0;
     case Role::bass: return -2.0;
     case Role::lead: return -6.0;
-    case Role::percussion: return -6.0;
+    case Role::percussion:
+        // mixcheck: hats at the clap's -6 ended ~4 dB under the kick in the drop (house mixes
+        // keep them ~10-12 dB under). Measured in LUFS, K-weighting adds ~4 dB up there too.
+        return rawBandsDb != nullptr && powerShareAbove(*rawBandsDb, kTopPercussionHz) >= kTopPercussionShare ? kTopPercussionOffsetDb : -6.0;
     case Role::pad: return -8.0;
     case Role::effects: return -10.0;
     case Role::send: return -10.0;
