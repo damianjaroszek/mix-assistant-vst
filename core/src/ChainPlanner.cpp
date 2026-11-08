@@ -34,7 +34,8 @@ struct SaturationProfile
 {
     bool allowed;
     SaturationMode mode;
-    double targetDb; // 2nd-8th harmonics against the fundamental
+    double targetDb;           // 2nd-8th harmonics against the fundamental
+    double maxDriveDb = 12.0;  // a vocal's pitch read from chops or breaths can be far off, so it stays gentle
 };
 
 // Kick and percussion are left to the clipper and the attack tools, effects and buses are
@@ -45,7 +46,7 @@ SaturationProfile saturationFor(Role role)
     switch (role)
     {
     case Role::bass: return { true, SaturationMode::tube, -24.0 }; // above 150 Hz against the sub
-    case Role::vocal: return { true, SaturationMode::tape, -12.0 };
+    case Role::vocal: return { true, SaturationMode::tape, -12.0, 6.0 };
     case Role::lead: return { true, SaturationMode::tube, -10.0 };
     case Role::pad: return { true, SaturationMode::tape, -14.0 };
     case Role::other: return { true, SaturationMode::tape, -14.0 };
@@ -627,6 +628,8 @@ std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& input, const 
         for (float mix : { 0.25f, 0.4f, 0.55f })
             for (float drive : { 0.0f, 3.0f, 6.0f, 9.0f, 12.0f })
             {
+                if (drive > profile.maxDriveDb)
+                    continue;
                 SaturationSettings s;
                 s.on = 1.0f;
                 s.mode = static_cast<float>(profile.mode);

@@ -1504,6 +1504,13 @@ void AgentProcessor::applyLearned()
         result.statsValid = false; // its dynamics there say nothing either
     }
 
+    result.boostCapped = plan.valid && plan.trimDb > kLearnMaxBoostDb;
+    if (result.boostCapped)
+    {
+        plan.trimDb = kLearnMaxBoostDb;
+        plan.limitedByPeak = false;
+    }
+
     result.serial += 1;
     inputShiftDb = 0.0; // measured anew
     result.applied = plan.valid;

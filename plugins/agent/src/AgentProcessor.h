@@ -87,6 +87,7 @@ public:
         bool roleSet = false, prioritySet = false;
         // Hardly played in the passage (under kLearnFloorDb, or active < kLearnMinActiveShare): trim left alone.
         bool barelyPlayed = false;
+        bool boostCapped = false; // the role target wanted more than kLearnMaxBoostDb
         double activeShare = 0.0;
         // Dynamics of the passage for the Brain's engineer pass (pre-trim).
         bool statsValid = false;
@@ -96,6 +97,9 @@ public:
     LearnResult lastResult() const;
     static constexpr double kLearnFloorDb = -60.0;       // a passage measured under this is too quiet to set a trim from
     static constexpr double kLearnMinActiveShare = 0.15; // ... or one the part plays less of than this
+    // A part the producer kept far under its role's level (a piano bed, an atmosphere) is lifted at most
+    // this much by Learn; the Brain's group levels move it further if the mix needs it.
+    static constexpr double kLearnMaxBoostDb = 12.0;
 
     // Live meters (input before the trim, output after it).
     double inputRmsDb() const { return inputRms.load(); }

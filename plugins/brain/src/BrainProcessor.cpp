@@ -2904,6 +2904,20 @@ void BrainProcessor::planCollisionSteps()
     }
 }
 
+juce::String BrainProcessor::settledAdvice(const ma::MaskingIssue& issue) const
+{
+    const auto& masker = mix.channels[static_cast<size_t>(issue.masker)];
+    const auto role = static_cast<ma::Role>(juce::jlimit(0, ma::kRoles - 1, static_cast<int>(masker.data.role)));
+    // mixcheck (a "KickSnare" stem): a kick covering something well above its own register carries
+    // another hit in the same track, which no setting on one channel can separate.
+    if (role == ma::Role::kick && issue.lowHz >= 1000.0)
+        return pl("W śladzie ") + quoted(masker.name) + pl(" gra też coś wysokiego (werbel, clap?): rozdziel to na osobny kanał z własnym Agentem.");
+    // Hits cover only for a moment; moving them an octave says nothing about a drum.
+    if (role == ma::Role::kick || role == ma::Role::percussion)
+        return pl("Uderzenia zasłaniają tylko na chwilę: zostaw albo wybierz próbkę ") + quoted(masker.name) + pl(" o innym brzmieniu.");
+    return pl("To ten sam rejestr: przenieś ") + quoted(masker.name) + pl(" oktawę wyżej, zmień brzmienie albo zostaw (lekkie nakładanie jest normalne).");
+}
+
 juce::String BrainProcessor::describeIssue(const ma::MaskingIssue& issue) const
 {
     const auto& masker = mix.channels[static_cast<size_t>(issue.masker)];
@@ -2930,8 +2944,7 @@ juce::String BrainProcessor::describeIssue(const ma::MaskingIssue& issue) const
             break;
         }
         case IssueHandling::settled:
-            text += pl(": miks zrobił, ile mógł. To ten sam rejestr: przenieś ") + quoted(masker.name)
-                    + pl(" oktawę wyżej, zmień brzmienie albo zostaw (lekkie nakładanie jest normalne)");
+            text += pl(": miks zrobił, ile mógł. ") + settledAdvice(issue);
             break;
         case IssueHandling::open: text += pl(": kliknij „Analizuj”"); break;
     }
@@ -3898,8 +3911,7 @@ Proposal::Verdict BrainProcessor::judge(size_t index, const ma::ChainPlan& plan,
                     break;
                 case IssueHandling::levelStep: how = pl(": EQ zrobił, ile mógł, reszta to poziom ") + quoted(masker.name) + pl(" (decyzja Twoja)."); break;
                 case IssueHandling::settled:
-                    how = pl(": miks zrobił, ile mógł. To ten sam rejestr: przenieś ") + quoted(masker.name)
-                          + pl(" oktawę wyżej, zmień brzmienie albo zostaw.");
+                    how = pl(": miks zrobił, ile mógł. ") + settledAdvice(issue);
                     break;
                 case IssueHandling::open:
                 case IssueHandling::pending: how = pl(": kliknij „Analizuj”."); break;

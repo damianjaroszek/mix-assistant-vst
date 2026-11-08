@@ -1152,6 +1152,26 @@ void testInstrumentRecognition()
         checkNear(summary.levelP95, -10.0, 0.6, "loud parts read at their level");
         checkNear(summary.levelP10, -22.0, 0.6, "quiet parts read at their level");
     }
+    // A part with pauses: 0.25 s notes at -10 dB whose release falls to -50 dB before the next one.
+    // The tails are not quiet passages, so the spread stays what a compressor could act on.
+    {
+        std::vector<float> l(static_cast<size_t>(sr * 8.0));
+        const auto note = static_cast<size_t>(sr * 0.5);
+        for (size_t i = 0; i < l.size(); ++i)
+        {
+            const double t = static_cast<double>(i % note) / sr;
+            const double levelDb = t < 0.25 ? -10.0 : -10.0 - 160.0 * (t - 0.25);
+            const double amplitude = std::pow(10.0, levelDb / 20.0) * std::sqrt(2.0);
+            l[i] = static_cast<float>(amplitude * std::sin(2.0 * kPi * 440.0 * static_cast<double>(i) / sr));
+        }
+        ma::InstrumentFeatures f;
+        f.prepare(sr);
+        const float* ch[] = { l.data(), l.data() };
+        f.process(ch, 2, static_cast<int>(l.size()));
+        const auto summary = f.summary();
+        checkNear(summary.levelP95, -10.0, 0.6, "notes with pauses read at their level");
+        check(summary.levelP95 - summary.levelP10 <= 20.5, "release tails do not count as quiet passages");
+    }
     check(ma::defaultPriority(ma::Role::kick) < ma::defaultPriority(ma::Role::pad), "the kick outranks the pad");
 }
 

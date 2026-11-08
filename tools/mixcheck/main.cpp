@@ -458,6 +458,12 @@ int main(int argc, char** argv)
     // stopped (short calls each restarting at the drop's first seconds left parts that come in later
     // out of every measurement after "Zastosuj"). `render` collects the sum.
     int64 loopPhase = 0;
+    // Each part after its whole chain over the drop, measured while rendering (the Agents' published
+    // output spectrum is only their latest second, so a part that plays now and then read as gone).
+    std::vector<ma::SpectrumAnalyzer> outAnalysers(tracks.size());
+    for (auto& a : outAnalysers)
+        a.prepare(rate, ma::BandScale::erb);
+    bool measureOut = false;
     const auto play = [&](int64 from, double seconds, bool loop, AudioBuffer<float>* render) {
         const auto total = static_cast<int64>(seconds * rate);
         int64 done = 0;
@@ -487,6 +493,11 @@ int main(int argc, char** argv)
                 }
                 AudioBuffer<float> view(block.getArrayOfWritePointers(), 2, n);
                 agents[t]->processBlock(view, midi);
+                if (measureOut && !loop && position >= dropStart && position + n <= dropStart + dropLength)
+                {
+                    const float* ch[] = { block.getReadPointer(0), block.getReadPointer(1) };
+                    outAnalysers[t].process(ch, 2, n);
+                }
                 for (int c = 0; c < 2; ++c)
                     sum.addFrom(c, 0, block, c, 0, n);
             }
@@ -554,7 +565,9 @@ int main(int argc, char** argv)
     std::printf("rendering...\n");
     AudioBuffer<float> ours(2, length);
     ours.clear();
+    measureOut = true;
     play(0, length / rate, false, &ours);
+    measureOut = false;
     writeWav(outDir.getChildFile("ours.wav"), ours, rate);
     writeWav(outDir.getChildFile("raw.wav"), raw, rate);
 
@@ -615,10 +628,11 @@ int main(int argc, char** argv)
           "|---|---|---|---|---|---|---|---|---|---|\n";
     for (const auto& channel : after.channels)
     {
-        ma::SpectrumAnalyzer::Bands out {};
-        for (int b = 0; b < ma::bus::kBands; ++b)
-            out[static_cast<size_t>(b)] = channel.outputDb[static_cast<size_t>(b)];
         const auto track = std::find_if(tracks.begin(), tracks.end(), [&](const Track& t) { return t.name == channel.name; });
+        ma::SpectrumAnalyzer::Bands out {};
+        out.fill(-200.0);
+        if (track != tracks.end())
+            out = outAnalysers[static_cast<size_t>(track - tracks.begin())].averageDb();
         const double outDb = bandPowerDb(out, 0.0, 1e9);
         md << "| " << channel.name << " | " << roles[jlimit(0, roles.size() - 1, static_cast<int>(channel.data.role))] << " | "
            << signedDb(channel.data.trimDb) << " | ";

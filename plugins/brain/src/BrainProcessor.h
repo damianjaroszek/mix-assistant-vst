@@ -358,6 +358,8 @@ public:
     mutable std::map<std::pair<std::uint64_t, std::uint64_t>, std::pair<double, juce::uint32>> liveSteps;
     static bool isPendingFor(const Proposal::Item& item, std::uint64_t masker, std::uint64_t masked, double lowHz, double highHz);
     juce::String describeIssue(const ma::MaskingIssue& issue) const;
+    // What is left to do about a collision the mix has done all it can for, by what the masker is.
+    juce::String settledAdvice(const ma::MaskingIssue& issue) const;
     static juce::String glueText(const ma::ChainPlan& plan, double bpm);
     juce::String saturationText(const ma::ChainPlan& plan) const;
     juce::String harmonicsText(const ma::ChainPlan& plan) const; // phase 31: the planned enhancer, without the channel's name

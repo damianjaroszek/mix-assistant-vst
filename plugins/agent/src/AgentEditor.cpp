@@ -489,6 +489,8 @@ void AgentEditor::showResult(const AgentProcessor::LearnResult& r)
     if (std::abs(r.roleOffsetDb) > 0.05)
         text += pl(" Cel dla roli: ") + ma::ui::formatDb(r.targetDb, unit.toRawUTF8()) + " (" + signedDb(r.roleOffsetDb)
                 + pl(" względem stopy).");
+    if (r.boostCapped)
+        text += pl(" Podbicie ograniczone do +12 dB: partia była dużo cichsza niż typowo dla roli, pewnie celowo.");
     if (r.limitedByPeak)
     {
         // Nauka ustawia tylko trim. Kompresor i clipper z zakładki „Inżynier miksu” ustawia Mózg,

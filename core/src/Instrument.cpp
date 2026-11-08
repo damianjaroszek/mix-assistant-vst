@@ -8,6 +8,9 @@ namespace ma
 namespace
 {
 constexpr double kGateDb = -60.0;
+// Level percentiles only count the 100 ms level while it is within this of the recent peak, so a note's
+// release tail and the edges of a pause do not read as quiet passages for the compressor to lift.
+constexpr double kLevelWindowDb = 20.0;
 constexpr double kOnsetRiseDb = 6.0;   // hop over the slow envelope that counts as an onset
 constexpr int kMinOnsetGapHops = 12;   // 60 ms
 constexpr int kDecayHops = 30;         // level measured 150 ms after the onset
@@ -143,7 +146,7 @@ void InstrumentFeatures::endHop()
             sum += p;
         const double level = powerToDb(sum / static_cast<double>(recentHops.size()));
         const int bin = static_cast<int>(std::floor((level + 120.0) * 2.0));
-        if (bin >= 0)
+        if (bin >= 0 && level > recentPeakDb - kLevelWindowDb)
             ++levelHistogram[static_cast<size_t>(std::min(bin, static_cast<int>(levelHistogram.size()) - 1))];
         const double note = pitchTracker.pitchHz();
         if (note > 0.0)
