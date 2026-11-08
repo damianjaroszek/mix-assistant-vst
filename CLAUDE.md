@@ -223,6 +223,11 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   lifts at most `kLearnMaxBoostDb` 12 dB (`LearnResult::boostCapped`); `settledAdvice` gives drums "hits cover only for a moment"
   and a kick covering >= 1 kHz "another hit in the same track, split it" instead of "an octave up". mixcheck's channel table
   measures each part's output over the drop while rendering (the Agents' published spectrum is their latest second only).
+  Producer's balance inside a group (`planGroupBalance`, whole-mix analysis only): music and vocal parts get back their raw-track
+  level against the rest of their group (K-weighted over the drop, after trim and chain loss; group loudness kept; <= 15 dB, steps
+  >= 0.5 dB) as `Action::balance` items (channel gain, like `channelLevel`), counted in the group levels and the solver
+  (`balanceGain`, set only while `proposeWholeMix` runs). Drums and bass stay at the role levels: on both real songs the stems'
+  own hats and sub balance (+5 dB each) made the mix worse. Idempotent: after apply the group's trims differ only by chain loss.
   Group levels count what each Agent's chain takes away over the drop (`chainLossDb`: K-weighted output vs heard, summed in
   `DropSum::chainIn/chainOut`, only losses, <= 15 dB), so a refining round gives back what compressors, ducks and dips took.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
