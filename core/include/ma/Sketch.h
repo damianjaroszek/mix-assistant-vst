@@ -47,7 +47,7 @@ Arrangement typicalArrangement();
 // Phase 29: the typical house balance of the groups as level corridors (+-kTypicalLevelSpanDb
 // around typicalArrangement's levels, moved together so the groups that play add up to the
 // whole), for planStemLevels when there are no stem references. No profiles: only `level`.
-constexpr double kTypicalLevelSpanDb = 1.5;
+constexpr double kTypicalLevelSpanDb = 2.0; // two real productions differed by up to 4 dB per group
 StemTarget typicalLevelTarget(const std::array<bool, kStemGroups>& present);
 // planStemLevels keeps the overall loudness, so pads far too loud come out as everything else
 // raised. With the typical balance the drums stay where Learn put them (the kick is the anchor of

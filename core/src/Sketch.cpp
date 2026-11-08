@@ -155,7 +155,11 @@ Arrangement typicalArrangement()
 {
     Arrangement out;
     const auto shapes = typicalShapes();
-    constexpr std::array<double, kStemGroups> levels { -4.0, -5.5, -5.0, -5.0 };
+    // Drums, bass, vocals, the rest (ear-weighted, relative). mixcheck: two real house productions'
+    // own stems (Mixing Secrets: Chardonnay Lektrix Remix, Galias Horizon) put drums at -9.0 / -8.1,
+    // bass -5.9 / -9.9 and the rest -2.8 / -1.3 dB against their sum; the first guess (-4, -5.5, -5)
+    // held the rest ~3 dB down and the drums ~4.5 dB up, so after "Analizuj" the kick stood out.
+    constexpr std::array<double, kStemGroups> levels { -8.5, -7.9, -5.0, -2.0 };
     constexpr std::array<bool, kStemGroups> expected { true, true, false, true };
     for (int g = 0; g < kStemGroups; ++g)
     {

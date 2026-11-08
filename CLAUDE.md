@@ -184,7 +184,7 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   Phase 29 balance without references: `ma::roleLevelOffsetDb` (Instrument.h: kick 0, bass -2, vocal -4, lead/percussion -6,
   pad -8, effects/send -10) is added to the Learn target when the Agent's `roleLevel` param is on (default; the role is recognised
   before the trim is planned; `LearnResult::roleOffsetDb/targetDb`). Without stem references (`typicalLevelsReady`) `proposeWholeMix`
-  plans group levels against `typicalLevelTarget(present)` (Sketch.h: typicalArrangement levels +-1.5 dB, shifted so the present
+  plans group levels against `typicalLevelTarget(present)` (Sketch.h: typicalArrangement levels +-2 dB (drums -8.5, bass -7.9, vocals -5, music -2 vs the whole: measured on two real productions with ma-lab), shifted so the present
   groups sum to the whole; level corridors only, no profiles: `planStemLevels` now needs only valid level corridors) and
   `anchorStemLevels` keeps the drums at 0 dB.
   Phase 30 no cable (`ma/Unmask.h`): `KeyFollower` (output, mono, 8 octave bands 125 Hz-16 kHz, 3 ms mean square then 5/25 ms
