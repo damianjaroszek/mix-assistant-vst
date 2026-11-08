@@ -102,9 +102,12 @@ private:
     void saveMasteringReport();
 
     // Fixed window: the meters and the proposal's buttons stay, everything else is one tab at a time.
-    enum class Tab { report, channels, collisions, proposal, verdict, tonal, stems, arrangement, energy, translation, stereo, count };
+    enum class Tab { guide, report, channels, collisions, proposal, verdict, tonal, stems, arrangement, energy, translation, stereo, count };
     std::array<ma::ui::Page, static_cast<size_t>(Tab::count)> pages;
     ma::ui::Tabs tabs;
+    brain::GuideView guideView; // phase 31: "Jak zacząć"
+    void updateGuide();
+    juce::TooltipWindow tooltipWindow { this, 500 }; // phase 31: without one no tooltip in the editor ever showed
     void layoutChannels(juce::Rectangle<int> area);
     void layoutTonal(juce::Rectangle<int> area);
     void layoutStems(juce::Rectangle<int> area);

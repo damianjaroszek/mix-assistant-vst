@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ChannelChain.h"
+#include "Harmonics.h"
 #include "Instrument.h"
 #include "Resonance.h"
 #include "Saturator.h"
@@ -101,6 +102,15 @@ struct ChainPlan
     double overtonesTargetDb = -200.0; // what the role should have
     double overtonesAfterDb = -200.0;  // predicted with the planned saturation
     int saturationWouldCover = -1;     // the more important channel that kept it gentler or off (index)
+
+    // Phase 31: the harmonic enhancer (overtones made from the sub only, the fundamental and the rest
+    // of the part stay clean) for a bass that is close to a pure sine down there; saturation for one
+    // that has some body already. Each is the other's fallback when it would cover a more important
+    // channel.
+    HarmonicSettings harmonics {};     // off unless planned
+    bool sineSub = false;              // the bass is that thin: the enhancer comes first
+    double harmonicsAfterDb = -200.0;  // overtones predicted with the planned enhancer
+    int harmonicsWouldCover = -1;      // the more important channel that kept it gentler or off (index)
 
     // Phase 15: glue compression on a bus. A gentle ratio and a slow attack that lets the hits
     // through, the release on the groove, a couple of dB on the loud parts: the sources move as

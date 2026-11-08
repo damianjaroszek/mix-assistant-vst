@@ -26,6 +26,8 @@ constexpr double kThinMarginDb = 3.0;         // overtones this far under the ro
 constexpr double kMaxOvertonesDb = -6.0;      // the saturator adds no more than this: past it, it is audible distortion
 constexpr double kMaskingStep = 0.05;         // a rise in masking of a more important channel this big counts ...
 constexpr double kMaskingFloor = 0.2;
+constexpr double kSineSubMarginDb = 12.0;     // a bass this far under its target is a near-sine sub: the enhancer first
+constexpr double kMinPlanHarmonicsDb = -24.0, kMaxPlanHarmonicsDb = -6.0; // the enhancer's amount the plan may use
 constexpr double kBassSubHz = 120.0, kBassAudibleHz = 150.0; // a bass's sub, and where small speakers begin         // ... once it reaches this (a little under where the collision list starts)
 
 struct SaturationProfile
@@ -558,6 +560,61 @@ std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& input, const 
         if (plan.overtonesDb >= profile.targetDb - kThinMarginDb)
             continue;
 
+        // Phase 31: the harmonic enhancer, sized like the saturation: the gentlest amount that reaches
+        // the target, stepped down while its overtones would cover a more important channel.
+        const auto coveredBy = [&](const SpectrumAnalyzer::Bands& bands) {
+            auto trial = masking;
+            trial[i].rawDb = bands;
+            const auto result = analyseMasking(trial);
+            for (size_t j = 0; j < count; ++j)
+            {
+                if (j == i || !channels[j].valid || channels[j].priority >= c.priority)
+                    continue;
+                if (result.amount[i][j] - maskingBefore.amount[i][j] >= kMaskingStep && result.amount[i][j] >= kMaskingFloor)
+                    return static_cast<int>(j);
+            }
+            return -1;
+        };
+        const auto planHarmonics = [&] {
+            HarmonicSettings s;
+            s.on = 1.0f;
+            s.hz = static_cast<float>(std::clamp(std::round(f0 * 1.8 / 5.0) * 5.0, 70.0, kBassSubHz));
+            const auto overtonesWith = [&](const SpectrumAnalyzer::Bands& bands) {
+                double o = 0.0;
+                for (int b = 0; b < kBands; ++b)
+                    if (centre(b) >= overtoneLow && centre(b) <= overtoneHigh)
+                        o += power(bands[static_cast<size_t>(b)]);
+                return toDb(o) - toDb(fundamental);
+            };
+            double amount = kMinPlanHarmonicsDb;
+            for (; amount < kMaxPlanHarmonicsDb; amount += 1.0)
+            {
+                s.amountDb = static_cast<float>(amount);
+                if (overtonesWith(predictHarmonics(heard, s)) >= profile.targetDb)
+                    break;
+            }
+            for (; amount >= kMinPlanHarmonicsDb; amount -= 2.0)
+            {
+                s.amountDb = static_cast<float>(amount);
+                const auto bands = predictHarmonics(heard, s);
+                const int covers = coveredBy(bands);
+                if (covers < 0)
+                {
+                    plan.harmonics = s;
+                    plan.harmonicsAfterDb = overtonesWith(bands);
+                    return true;
+                }
+                plan.harmonicsWouldCover = covers;
+            }
+            return false;
+        };
+        plan.sineSub = bass && plan.overtonesDb < profile.targetDb - kSineSubMarginDb;
+        if (plan.sineSub && planHarmonics())
+        {
+            plan.overtonesAfterDb = plan.harmonicsAfterDb;
+            continue;
+        }
+
         // Candidates from the gentlest up, as the real saturator measures them at the part's
         // loud level (after gain staging, which is where the drive is defined).
         const double level = c.hasStats && c.levelP95 > -100.0 ? c.levelP95 : -18.0;
@@ -629,7 +686,12 @@ std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& input, const 
             plan.saturationWouldCover = covers;
         }
         if (pick < 0)
+        {
+            // Phase 31: a bass the saturation would make cover someone may still take the cleaner enhancer.
+            if (bass && !plan.sineSub && planHarmonics())
+                plan.overtonesAfterDb = plan.harmonicsAfterDb;
             continue;
+        }
         const auto& chosen = candidates[static_cast<size_t>(pick)];
         plan.saturation = chosen.settings;
         plan.overtonesAfterDb = after(chosen.prediction);

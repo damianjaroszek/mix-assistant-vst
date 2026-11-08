@@ -5,6 +5,23 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
+// Phase 31: what the Brain decided about each tool at its last "Analizuj", one row per tool: the tool,
+// the decision, where it stands now, and why. The whole reason shows as a tooltip over its row.
+class BrainDecisionsView : public juce::Component, public juce::TooltipClient
+{
+public:
+    void setState(const AgentProcessor::BrainNotes& notes, int brain, int changed, int manual, bool connected);
+    void paint(juce::Graphics&) override;
+    juce::String getTooltip() override;
+
+private:
+    juce::Rectangle<int> rowArea(int tool) const;
+    AgentProcessor::BrainNotes notes;
+    int brainBits = 0, changedBits = 0, manualBits = 0;
+    bool brainConnected = false;
+    juce::int64 shownMinute = -1;
+};
+
 class AgentEditor : public juce::AudioProcessorEditor, private juce::Timer
 {
 public:
@@ -110,7 +127,10 @@ private:
     void updateUnmaskStatus();
 
     // Fixed window: a header plus one tab of controls at a time.
-    ma::ui::Page levelPage, eqPage, tonePage, chainPage, stereoPage;
+    ma::ui::Page levelPage, eqPage, tonePage, chainPage, stereoPage, decisionsPage;
+    BrainDecisionsView decisionsView; // phase 31
+    juce::Label toneDecisions;        // phase 31: the Brain's word on the three tone tools, under them
+    juce::TooltipWindow tooltipWindow { this, 500 }; // without one no tooltip in the editor ever showed
     ma::ui::Tabs tabs;
     void layoutLevel(juce::Rectangle<int> area);
     void layoutEq(juce::Rectangle<int> area);

@@ -6,6 +6,36 @@ Gatunki docelowe: house, tech house, garage, trance.
 
 Koncepcja, architektura i plan faz: [rewizja koncepcji](https://claude.ai/artifact/5erMybFtPRsZ84QrMGyBFY).
 
+## Jak używać, krok po kroku
+
+To samo, z krokami odhaczanymi na żywo, jest w Mózgu na pierwszej zakładce „Jak zacząć”.
+
+**Przygotowanie (raz na projekt)**
+
+1. **Agent na każdym kanale miksera** (stopa, bas, wokal, synthy, busy), najlepiej jako pierwszy efekt. Kanał bez
+   Agenta jest dla Mózgu niewidoczny. **Mózg** na masterze, jako ostatni efekt.
+2. **„Naucz poziom” na dropie.** Zapętl najgęstszy fragment i kliknij „Naucz poziom” w Agentach (można w kilku naraz,
+   w trakcie odtwarzania). Ustawia trim, rozpoznaje rolę, zapamiętuje dynamikę, szczyty i zwykłą nutę basu.
+3. **Sprawdź rolę i priorytet** (Agent, zakładka „Poziom”). Od roli zależy prawie wszystko: kompresja, saturacja,
+   kto komu ustępuje. Priorytet 1 dla najważniejszych kanałów.
+4. **Cel brzmienia (zalecane).** Raz na gatunek: „Balans tonalny” → „Nowy cel” → nagraj 3–10 utworów referencyjnych
+   (jak Capture w Tonal Balance Control). Jeszcze lepiej stemy referencji (zakładka „Referencje”). Bez tego Mózg
+   trzyma się typowych proporcji house'u, a balansu tonalnego nie ocenia.
+
+**Miks (powtarzaj po każdej większej zmianie)**
+
+5. **Zapętl drop i graj.** Mózg porównuje tylko głośny fragment; potrzebuje 8 s dropu.
+6. **„Analizuj”** w zakresie „Cały łańcuch”. Niczego nie zmienia: daje propozycję, werdykt na każdy kanał, a w Agentach
+   zakładkę „Decyzje Mózgu” (co postanowił przy każdym narzędziu i dlaczego).
+7. **Przejrzyj propozycję i „Zastosuj”.** Odznacz, czego nie chcesz. „Przed / po” porównuje z wyrównaną głośnością,
+   „Cofnij” zdejmuje wszystko naraz.
+8. **Graj dalej.** Z „Dopracuj sam” (domyślnie) Mózg sam mierzy drop na nowo i poprawia, co zostało (do 2 rund). Bez
+   niego: puść drop jeszcze raz i znowu „Analizuj”, aż propozycja będzie pusta albo zostaną drobiazgi.
+9. **Sprawdź „Raport”.** Każda czerwona pozycja mówi, co dalej; część to aranż albo brzmienie (do zrobienia w FL).
+
+**Dodatkowo:** raz cały utwór od początku w trybie Song (mapa energii, intro, build, break), przed masteringiem
+„Raport dla Ozone”, a po dodaniu kanału albo zmianie barwy „Naucz poziom” na nim i znowu od kroku 5.
+
 ## Co jest w środku
 
 | Część | Gdzie | Co robi |
@@ -255,6 +285,23 @@ proponuje mu zmian stereo i pisze w werdykcie, że szerokość jest ustawiona r�
   (np. clipper pod głośny master, kolizja), sam analizuje i stosuje, najwyżej 2 rundy. Odznaczone pozycje zostają
   odznaczone. „Analizuj”, „Cofnij” albo „Przed / po” przerywają. Jedno „Cofnij” cofa wszystko razem z rundami.
 - Nowy projekt bierze cel tonalny używany ostatnio (`last-target.txt` w folderze celów).
+
+### Decyzje Mózgu, przewodnik, harmoniczne (faza 31)
+
+- Każdy Agent ma zakładkę **„Decyzje Mózgu”**: przy każdym z 11 narzędzi (EQ, porządki, kompresor, clipper,
+  wyrównanie nut, stereo, saturacja, ustępowanie stopie, harmoniczne, atak, ustępowanie bez kabla) co Mózg postanowił
+  przy ostatnim „Analizuj” (w propozycji, zostaje, niepotrzebne, nie sprawdzone, Twoje ustawienie), jak jest teraz i
+  dlaczego. Wyłączone narzędzie mówi więc wprost, czy Mózg je rozważył i odrzucił, czy nie miał danych (np. brak nauki).
+  Etykieta przy nagłówku narzędzia na każdej zakładce pokazuje to samo („Mózg: niepotrzebne”), a „Barwa” ma powody pod
+  harmonicznymi, atakiem i przesterem. Werdykt w Mózgu ma te linie dla EQ, ustępowania, harmonicznych i ataku.
+  Decyzje zapisują się z projektem.
+- W Mózgu pierwsza zakładka **„Jak zacząć”**: kroki z sekcji „Jak używać” powyżej, odhaczane na podstawie tego, co Mózg
+  widzi (Agenty, role, nauka, cel, drop, analiza, zastosowanie, dopracowanie, raport).
+- **Harmoniczne w planie całego miksu:** bas, który jest prawie czystym sinusem (treść powyżej 150 Hz ponad 12 dB pod
+  celem), dostaje enhancer harmonicznych zamiast lampy: alikwoty robią się tylko z suba, sam sub zostaje czysty. Bas z
+  odrobiną środka nadal dostaje lampę; każde jest zapasem dla drugiego, gdy zasłoniłoby ważniejszy kanał. Wcześniej
+  harmoniczne pojawiały się tylko wtedy, gdy kanał ginął na telefonie albo trzeba było wypełnić dziurę w balansie.
+- Podpowiedzi (tooltipy) w obu wtyczkach wreszcie się pokazują (brakowało okna podpowiedzi).
 
 ### Przed masteringiem (Ozone)
 

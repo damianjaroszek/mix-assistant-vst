@@ -35,6 +35,121 @@ juce::String signedDb(double db)
 }
 } // namespace
 
+namespace
+{
+juce::Colour decisionColour(int decision)
+{
+    switch (static_cast<ma::bus::ToolDecision>(decision))
+    {
+        case ma::bus::ToolDecision::proposed: return colours::accent;
+        case ma::bus::ToolDecision::kept: return colours::good;
+        case ma::bus::ToolDecision::notChecked: return colours::warning;
+        case ma::bus::ToolDecision::notNeeded:
+        case ma::bus::ToolDecision::yours:
+        case ma::bus::ToolDecision::none: break;
+    }
+    return colours::quiet;
+}
+
+juce::String ageText(juce::int64 madeMs)
+{
+    const auto minutes = (juce::Time::currentTimeMillis() - madeMs) / 60000;
+    if (minutes < 1)
+        return pl("przed chwilą");
+    if (minutes < 60)
+        return juce::String(minutes) + pl(" min temu");
+    if (minutes < 48 * 60)
+        return juce::String(minutes / 60) + pl(" godz. temu");
+    return juce::Time(madeMs).formatted("%d.%m.%Y %H:%M");
+}
+} // namespace
+
+void BrainDecisionsView::setState(const AgentProcessor::BrainNotes& newNotes, int brain, int changed, int manual, bool connected)
+{
+    const auto minute = newNotes.madeMs != 0 ? (juce::Time::currentTimeMillis() - newNotes.madeMs) / 60000 : -1;
+    if (newNotes.madeMs == notes.madeMs && brain == brainBits && changed == changedBits && manual == manualBits
+        && connected == brainConnected && minute == shownMinute)
+        return;
+    notes = newNotes;
+    brainBits = brain;
+    changedBits = changed;
+    manualBits = manual;
+    brainConnected = connected;
+    shownMinute = minute;
+    repaint();
+}
+
+juce::Rectangle<int> BrainDecisionsView::rowArea(int tool) const
+{
+    auto area = getLocalBounds().reduced(12, 8);
+    area.removeFromTop(54);
+    const int rowHeight = area.getHeight() / ma::bus::kToolCount;
+    return area.withTrimmedTop(rowHeight * tool).withHeight(rowHeight);
+}
+
+void BrainDecisionsView::paint(juce::Graphics& g)
+{
+    auto area = getLocalBounds().reduced(12, 8);
+    auto header = area.removeFromTop(54);
+    g.setFont(juce::FontOptions(13.0f));
+    juce::String intro;
+    if (notes.madeMs == 0)
+        intro = brainConnected ? pl("Mózg jeszcze nie analizował tego kanału. Puść drop i kliknij „Analizuj” w Mózgu (na masterze); "
+                                    "tu pojawi się, co postanowił przy każdym narzędziu i dlaczego.")
+                               : pl("Brak Mózgu na masterze. Wstaw wtyczkę Mózg na master i kliknij „Analizuj”; tu pojawi się, "
+                                    "co postanowił przy każdym narzędziu i dlaczego.");
+    else
+        intro = pl("Ostatnie „Analizuj” w Mózgu: ") + ageText(notes.madeMs)
+                + (notes.wholeMix ? pl(" (cały miks). ") : pl(" (tylko korekcje, łańcuch nie był sprawdzany). "))
+                + pl("Mózg ma dostęp do wszystkich narzędzi tego kanału; przy każdym jest, co postanowił i dlaczego.");
+    g.setColour(colours::quiet);
+    g.drawFittedText(intro, header.withTrimmedBottom(14), juce::Justification::topLeft, 2, 1.0f);
+    {
+        auto columns = header.removeFromBottom(14);
+        g.setFont(juce::FontOptions(11.5f));
+        g.drawText(pl("NARZĘDZIE"), columns.removeFromLeft(178), juce::Justification::left);
+        g.drawText(pl("DECYZJA MÓZGU"), columns.removeFromLeft(136), juce::Justification::left);
+        g.drawText(pl("TERAZ"), columns.removeFromLeft(118), juce::Justification::left);
+        g.drawText(pl("DLACZEGO"), columns, juce::Justification::left);
+    }
+
+    const auto tools = ma::ui::toolNames();
+    const auto decisions = ma::ui::decisionNames();
+    for (int t = 0; t < ma::bus::kToolCount; ++t)
+    {
+        auto row = rowArea(t);
+        if (t % 2 == 0)
+        {
+            g.setColour(colours::panel.withAlpha(0.55f));
+            g.fillRect(row);
+        }
+        row.reduce(6, 2);
+        const int bit = 1 << t;
+        const int decision = notes.decision[static_cast<size_t>(t)];
+        g.setFont(juce::FontOptions(13.5f));
+        g.setColour(colours::text);
+        g.drawText(tools[t], row.removeFromLeft(172), juce::Justification::centredLeft);
+        g.setColour(decisionColour(decision));
+        g.drawText(decision > 0 ? decisions[decision] : pl("—"), row.removeFromLeft(136), juce::Justification::centredLeft);
+        const auto now = (brainBits & bit) != 0 ? pl("od Mózgu") : (changedBits & bit) != 0 ? pl("zmienione ręcznie") : (manualBits & bit) != 0 ? pl("ręcznie") : pl("wyłączone");
+        g.setColour((brainBits & bit) != 0 ? colours::good : (changedBits & bit) != 0 ? colours::accent : colours::quiet);
+        g.setFont(juce::FontOptions(12.5f));
+        g.drawText(now, row.removeFromLeft(118), juce::Justification::centredLeft);
+        g.setColour(decision > 0 ? colours::text.withAlpha(0.85f) : colours::quiet);
+        g.drawFittedText(decision > 0 ? notes.text[static_cast<size_t>(t)] : juce::String(), row, juce::Justification::centredLeft, 2, 0.92f);
+    }
+}
+
+juce::String BrainDecisionsView::getTooltip()
+{
+    const auto mouse = getMouseXYRelative();
+    for (int t = 0; t < ma::bus::kToolCount; ++t)
+        if (rowArea(t).contains(mouse) && notes.decision[static_cast<size_t>(t)] > 0)
+            return ma::ui::toolNames()[t] + ": " + ma::ui::decisionNames()[notes.decision[static_cast<size_t>(t)]] + ", "
+                   + notes.text[static_cast<size_t>(t)];
+    return {};
+}
+
 AgentEditor::AgentEditor(AgentProcessor& p)
     : AudioProcessorEditor(&p), processor(p)
 {
@@ -310,7 +425,7 @@ AgentEditor::AgentEditor(AgentProcessor& p)
          { &harmonicsLabel, &origins[8], &origins[9], &origins[6], &harmonicsOnButton, &harmonicsFreqLabel, &harmonicsFreqSlider, &harmonicsAmountLabel,
            &harmonicsAmountSlider, &attackLabel, &attackOnButton, &attackFreqLabel, &attackFreqSlider, &attackAmountLabel,
            &attackAmountSlider, &satLabel, &satOnButton, &satModeBox, &intentionalButton, &satDriveLabel, &satDriveSlider,
-           &satMixLabel, &satMixSlider },
+           &satMixLabel, &satMixSlider, &toneDecisions },
          [this](auto area) { layoutTone(area); });
     page(chainPage, pl("Inżynier miksu"),
          { &chainTitle, &origins[1], &origins[2], &origins[3], &origins[4], &cleanLabel, &hpfLabel, &hpfSlider, &monoLabel, &monoSlider, &mudFreqLabel, &mudFreqSlider,
@@ -324,6 +439,10 @@ AgentEditor::AgentEditor(AgentProcessor& p)
          { &stereoLabel, &origins[5], &stereoView, &stereoStatus, &widthLabel, &widthSlider, &widthMonoMark, &widthNeutralMark, &widthMaxMark,
            &widthFromLabel, &widthFromSlider, &widthStatusLabel },
          [this](auto area) { layoutStereo(area); });
+    toneDecisions.setJustificationType(juce::Justification::topLeft);
+    toneDecisions.setFont(juce::FontOptions(13.0f));
+    toneDecisions.setColour(juce::Label::textColourId, colours::quiet);
+    page(decisionsPage, pl("Decyzje Mózgu"), { &decisionsView }, [this](auto area) { decisionsView.setBounds(area); });
     widthSlider.setDoubleClickReturnValue(true, ma::kWidthNeutral);
     tabs.setCurrentTabIndex(juce::jlimit(0, tabs.getNumTabs() - 1, processor.editorTab), false);
     tabs.onChange = [this](int index) { processor.editorTab = index; };
@@ -806,6 +925,7 @@ void AgentEditor::layoutTone(juce::Rectangle<int> area)
     row.removeFromLeft(16);
     intentionalButton.setBounds(row.removeFromLeft(200));
     pairRow(satDriveLabel, satDriveSlider, satMixLabel, satMixSlider);
+    toneDecisions.setBounds(area);
 }
 
 juce::Label& AgentEditor::origin(int bit)
@@ -820,18 +940,54 @@ void AgentEditor::updateOrigins()
 {
     int brain = 0, changed = 0, manual = 0;
     processor.toolOrigins(brain, changed, manual);
+    const auto& notes = processor.brainNotes();
+    decisionsView.setState(notes, brain, changed, manual, processor.isConnectedToBrain());
+    const auto decisions = ma::ui::decisionNames();
+    {
+        juce::String text;
+        if (notes.madeMs == 0)
+            text = pl("Mózg ma dostęp do harmonicznych, ataku i przesteru. Po „Analizuj” w Mózgu zobaczysz tu, co postanowił przy każdym i dlaczego.");
+        else
+        {
+            text = pl("Decyzje Mózgu przy ostatnim „Analizuj” (wszystkie narzędzia: zakładka „Decyzje Mózgu”):");
+            for (const int bit : { ma::bus::toolHarmonics, ma::bus::toolTransients, ma::bus::toolSaturation })
+            {
+                int t = 0;
+                while ((1 << t) != bit)
+                    ++t;
+                const int decision = notes.decision[static_cast<size_t>(t)];
+                if (decision > 0)
+                    text += "\n\n" + ma::ui::toolNames()[t] + ": " + decisions[decision] + ", " + notes.text[static_cast<size_t>(t)];
+            }
+        }
+        if (toneDecisions.getText() != text)
+            toneDecisions.setText(text, juce::dontSendNotification);
+    }
     for (size_t i = 0; i < origins.size(); ++i)
     {
         const int bit = 1 << i;
         auto& label = origins[i];
-        const auto text = (brain & bit) != 0 ? pl("od Mózgu") : (changed & bit) != 0 ? pl("zmienione ręcznie") : (manual & bit) != 0 ? pl("ręcznie") : juce::String();
-        if (label.getText() == text)
-            continue;
-        label.setText(text, juce::dontSendNotification);
-        label.setColour(juce::Label::textColourId, (brain & bit) != 0 ? colours::good : (changed & bit) != 0 ? colours::accent : colours::quiet);
-        label.setTooltip((brain & bit) != 0 ? pl("Tak, jak Mózg ustawił przy ostatnim „Zastosuj”. Nikt tego od tamtej pory nie ruszał.")
-                         : (changed & bit) != 0 ? pl("Mózg to ustawił, potem zmieniono ręcznie. Następne „Analizuj” liczy od tego, co jest teraz.")
-                                                : pl("Włączone ręcznie, Mózg tego nie ustawiał."));
+        const int decision = notes.decision[i];
+        // Phase 31: a tool that is off still says what the Brain made of it, so "off" never reads as "not looked at".
+        auto text = (brain & bit) != 0 ? pl("od Mózgu") : (changed & bit) != 0 ? pl("zmienione ręcznie") : (manual & bit) != 0 ? pl("ręcznie") : juce::String();
+        auto colour = (brain & bit) != 0 ? colours::good : (changed & bit) != 0 ? colours::accent : colours::quiet;
+        if (text.isEmpty() && decision > 0)
+        {
+            text = pl("Mózg: ") + decisions[decision];
+            colour = decisionColour(decision);
+        }
+        auto tip = (brain & bit) != 0 ? pl("Tak, jak Mózg ustawił przy ostatnim „Zastosuj”. Nikt tego od tamtej pory nie ruszał.")
+                   : (changed & bit) != 0 ? pl("Mózg to ustawił, potem zmieniono ręcznie. Następne „Analizuj” liczy od tego, co jest teraz.")
+                   : (manual & bit) != 0  ? pl("Włączone ręcznie, Mózg tego nie ustawiał.")
+                                          : juce::String();
+        if (decision > 0)
+            tip = (tip.isEmpty() ? juce::String() : tip + "\n") + pl("Ostatnie „Analizuj”: ") + decisions[decision] + ", " + notes.text[i]
+                  + pl("\nWszystkie decyzje: zakładka „Decyzje Mózgu”.");
+        if (label.getText() != text)
+            label.setText(text, juce::dontSendNotification);
+        label.setColour(juce::Label::textColourId, colour);
+        if (label.getTooltip() != tip)
+            label.setTooltip(tip);
     }
 }
 

@@ -2937,6 +2937,7 @@ void BrainProcessor::propose(const std::array<double, ma::kStemGroups>* groupGai
 void BrainProcessor::proposeOnce(const std::array<double, ma::kStemGroups>* groupGain)
 {
     currentProposal = {};
+    toolWhy.clear();
     currentProposal.made = true;
 
     const double peak = truePeakDb();
@@ -3252,6 +3253,13 @@ void BrainProcessor::proposeWholeMix()
     // Phase 25: with stem references, every part to its group's width in them.
     const auto width = keyedStems.valid() ? ma::widthTargetFrom(keyedStems) : ma::WidthTarget {};
     const auto stereoPlans = ma::planStereo(stereoIn, mix.master, &width);
+    lastPlans.clear();
+    lastStereoPlans.clear();
+    for (size_t c = 0; c < mix.channels.size(); ++c)
+    {
+        lastPlans[mix.channels[c].owner] = plans[c];
+        lastStereoPlans[mix.channels[c].owner] = stereoPlans[c];
+    }
 
     // Collisions, kick and bass, translation: the usual proposal, made on the mix as it will
     // sound with the planned cleanup, so the solver does not cut what the high-pass removes.
@@ -3260,6 +3268,23 @@ void BrainProcessor::proposeWholeMix()
     {
         applyCleanup(mix.channels[c], plans[c].cleanup);
         mix.channels[c].data.cleanup = plans[c].cleanup; // the stem references see it too
+        // Phase 31: a planned enhancer the Agent does not run yet is heard by the rest of the proposal
+        // (collisions, translation, balance), and the translation steps do not add a second one.
+        auto& channel = mix.channels[c];
+        if (plans[c].harmonics.on > 0.5f && channel.data.harmonics.on < 0.5f && channel.data.intentionalDrive == 0)
+        {
+            ma::SpectrumAnalyzer::Bands heard {};
+            for (int b = 0; b < ma::bus::kBands; ++b)
+                heard[static_cast<size_t>(b)] = channel.heardDb[static_cast<size_t>(b)];
+            const auto with = ma::predictHarmonics(heard, plans[c].harmonics);
+            for (int b = 0; b < ma::bus::kBands; ++b)
+            {
+                const double delta = with[static_cast<size_t>(b)] - heard[static_cast<size_t>(b)];
+                for (auto* curve : { &channel.rawDb, &channel.bandsDb, &channel.heardDb, &channel.outputDb })
+                    (*curve)[static_cast<size_t>(b)] += delta;
+            }
+            channel.data.harmonics = plans[c].harmonics;
+        }
     }
     std::vector<ma::MaskingChannel> masking(mix.channels.size());
     for (size_t c = 0; c < mix.channels.size(); ++c)
@@ -3431,6 +3456,20 @@ void BrainProcessor::proposeWholeMix()
             item.evener.on = 0.0f;
             item.text = name + pl("wyrównanie nut wyłączone: jest tylko dla basu");
             chainItems.push_back(item);
+        }
+
+        // Phase 31: the harmonic enhancer the plan chose for a near-sine bass.
+        const auto& agentHarmonics = saved.channels[c].data.harmonics; // the mix above carries the planned one already
+        if (plan.harmonics.on > 0.5f && !intentional
+            && (agentHarmonics.on < 0.5f || std::abs(plan.harmonics.amountDb - agentHarmonics.amountDb) > 1.0f
+                || std::abs(plan.harmonics.hz - agentHarmonics.hz) > 5.0f))
+        {
+            Proposal::Item harmonicsItem;
+            harmonicsItem.action = Proposal::Item::Action::harmonics;
+            harmonicsItem.owner = channel.owner;
+            harmonicsItem.harmonics = plan.harmonics;
+            harmonicsItem.text = name + harmonicsText(plan);
+            chainItems.push_back(harmonicsItem);
         }
 
         // Phase 13: saturation, only on the roles the plan looks after; elsewhere (and with
@@ -3630,6 +3669,8 @@ juce::String BrainProcessor::saturationText(const ma::ChainPlan& plan) const
     const auto cover = plan.saturationWouldCover >= 0 && static_cast<size_t>(plan.saturationWouldCover) < mix.channels.size()
                            ? quoted(mix.channels[static_cast<size_t>(plan.saturationWouldCover)].name)
                            : juce::String();
+    if (sat.on < 0.5f && plan.harmonics.on > 0.5f)
+        return pl("saturacja wyłączona: sub to prawie czysty sinus, alikwoty daje enhancer harmonicznych, a sub zostaje czysty");
     if (sat.on < 0.5f)
         return cover.isNotEmpty() ? pl("saturacja wyłączona: jej alikwoty zasłoniłyby ") + cover
                                   : pl("saturacja wyłączona: alikwotów dość (") + juce::String(plan.overtonesDb, 1)
@@ -3644,6 +3685,21 @@ juce::String BrainProcessor::saturationText(const ma::ChainPlan& plan) const
                 + juce::String(plan.overtonesTargetDb, 0) + pl(" dB). Gęstszy i słyszalny na małych głośnikach");
     if (cover.isNotEmpty())
         text += pl(". Łagodniej, niż by chciał, żeby nie zasłonić ") + cover;
+    return text;
+}
+
+juce::String BrainProcessor::harmonicsText(const ma::ChainPlan& plan) const
+{
+    const auto& h = plan.harmonics;
+    auto text = pl("harmoniczne z suba poniżej ") + hzText(h.hz) + ", " + juce::String(h.amountDb, 0) + pl(" dB: ")
+                + (plan.sineSub ? pl("bas to prawie czysty sinus (treść powyżej 150 Hz ") : pl("treść powyżej 150 Hz "))
+                + juce::String(plan.overtonesDb, 1) + pl(" dB pod subem), po nich ok. ") + juce::String(plan.harmonicsAfterDb, 1)
+                + pl(" dB (cel ") + juce::String(plan.overtonesTargetDb, 0)
+                + pl(" dB). Słychać go na małych głośnikach, a sub zostaje czysty, bez przesteru");
+    if (!plan.sineSub)
+        text += pl(" (saturacja zasłoniłaby ważniejszy kanał)");
+    if (plan.harmonicsWouldCover >= 0 && static_cast<size_t>(plan.harmonicsWouldCover) < mix.channels.size())
+        text += pl(". Łagodniej, niż by chciał, żeby nie zasłonić ") + quoted(mix.channels[static_cast<size_t>(plan.harmonicsWouldCover)].name);
     return text;
 }
 
@@ -3864,6 +3920,409 @@ Proposal::Verdict BrainProcessor::judge(size_t index, const ma::ChainPlan& plan,
     return verdict;
 }
 
+// Phase 31: the decision per tool.
+namespace
+{
+int toolIndex(int bit)
+{
+    for (int i = 0; i < ma::bus::kToolCount; ++i)
+        if (bit == (1 << i))
+            return i;
+    return -1;
+}
+
+// UTF-8 copy that never cuts a character in half.
+void copyNote(char* out, int size, const juce::String& text)
+{
+    const char* utf8 = text.toRawUTF8();
+    int length = static_cast<int>(std::strlen(utf8));
+    if (length > size - 1)
+    {
+        length = size - 1;
+        while (length > 0 && (static_cast<unsigned char>(utf8[length]) & 0xC0) == 0x80)
+            --length;
+    }
+    std::memcpy(out, utf8, static_cast<size_t>(length));
+    out[length] = '\0';
+}
+} // namespace
+
+juce::String BrainProcessor::toolName(int tool)
+{
+    const auto names = ma::ui::toolNames();
+    return tool >= 0 && tool < names.size() ? names[tool] : juce::String();
+}
+
+juce::String BrainProcessor::decisionText(ma::bus::ToolDecision decision)
+{
+    const auto names = ma::ui::decisionNames();
+    const int index = static_cast<int>(decision);
+    return index > 0 && index < names.size() ? names[index] : juce::String();
+}
+
+void BrainProcessor::noteTool(std::uint64_t owner, int toolBit, ma::bus::ToolDecision decision, const juce::String& text)
+{
+    const int index = toolIndex(toolBit);
+    if (index < 0 || owner == 0)
+        return;
+    auto& note = toolWhy[owner][static_cast<size_t>(index)];
+    note.decision = decision;
+    note.text = text;
+}
+
+void BrainProcessor::analyse(int scope)
+{
+    if (scope == 1)
+        proposeWholeMix();
+    else
+    {
+        lastPlans.clear();
+        lastStereoPlans.clear();
+        propose();
+    }
+    buildToolNotes(scope == 1);
+    addToolLinesToVerdicts();
+    publishToolNotes();
+}
+
+void BrainProcessor::buildToolNotes(bool wholeMix)
+{
+    using D = ma::bus::ToolDecision;
+    using Action = Proposal::Item::Action;
+    using Tool = Proposal::Item::ChainTool;
+    lastToolNotes.clear();
+    lastNotesMs = juce::Time::currentTimeMillis();
+    lastNotesWholeMix = wholeMix;
+    const bool haveKick = std::any_of(mix.channels.begin(), mix.channels.end(),
+                                      [](const auto& c) { return c.data.role == static_cast<int>(ma::Role::kick) && c.spectrumValid; });
+
+    for (const auto& channel : mix.channels)
+    {
+        auto notes = toolWhy.count(channel.owner) > 0 ? toolWhy[channel.owner] : ToolNoteSet {};
+        const auto set = [&](int bit, D decision, const juce::String& text) {
+            auto& note = notes[static_cast<size_t>(toolIndex(bit))];
+            note.decision = decision;
+            note.text = text;
+        };
+        const auto has = [&](int bit) { return notes[static_cast<size_t>(toolIndex(bit))].decision != D::none; };
+        // The proposal's own line for a tool, without the channel's name in front.
+        const auto prefix = quoted(channel.name) + ": ";
+        const auto strip = [&](const juce::String& text) { return text.startsWith(prefix) ? text.substring(prefix.length()) : text; };
+        const auto itemFor = [&](auto&& match) -> const Proposal::Item* {
+            for (const auto& item : currentProposal.items)
+                if (item.owner == channel.owner && !item.advisory && match(item))
+                    return &item;
+            return nullptr;
+        };
+        const auto chainItem = [&](Tool tool) {
+            return itemFor([&](const auto& i) { return i.action == Action::chain && i.tool == tool; });
+        };
+        const auto role = static_cast<ma::Role>(juce::jlimit(0, static_cast<int>(ma::Role::send), static_cast<int>(channel.data.role)));
+        const bool bus = !inMixSums(channel);
+        const bool percussive = role == ma::Role::kick || role == ma::Role::percussion;
+        const bool intentional = channel.data.intentionalDrive != 0;
+        // A tool switched on: by the Brain (kept unless the analysis changes it) or by hand (left alone).
+        const auto runningNote = [&](int bit, bool on, const juce::String& what) {
+            if (!on)
+                return false;
+            if ((channel.data.brainTools & bit) != 0)
+                set(bit, D::kept, pl("działa od ostatniego „Zastosuj”") + (what.isNotEmpty() ? pl("; ") + what : juce::String()));
+            else if ((channel.data.changedTools & bit) != 0)
+                set(bit, D::yours, pl("Mózg to ustawił, potem zmieniono ręcznie; zostaje Twoje"));
+            else
+                set(bit, D::yours, pl("włączone ręcznie, Mózg tego nie zmienia"));
+            return true;
+        };
+
+        if (!channel.spectrumValid)
+        {
+            for (int t = 0; t < ma::bus::kToolCount; ++t)
+                notes[static_cast<size_t>(t)] = { D::notChecked, pl("kanał nie grał przy „Analizuj”: puść fragment, w którym gra (najlepiej drop), i analizuj jeszcze raz") };
+            lastToolNotes[channel.owner] = notes;
+            continue;
+        }
+
+        // EQ: the solver's cuts and boosts, the translation's room and presence bells.
+        {
+            int changes = 0, inPlace = 0;
+            const Proposal::Item* first = nullptr;
+            for (const auto& item : currentProposal.items)
+                if (item.owner == channel.owner && !item.advisory && item.action == Action::solver)
+                {
+                    if (item.inPlace)
+                        ++inPlace;
+                    else if (++changes == 1)
+                        first = &item;
+                }
+            const bool eqBands = channel.data.eqBypass == 0
+                                 && std::any_of(std::begin(channel.data.eq), std::end(channel.data.eq), [](const auto& b) { return ma::isOn(b); });
+            if (changes > 0)
+                set(ma::bus::toolEq, D::proposed,
+                    (changes == 1 ? strip(first->text)
+                                  : juce::String(changes) + (changes < 5 ? pl(" zmiany EQ, m.in. ") : pl(" zmian EQ, m.in. ")) + strip(first->text)));
+            else if (bus)
+                set(ma::bus::toolEq, D::notNeeded, pl("bus: korekcje ustawiam na jego źródłach, które mają własnych Agentów"));
+            else if (inPlace > 0 || eqBands)
+                set(ma::bus::toolEq, D::kept, pl("korekcja z poprzedniego „Zastosuj” nadal trafia w cel, nic do zmiany"));
+            else
+            {
+                const bool masks = std::any_of(mix.masking.issues.begin(), mix.masking.issues.end(), [&](const auto& issue) {
+                    return issue.score >= 0.3 && mix.channels[static_cast<size_t>(issue.masker)].owner == channel.owner;
+                });
+                auto why = masks ? pl("jego kolizje biorą na siebie inne narzędzia (ustępowanie, poziom grup) albo inne kanały")
+                                 : pl("nie zasłania innych kanałów");
+                why += currentTarget.valid() ? pl(", a balans tonalny nie potrzebuje jego pasm")
+                                             : pl("; balansu tonalnego nie sprawdzam, bo nie ma celu (zakładka „Balans tonalny”)");
+                set(ma::bus::toolEq, D::notNeeded, why);
+            }
+        }
+
+        // The chain: planned by "Analizuj" on the whole mix only.
+        const auto plan = lastPlans.find(channel.owner);
+        const auto notInScope = pl("sprawdzam przy „Analizuj” w zakresie „Cały miks”; teraz analiza tylko korekcji");
+        if (!wholeMix || plan == lastPlans.end())
+        {
+            for (const int bit : { ma::bus::toolCleanup, ma::bus::toolCompressor, ma::bus::toolClipper, ma::bus::toolEvener,
+                                   ma::bus::toolSaturation, ma::bus::toolStereo })
+                if (!has(bit))
+                    set(bit, D::notChecked, notInScope);
+        }
+        else
+        {
+            const auto& p = plan->second;
+            const bool cleanupOn = p.cleanup.hpfHz > 0.0f || p.cleanup.monoBelowHz > 0.0f || std::abs(p.cleanup.mudDb) > 0.05f
+                                   || std::any_of(p.cleanup.notches.begin(), p.cleanup.notches.end(), [](const auto& n) { return std::abs(n.db) > 0.05f; });
+            if (const auto* item = chainItem(Tool::cleanup))
+                set(ma::bus::toolCleanup, D::proposed, strip(item->text));
+            else if (cleanupOn)
+                set(ma::bus::toolCleanup, D::kept, cleanupText(p.cleanup, p.highPassReason, p.mudCrowd, &p));
+            else
+                set(ma::bus::toolCleanup, D::notNeeded,
+                    pl("dół i środek czyste, nic do sprzątania")
+                        + (p.resonancesBuried > 0 ? pl("; rezonanse są, ale miks je zakrywa, więc zostają") : juce::String()));
+
+            // Dynamics.
+            const auto unknownDynamics = pl("dynamika nieznana: kliknij „Naucz poziom” w Agencie na najgęstszym fragmencie");
+            if (const auto* item = chainItem(Tool::compressor))
+                set(ma::bus::toolCompressor, D::proposed, strip(item->text));
+            else if (intentional)
+                set(ma::bus::toolCompressor, D::yours, pl("„Celowy przester”: dynamikę zostawiam tak, jak jest"));
+            else if (!p.dynamicsKnown)
+                set(ma::bus::toolCompressor, D::notChecked, unknownDynamics);
+            else if (p.compressor.on > 0.5f)
+                set(ma::bus::toolCompressor, D::kept, p.glue ? glueText(p, tempoBpm())
+                                                             : pl("dynamika ") + juce::String(p.spreadDb, 1) + pl(" dB, z nim ok. ")
+                                                                   + juce::String(p.spreadAfterDb, 1) + pl(" dB (cel ") + juce::String(p.targetSpreadDb, 1) + " dB)");
+            else if (p.overCompressed)
+                set(ma::bus::toolCompressor, D::notNeeded, pl("już mocno ściśnięty przed Agentem (szczyt ") + juce::String(p.crestDb, 1)
+                                                               + pl(" dB nad głośną częścią), więcej kompresji by go spłaszczyło"));
+            else if (p.percussive)
+                set(ma::bus::toolCompressor, D::notNeeded, pl("perkusji nie kompresuję: uderzenia mają zostać, szczyty bierze clipper"));
+            else if (bus)
+                set(ma::bus::toolCompressor, D::notNeeded, pl("źródła tego busa przychodzą już ściśnięte, klej by ich nie poprawił"));
+            else
+                set(ma::bus::toolCompressor, D::notNeeded, pl("dynamika w normie: ") + juce::String(p.spreadDb, 1) + pl(" dB między głośnymi i cichymi fragmentami (cel ")
+                                                               + juce::String(p.targetSpreadDb, 1) + " dB)");
+
+            if (const auto* item = chainItem(Tool::clipper))
+                set(ma::bus::toolClipper, D::proposed, strip(item->text));
+            else if (intentional)
+                set(ma::bus::toolClipper, D::yours, pl("„Celowy przester”: szczyty zostawiam tak, jak są"));
+            else if (!p.dynamicsKnown)
+                set(ma::bus::toolClipper, D::notChecked, unknownDynamics);
+            else if (!p.peakKnown)
+                set(ma::bus::toolClipper, D::notChecked, pl("szczyty nieznane: kliknij „Naucz poziom” w Agencie"));
+            else if (p.clipper.on > 0.5f)
+                set(ma::bus::toolClipper, D::kept, pl("ścina ok. ") + juce::String(p.clipDb, 1) + pl(" dB szczytów, jak trzeba"));
+            else if (p.overCompressed)
+                set(ma::bus::toolClipper, D::notNeeded, pl("już ściśnięty u źródła, nie ma czego ścinać"));
+            else
+                set(ma::bus::toolClipper, D::notNeeded, pl("szczyty w normie: ") + juce::String(p.crestDb, 1) + pl(" dB nad głośną częścią, wystarczy ")
+                                                            + juce::String(p.maxCrestDb, 0) + pl(" dB")
+                                                            + (percussive && loudMasterPlan.made ? pl("; głośny master też nie potrzebuje więcej") : juce::String()));
+
+            if (const auto* item = chainItem(Tool::evener))
+                set(ma::bus::toolEvener, D::proposed, strip(item->text));
+            else if (role != ma::Role::bass)
+                set(ma::bus::toolEvener, D::notNeeded, pl("wyrównuję tylko linię basu (niskie nuty ucho słyszy ciszej)"));
+            else if (p.evener.on > 0.5f)
+                set(ma::bus::toolEvener, D::kept, pl("linia wokół ") + noteName(p.evener.referenceHz) + pl(" wyrównana"));
+            else
+                set(ma::bus::toolEvener, D::notChecked, pl("nie znam zwykłej nuty basu: kliknij „Naucz poziom” w Agencie, gdy gra linia basu"));
+
+            if (const auto* item = chainItem(Tool::saturation))
+                set(ma::bus::toolSaturation, D::proposed, strip(item->text));
+            else if (intentional)
+                set(ma::bus::toolSaturation, D::yours, pl("„Celowy przester”: Twoja saturacja zostaje"));
+            else if (!p.saturationConsidered)
+            {
+                const auto why = percussive ? pl("stopa i perkusja: brzmienie trzymają clipper i atak, saturacja zmiękczyłaby uderzenie")
+                                 : role == ma::Role::effects || role == ma::Role::send || bus
+                                     ? pl("efekty, wysyłki i busy to Twoje brzmienie, ich barwy nie ruszam")
+                                     : pl("nie da się zmierzyć podstawy dźwięku (za mało treści), więc nie oceniam alikwotów");
+                if (!runningNote(ma::bus::toolSaturation, channel.data.saturation.on > 0.5f, why))
+                    set(ma::bus::toolSaturation, D::notNeeded, why);
+            }
+            else if (p.saturation.on > 0.5f)
+                set(ma::bus::toolSaturation, D::kept, saturationText(p));
+            else
+                set(ma::bus::toolSaturation, D::notNeeded, saturationText(p).fromFirstOccurrenceOf(": ", false, false));
+
+            // Phase 31: the enhancer on a thin bass, or why the plan picked saturation instead.
+            if (!intentional && role == ma::Role::bass && p.saturationConsidered)
+            {
+                const bool thin = p.overtonesDb < p.overtonesTargetDb - 3.0;
+                if (p.harmonics.on > 0.5f && channel.data.harmonics.on > 0.5f)
+                    set(ma::bus::toolHarmonics, D::kept, harmonicsText(p));
+                else if (thin && p.harmonicsWouldCover >= 0 && static_cast<size_t>(p.harmonicsWouldCover) < mix.channels.size())
+                    set(ma::bus::toolHarmonics, D::notNeeded, pl("bas jest ubogi w alikwoty, ale harmoniczne zasłoniłyby ")
+                                                                  + quoted(mix.channels[static_cast<size_t>(p.harmonicsWouldCover)].name));
+                else if (thin && p.saturation.on > 0.5f)
+                    set(ma::bus::toolHarmonics, D::notNeeded, pl("bas ma już trochę środka, więc gęstość daje saturacja (lampa); "
+                                                                 "enhancer harmonicznych jest na prawie czysty sinus-sub"));
+                else if (!thin)
+                    set(ma::bus::toolHarmonics, D::notNeeded, pl("alikwotów dość (") + juce::String(p.overtonesDb, 1)
+                                                                  + pl(" dB powyżej 150 Hz względem suba, cel ") + juce::String(p.overtonesTargetDb, 0)
+                                                                  + pl(" dB), na małych głośnikach go słychać"));
+            }
+
+            // Stereo.
+            const auto stereoPlan = lastStereoPlans.find(channel.owner);
+            if (ma::widthOn(channel.data.width))
+                set(ma::bus::toolStereo, D::yours, pl("szerokość ustawiona suwakiem w Agencie (") + juce::String(juce::roundToInt(channel.data.widthRequest))
+                                                       + pl("%), Mózg jej nie zmienia"));
+            else if (!channel.stereoValid || stereoPlan == lastStereoPlans.end())
+                set(ma::bus::toolStereo, D::notChecked, pl("brak pomiaru stereo (kanał mono albo Agent jeszcze nie wysłał danych)"));
+            else if (const auto* item = chainItem(Tool::stereo))
+                set(ma::bus::toolStereo, D::proposed, strip(item->text));
+            else if (!stereoPlan->second.fixes.empty())
+            {
+                juce::StringArray parts;
+                for (const auto& fix : stereoPlan->second.fixes)
+                    parts.add(stereoFixText(fix));
+                set(ma::bus::toolStereo, D::kept, parts.joinIntoString("; "));
+            }
+            else
+                set(ma::bus::toolStereo, D::notNeeded, keyedStems.valid() ? pl("każde pasmo w fazie, szerokość jak w referencjach")
+                                                                          : pl("każde pasmo w fazie, nic do zmiany"));
+        }
+
+        // Duck under the kick.
+        if (const auto* item = itemFor([](const auto& i) { return i.action == Action::duck; }))
+            set(ma::bus::toolDuck, D::proposed, strip(item->text));
+        else if (!has(ma::bus::toolDuck))
+        {
+            if (role == ma::Role::kick)
+                set(ma::bus::toolDuck, D::notNeeded, pl("to stopa: inne kanały ustępują jej, nie ona im"));
+            else if (!runningNote(ma::bus::toolDuck, channel.data.duck.on > 0.5f, {}))
+            {
+                if (!haveKick)
+                    set(ma::bus::toolDuck, D::notChecked, pl("w miksie nie ma kanału z rolą „Stopa” (ustaw ją w Agencie stopy)"));
+                else
+                    set(ma::bus::toolDuck, D::notNeeded, pl("nie zakrywa stopy w dole, więc nie musi ustępować na uderzenia"));
+            }
+        }
+
+        // Harmonics and attack: the translation steps, the planner (bass), holes in the balance.
+        const bool translationKnown = mix.translation.valid && !bus;
+        if (const auto* item = itemFor([](const auto& i) { return i.action == Action::harmonics; }))
+            set(ma::bus::toolHarmonics, D::proposed, strip(item->text));
+        else if (!runningNote(ma::bus::toolHarmonics, channel.data.harmonics.on > 0.5f,
+                              has(ma::bus::toolHarmonics) ? notes[static_cast<size_t>(toolIndex(ma::bus::toolHarmonics))].text : juce::String())
+                 && !has(ma::bus::toolHarmonics))
+            set(ma::bus::toolHarmonics, bus ? D::notNeeded : D::notChecked,
+                bus ? pl("bus nie liczy się w translacji: harmoniczne dostają jego źródła")
+                    : translationKnown ? pl("nie oceniałem tego kanału") : pl("translacja jeszcze nie zmierzona: graj miks kilka sekund"));
+        if (const auto* item = itemFor([](const auto& i) { return i.action == Action::transients; }))
+            set(ma::bus::toolTransients, D::proposed, strip(item->text));
+        else if (!runningNote(ma::bus::toolTransients, channel.data.transients.on > 0.5f,
+                              has(ma::bus::toolTransients) ? notes[static_cast<size_t>(toolIndex(ma::bus::toolTransients))].text : juce::String())
+                 && !has(ma::bus::toolTransients))
+            set(ma::bus::toolTransients, percussive && !bus ? D::notChecked : D::notNeeded,
+                !percussive ? pl("podkreślenie ataku jest dla stopy i perkusji")
+                : bus       ? pl("bus nie liczy się w translacji")
+                            : pl("translacja jeszcze nie zmierzona: graj miks kilka sekund"));
+
+        // Giving way without a cable.
+        {
+            bool any = false;
+            for (const auto& item : currentProposal.items)
+                if (item.owner == channel.owner && !item.advisory && item.action == Action::unmask)
+                {
+                    if (!any)
+                        set(ma::bus::toolUnmask, D::proposed, strip(item.text));
+                    any = true;
+                }
+            bool running = false;
+            for (int d = 0; d < ma::kMaxUnmask; ++d)
+                running = running || ma::unmaskOn(channel.data.unmask[d]);
+            if (!any && !runningNote(ma::bus::toolUnmask, running, {}))
+            {
+                const bool masks = std::any_of(mix.masking.issues.begin(), mix.masking.issues.end(), [&](const auto& issue) {
+                    return issue.score >= 0.3 && mix.channels[static_cast<size_t>(issue.masker)].owner == channel.owner;
+                });
+                if (percussive)
+                    set(ma::bus::toolUnmask, D::notNeeded, pl("stopa i perkusja nie ustępują: uderzenia mają zostać"));
+                else if (bus)
+                    set(ma::bus::toolUnmask, D::notNeeded, pl("bus nie liczy się w kolizjach"));
+                else if (!masks)
+                    set(ma::bus::toolUnmask, D::notNeeded, pl("nie zasłania nikogo na tyle, żeby musiał ustępować"));
+                else
+                    set(ma::bus::toolUnmask, D::notNeeded, pl("jego kolizje załatwia EQ, ustępowanie stopie albo mały krok poziomu"));
+            }
+        }
+
+        lastToolNotes[channel.owner] = notes;
+    }
+}
+
+void BrainProcessor::addToolLinesToVerdicts()
+{
+    if (!currentProposal.wholeMix)
+        return;
+    // The tools the verdict does not speak of yet, so every option of the Agent has its line.
+    for (auto& verdict : currentProposal.verdicts)
+    {
+        const auto found = lastToolNotes.find(verdict.owner);
+        if (found == lastToolNotes.end())
+            continue;
+        for (const int bit : { ma::bus::toolEq, ma::bus::toolDuck, ma::bus::toolHarmonics, ma::bus::toolTransients, ma::bus::toolUnmask })
+        {
+            const auto& note = found->second[static_cast<size_t>(toolIndex(bit))];
+            if (note.decision == ma::bus::ToolDecision::none || (bit == ma::bus::toolUnmask && note.decision == ma::bus::ToolDecision::proposed))
+                continue; // a dip in the proposal has its own line already
+            verdict.reasons.add(toolName(toolIndex(bit)) + ": " + decisionText(note.decision) + pl(", ") + note.text + ".");
+            verdict.reasonTools.push_back(0);
+        }
+    }
+    lastVerdicts = currentProposal.verdicts;
+}
+
+void BrainProcessor::publishToolNotes()
+{
+    auto* region = session->region();
+    if (region == nullptr)
+        return;
+    for (auto& slot : region->slots)
+    {
+        const auto owner = slot.owner.load();
+        const auto found = owner != 0 ? lastToolNotes.find(owner) : lastToolNotes.end();
+        if (found == lastToolNotes.end())
+            continue;
+        ma::bus::ToolNotes out {};
+        out.target = owner;
+        out.madeMs = lastNotesMs;
+        out.wholeMix = lastNotesWholeMix ? 1 : 0;
+        for (int t = 0; t < ma::bus::kToolCount; ++t)
+        {
+            const auto& note = found->second[static_cast<size_t>(t)];
+            out.decision[t] = static_cast<std::int32_t>(note.decision);
+            copyNote(out.text[t], ma::bus::kNoteLength, note.text);
+        }
+        ma::bus::sendNotes(slot, out);
+    }
+}
+
 std::vector<Proposal::Verdict> BrainProcessor::verdictsNow() const
 {
     using Tool = Proposal::Item::ChainTool;
@@ -4067,7 +4526,13 @@ void BrainProcessor::proposeHarmonics()
             continue;
         auto now = ma::analyseTranslation(trial);
         if (deficit(now, c) <= 0.0)
+        {
+            // Phase 31: say so on the Agent, so "off" does not read as "never looked at".
+            const auto why = pl("na telefonie i laptopie słychać go dobrze (") + shares(now, c) + pl(" dB względem reszty miksu)");
+            noteTool(mix.channels[c].owner, ma::bus::toolHarmonics, ma::bus::ToolDecision::notNeeded, why + pl(", alikwotów pod małe głośniki nie trzeba"));
+            noteTool(mix.channels[c].owner, ma::bus::toolTransients, ma::bus::ToolDecision::notNeeded, why + pl(", ataku nie trzeba podkreślać"));
             continue;
+        }
         const auto& channel = mix.channels[c];
         const auto start = now;
 
@@ -4146,7 +4611,12 @@ void BrainProcessor::proposeHarmonics()
             }
         }
         if (deficit(now, c) <= 0.0)
+        {
+            const auto why = pl("ginął na telefonie (") + shares(start, c) + pl(" dB), ale wystarczyło zrobić mu miejsce na mniej ważnym kanale");
+            noteTool(channel.owner, ma::bus::toolHarmonics, ma::bus::ToolDecision::notNeeded, why);
+            noteTool(channel.owner, ma::bus::toolTransients, ma::bus::ToolDecision::notNeeded, why);
             continue;
+        }
 
         // 2. The channel's own step, by the kind of sound.
         const bool percussive = channel.data.role == 1 || channel.data.role == 3;
@@ -4184,6 +4654,16 @@ void BrainProcessor::proposeHarmonics()
             const double gain = deficit(now, c) - deficit(after, c);
             return gain >= 1.0 && harm(now, after, c) < 0.5 * gain && tonalOk(test);
         };
+        // Phase 31: why a step that was tried did not go in.
+        const auto rejected = [&](const ma::TranslationResult& after) {
+            const double gain = deficit(now, c) - deficit(after, c);
+            const auto opening = pl("ginie na telefonie (") + shares(now, c) + pl(" dB), sprawdziłem: ");
+            if (gain < 1.0)
+                return opening + pl("nawet najmocniejsze ustawienie dawało mniej niż 1 dB");
+            if (harm(now, after, c) >= 0.5 * gain)
+                return opening + pl("pomogłoby mu, ale zepchnęłoby inne kanały na telefonie");
+            return opening + pl("przesunęłoby balans tonalny poza korytarz celu");
+        };
         const auto tryAttack = [&] {
             if (channel.data.transients.on > 0.5f)
                 return;
@@ -4204,6 +4684,8 @@ void BrainProcessor::proposeHarmonics()
                     if (deficit(after, c) <= 0.0)
                         break;
                 }
+                if (!accept(after, test))
+                    noteTool(channel.owner, ma::bus::toolTransients, ma::bus::ToolDecision::notNeeded, rejected(after));
                 if (accept(after, test))
                 {
                     Proposal::Item item;
@@ -4218,10 +4700,19 @@ void BrainProcessor::proposeHarmonics()
                     now = after;
                 }
             }
+            else
+                noteTool(channel.owner, ma::bus::toolTransients, ma::bus::ToolDecision::notNeeded,
+                         pl("ginie na telefonie, ale w 1–6 kHz nie ma pasma, w którym atak by się przebił"));
         };
         const auto tryHarmonics = [&] {
-            if (peakHz > 250.0 || channel.data.harmonics.on > 0.5f)
+            if (channel.data.harmonics.on > 0.5f)
                 return;
+            if (peakHz > 250.0)
+            {
+                noteTool(channel.owner, ma::bus::toolHarmonics, ma::bus::ToolDecision::notNeeded,
+                         pl("najmocniej gra ok. ") + hzText(peakHz) + pl(": harmoniczne robią alikwoty z treści poniżej 250 Hz, tu pomaga obecność w EQ"));
+                return;
+            }
             ma::HarmonicSettings settings;
             settings.on = 1.0f;
             settings.hz = static_cast<float>(juce::jlimit(60.0, 300.0, std::round(2.0 * peakHz / 5.0) * 5.0));
@@ -4245,6 +4736,11 @@ void BrainProcessor::proposeHarmonics()
                 if (deficit(after, c) <= 0.0)
                     break;
             }
+            if (settings.amountDb <= -60.0f)
+                noteTool(channel.owner, ma::bus::toolHarmonics, ma::bus::ToolDecision::notNeeded,
+                         pl("ginie na telefonie, ale nawet najsłabsze harmoniczne wypchnęłyby dół poza korytarz celu tonalnego"));
+            else if (!accept(after, test))
+                noteTool(channel.owner, ma::bus::toolHarmonics, ma::bus::ToolDecision::notNeeded, rejected(after));
             if (settings.amountDb > -60.0f && accept(after, test))
             {
                 Proposal::Item item;
@@ -4313,6 +4809,27 @@ void BrainProcessor::proposeHarmonics()
         for (const auto& step : steps)
             if (deficit(now, c) > 0.0)
                 step();
+
+        // Phase 31: the steps that were not tried, and why.
+        const auto noted = [&](int bit) {
+            const auto found = toolWhy.find(channel.owner);
+            int index = 0;
+            while (index < ma::bus::kToolCount && (1 << index) != bit)
+                ++index;
+            return found != toolWhy.end() && found->second[static_cast<size_t>(index)].decision != ma::bus::ToolDecision::none;
+        };
+        const auto inProposal = [&](Proposal::Item::Action action) {
+            return std::any_of(currentProposal.items.begin(), currentProposal.items.end(),
+                               [&](const auto& i) { return i.owner == channel.owner && i.action == action; });
+        };
+        if (!noted(ma::bus::toolHarmonics) && !inProposal(Proposal::Item::Action::harmonics))
+            noteTool(channel.owner, ma::bus::toolHarmonics, ma::bus::ToolDecision::notNeeded,
+                     peakHz > 250.0 ? pl("najmocniej gra ok. ") + hzText(peakHz)
+                                          + pl(": harmoniczne robią alikwoty z treści poniżej 250 Hz, tu pomaga obecność w EQ")
+                                    : pl("ginął na telefonie, ale wystarczył wcześniejszy krok (") + (percussive ? pl("atak") : pl("miejsce albo obecność")) + ")");
+        if (!noted(ma::bus::toolTransients) && !inProposal(Proposal::Item::Action::transients))
+            noteTool(channel.owner, ma::bus::toolTransients, ma::bus::ToolDecision::notNeeded,
+                     percussive ? pl("ginął na telefonie, ale wystarczył wcześniejszy krok") : pl("podkreślenie ataku jest dla stopy i perkusji"));
 
         if (deficit(now, c) > 0.0 && deficit(now, c) >= deficit(start, c) - 0.5)
         {
@@ -4494,7 +5011,11 @@ void BrainProcessor::proposeDynamics()
                                        : pl(". Lepiej ustępowanie dynamiczne niżej");
             }
         if (alreadyOn)
+        {
+            noteTool(masker.owner, ma::bus::toolDuck, ma::bus::ToolDecision::kept,
+                     pl("już ustępuje ") + quoted(masked.name) + pl(" w tym paśmie na każde uderzenie"));
             continue;
+        }
 
         Proposal::Item item;
         item.action = Proposal::Item::Action::duck;
@@ -5020,6 +5541,7 @@ int BrainProcessor::applySelected(bool refining)
         currentProposal = {};
         loudnessBefore = loudnessAfter = -INFINITY;
         resetAtMs = ma::SharedSession::nowMs() + kAgentSwitchMs; // measure the mix again from there
+        lastApplyMs = juce::Time::currentTimeMillis();
     }
     return sent;
 }
@@ -5103,10 +5625,7 @@ void BrainProcessor::updateRefine(std::uint64_t now)
         return;
     }
 
-    if (refine.scope == 1)
-        proposeWholeMix();
-    else
-        propose();
+    analyse(refine.scope);
     for (auto& item : currentProposal.items)
         if (!item.advisory && std::find(refine.unticked.begin(), refine.unticked.end(), itemSignature(item)) != refine.unticked.end())
             item.selected = false;
@@ -5169,6 +5688,7 @@ int BrainProcessor::undoLast()
     {
         loudnessBefore = loudnessAfter = -INFINITY;
         resetAtMs = ma::SharedSession::nowMs() + kAgentSwitchMs;
+        lastApplyMs = juce::Time::currentTimeMillis();
     }
     return sent;
 }

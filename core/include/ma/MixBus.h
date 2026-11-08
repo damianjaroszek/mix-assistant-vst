@@ -28,7 +28,7 @@ namespace ma::bus
 {
 
 constexpr std::uint32_t kMagic = 0x4D414255; // "MABU"
-constexpr std::uint32_t kVersion = 16; // phase 30: unmasking without a cable (key feed, AgentData, Command)
+constexpr std::uint32_t kVersion = 17; // phase 31: the Brain's decision per tool (ToolNotes)
 constexpr int kMaxSlots = 128;
 constexpr int kNameLength = 48;
 constexpr int kBands = 40;            // ERB bands, as SpectrumAnalyzer with BandScale::erb
@@ -192,6 +192,33 @@ struct KeyFeed
     std::atomic<float> levelDb[kKeyBands];
 };
 
+// Phase 31: what the Brain decided about each of an Agent's tools (ToolBit order) at its last
+// analysis, so the Agent can say "the Brain looked at this and left it off, because ..." instead of
+// leaving the user to guess whether it was considered at all. Written by the Brain under its own
+// sequence lock, read by the Agent's timer; the text is the reason, UTF-8, the Agent adds the verdict.
+constexpr int kToolCount = 11;
+constexpr int kNoteLength = 384;
+enum class ToolDecision : std::int32_t
+{
+    none = 0,       // no word on it (yet)
+    proposed = 1,   // the last analysis puts it in the proposal (set, changed or switched off)
+    kept = 2,       // checked: it stays as the Agent has it
+    notNeeded = 3,  // checked: not needed, the reason says why
+    notChecked = 4, // could not be judged (no data, not in this analysis' scope): the reason says what is missing
+    yours = 5       // the user's setting, the Brain leaves it alone on purpose
+};
+
+struct ToolNotes
+{
+    std::uint64_t target; // owner id the notes are for
+    std::int64_t madeMs;  // when the analysis ran (ms since 1970, so a saved note can tell its age)
+    std::int32_t wholeMix; // 1 = "Analizuj" on the whole chain, 0 = EQ and give-way only
+    std::int32_t reserved;
+    std::int32_t decision[kToolCount]; // ToolDecision
+    std::int32_t reserved2;
+    char text[kToolCount][kNoteLength];
+};
+
 struct Slot
 {
     std::atomic<std::uint64_t> owner;       // 0 = free, else the owning instance id
@@ -203,6 +230,9 @@ struct Slot
     std::uint32_t reserved2;
     Command command;
     KeyFeed key; // phase 30
+    std::atomic<std::uint32_t> notesSequence; // phase 31
+    std::uint32_t reserved3;
+    ToolNotes notes;
 };
 
 struct Header
@@ -235,6 +265,10 @@ bool read(const Slot& slot, AgentData& out, std::uint64_t nowMs);
 // Brain side: write a command into an Agent's slot. Agent side: read it.
 void sendCommand(Slot& slot, const Command& command);
 bool readCommand(const Slot& slot, Command& out);
+
+// Phase 31: the Brain's notes per tool. Brain writes, the Agent reads (false until written once).
+void sendNotes(Slot& slot, const ToolNotes& notes);
+bool readNotes(const Slot& slot, ToolNotes& out);
 
 bool isAlive(std::uint64_t heartbeatMs, std::uint64_t nowMs);
 

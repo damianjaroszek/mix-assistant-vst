@@ -360,6 +360,7 @@ public:
     juce::String describeIssue(const ma::MaskingIssue& issue) const;
     static juce::String glueText(const ma::ChainPlan& plan, double bpm);
     juce::String saturationText(const ma::ChainPlan& plan) const;
+    juce::String harmonicsText(const ma::ChainPlan& plan) const; // phase 31: the planned enhancer, without the channel's name
     // Phase 14: the kick's tuning against the key (and the bass's usual note).
     const MixSnapshot::Channel* kickChannel() const;
     ma::KickTuning kickTuning() const;
@@ -376,6 +377,22 @@ public:
     void proposeWholeMix();
     // Phase 22: what "Analizuj" runs (0 = corrections only, the old "Zaproponuj"; 1 = the whole chain).
     int analysisScope = 1;
+    // Phase 31: "Analizuj" in the given scope, then the decision per tool and channel, sent to the Agents.
+    void analyse(int scope);
+    struct ToolNote
+    {
+        ma::bus::ToolDecision decision = ma::bus::ToolDecision::none;
+        juce::String text;
+    };
+    using ToolNoteSet = std::array<ToolNote, ma::bus::kToolCount>;
+    // The last analysis' notes per channel (owner).
+    const std::map<std::uint64_t, ToolNoteSet>& toolNotes() const { return lastToolNotes; }
+    static juce::String toolName(int tool);
+    static juce::String decisionText(ma::bus::ToolDecision decision);
+    // Phase 31: when "Analizuj" last ran and when the Agents last changed by "Zastosuj" or "Cofnij"
+    // (ms since 1970, 0 = not in this session), for the guide.
+    std::int64_t lastAnalysisTime() const { return lastNotesMs; }
+    std::int64_t lastChangeTime() const { return lastApplyMs; }
     void toggleProposalItem(int index);
     int applySelected(bool refine = false); // returns how many Agents got a command
     // Phase 30: after "Zastosuj" the Brain measures the drop again and, while there is something
@@ -524,6 +541,18 @@ private:
     std::map<std::uint64_t, ma::SpectrumAnalyzer::Bands> translationDelta, translationExtra;
     void proposeDynamics();
     void proposeHarmonics(); // translation steps and harmonics for tonal holes
+    // Phase 31: why each tool was or was not used. Decision sites write into `toolWhy` during an
+    // analysis (cleared with every proposal pass); buildToolNotes() completes it per channel from the
+    // proposal, the chain plans and the Agents' state, and publishToolNotes() writes it to the slots.
+    std::map<std::uint64_t, ToolNoteSet> toolWhy, lastToolNotes;
+    std::map<std::uint64_t, ma::ChainPlan> lastPlans;   // whole-mix analysis only
+    std::map<std::uint64_t, ma::StereoPlan> lastStereoPlans;
+    std::int64_t lastNotesMs = 0, lastApplyMs = 0;
+    bool lastNotesWholeMix = false;
+    void noteTool(std::uint64_t owner, int toolBit, ma::bus::ToolDecision decision, const juce::String& text);
+    void buildToolNotes(bool wholeMix);
+    void addToolLinesToVerdicts();
+    void publishToolNotes();
     static void applyCleanup(MixSnapshot::Channel& channel, const ma::CleanupSettings& cleanup);
     Proposal::Verdict judge(size_t channel, const ma::ChainPlan& plan, const ma::StereoPlan& stereoPlan) const;
     void adaptStep(std::uint64_t now);
