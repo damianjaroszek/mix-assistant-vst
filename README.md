@@ -204,6 +204,17 @@ publikują, i gdy pasmo sumy zeszłoby poniżej 0,2 przez suwaki (z zapasem tam,
 poszerzenia grające w tym paśmie ustępują razem. Działa to także bez Mózgu. Mózg liczy kanał z suwakiem w sumie, nie
 proponuje mu zmian stereo i pisze w werdykcie, że szerokość jest ustawiona ręcznie.
 
+### Stabilność (faza 27)
+
+- Kroki translacji (miejsce u mniej ważnego kanału, obecność, harmoniczne, atak) nie wypychają balansu tonalnego dalej
+  poza korytarz celu, a harmoniczne dostają tylko tyle, ile balans zniesie. Gdy kroki translacji i tak ruszają balans
+  o więcej niż 0,5 dB, Mózg liczy propozycję drugi raz i wtedy korekcja tonalna już je uwzględnia. Jedno „Zastosuj”
+  trafia więc tam, gdzie celowało, zamiast podbić Low i zostawić poprawkę na drugą rundę.
+- Cięcie side'u w paśmie, które wpadło w przeciwfazę, zostaje (tak głębokie, jak jest), dopóki pasmo nie wróci wyraźnie
+  do fazy (korelacja 0,15). Pasmo, które krąży wokół zera, nie dostaje już raz cięcia, a raz nie.
+- Plan szerokości (faza 26) liczy się 3–4 razy szybciej i co pół sekundy (od razu po ruchu suwaka), żeby duży projekt z
+  wieloma suwakami nie obciążał FL.
+
 ### Przed masteringiem (Ozone)
 
 „Cel mastera” w Mózgu to głośność, do której Ozone podciągnie master (domyślnie -8 LUFS). Mózg w tle robi
