@@ -87,6 +87,7 @@ private:
     brain::ReportView report;
     juce::Viewport reportViewport;
     void layoutReport();
+    static void fitToViewport(juce::Viewport& viewport, juce::Component& content, const std::function<int()>& contentHeight);
     brain::ChannelTable table;
     brain::OverlayView overlay;
     brain::IssuesView issues;

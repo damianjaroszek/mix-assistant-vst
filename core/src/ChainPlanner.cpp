@@ -449,6 +449,44 @@ std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& input, const 
         }
     }
 
+    // 3b. Phase 28: a loud master. The limiter's reduction was measured with the clippers the
+    // Agents have now, so what they already take beyond the crest rule is added back first: the
+    // plan then lands on the same clipping however often it is made. Inside the dead zone
+    // (from kLoudMasterAimDb - 1 dB to kLoudMasterLimitDb) what is there stays.
+    if (context.limiterReductionDb >= 0.0)
+    {
+        std::vector<size_t> carriers;
+        double applied = 0.0;
+        for (size_t i = 0; i < count; ++i)
+        {
+            const auto& c = channels[i];
+            const auto& plan = plans[i];
+            if (!c.valid || !c.carriesMasterPeaks || !plan.dynamicsKnown || !plan.peakKnown || c.intentionalDrive || plan.overCompressed
+                || (c.role != Role::kick && c.role != Role::percussion))
+                continue;
+            carriers.push_back(i);
+            applied = std::max(applied, c.currentClipDb - plan.clipDb);
+        }
+        const double measured = context.limiterReductionDb;
+        double extra = applied;
+        if (measured > kLoudMasterLimitDb || measured < kLoudMasterAimDb - 1.0)
+            extra = std::max(0.0, applied + measured - kLoudMasterAimDb);
+        extra = std::round(extra * 2.0) / 2.0;
+        for (const auto i : carriers)
+        {
+            auto& plan = plans[i];
+            const double total = std::min(kMaxLoudMasterClipDb, std::max(plan.clipDb, plan.clipDb + extra));
+            plan.loudMasterCapped = plan.clipDb + extra >= kMaxLoudMasterClipDb - 0.25;
+            if (total - plan.clipDb < 0.5)
+                continue;
+            plan.loudMasterClipDb = total - plan.clipDb;
+            plan.clipDb = total;
+            plan.clipper.on = 1.0f;
+            plan.clipper.ceilingDb = static_cast<float>(std::round((channels[i].truePeakDb - total) * 10.0) / 10.0);
+            plan.clipper.softness = static_cast<float>(profileFor(channels[i].role).softness);
+        }
+    }
+
     // 4. Saturation: overtones for parts too thin in them, never at the cost of a more
     // important channel. Judged on the spectra after the planned cleanup, like the mix hears.
     std::vector<MaskingChannel> masking(count);
