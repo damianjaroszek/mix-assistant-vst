@@ -50,6 +50,8 @@ void InstrumentFeatures::prepare(double newSampleRate)
     hopLength = std::max(1, static_cast<int>(std::lround(0.005 * sampleRate)));
     slowCoeff = std::exp(-1.0 / (0.1 / 0.005)); // 100 ms, per hop
     pitchTracker.prepare(sampleRate);
+    for (int p = 0; p < kDynamicBands; ++p)
+        probeFilters[static_cast<size_t>(p)] = Biquad::bandPass(sampleRate, std::min(dynamicProbeHz(p), 0.45 * sampleRate), dynamicProbeQ(p));
     reset();
 }
 
@@ -78,6 +80,15 @@ void InstrumentFeatures::reset()
     noteHops = 0;
     tailHistogram.fill(0);
     tailHops = 0;
+    for (auto& f : probeFilters)
+        f.reset();
+    hopProbe.fill(0.0);
+    for (auto& last : lastProbe)
+        last.fill(0.0);
+    lastMid.fill(0.0);
+    for (auto& h : probeHistogram)
+        h.fill(0);
+    probeHops = 0;
 }
 
 void InstrumentFeatures::addSpectrumFrame(const SpectrumAnalyzer::Bands& power, int numBands)
@@ -118,6 +129,11 @@ void InstrumentFeatures::process(const float* const* channels, int numChannels, 
         const double mid = 0.5 * (l + r), side = 0.5 * (l - r);
         hopMid += mid * mid;
         hopSide += side * side;
+        for (int p = 0; p < kDynamicBands; ++p)
+        {
+            const double y = probeFilters[static_cast<size_t>(p)].process(mid);
+            hopProbe[static_cast<size_t>(p)] += y * y;
+        }
         pitchTracker.process(mid);
         if (++hopFill == hopLength)
             endHop();
@@ -128,6 +144,12 @@ void InstrumentFeatures::endHop()
 {
     // 20 ms windows, so a bass note's own cycles do not read as level changes.
     lastHops[static_cast<size_t>(hopIndex)] = (hopMid + hopSide) / hopLength;
+    lastMid[static_cast<size_t>(hopIndex)] = hopMid;
+    for (int p = 0; p < kDynamicBands; ++p)
+    {
+        lastProbe[static_cast<size_t>(p)][static_cast<size_t>(hopIndex)] = hopProbe[static_cast<size_t>(p)];
+        hopProbe[static_cast<size_t>(p)] = 0.0;
+    }
     hopIndex = (hopIndex + 1) % static_cast<int>(lastHops.size());
     const double power = (lastHops[0] + lastHops[1] + lastHops[2] + lastHops[3]) / 4.0;
     const double db = powerToDb(power);
@@ -148,6 +170,20 @@ void InstrumentFeatures::endHop()
         const int bin = static_cast<int>(std::floor((level + 120.0) * 2.0));
         if (bin >= 0 && level > recentPeakDb - kLevelWindowDb)
             ++levelHistogram[static_cast<size_t>(std::min(bin, static_cast<int>(levelHistogram.size()) - 1))];
+        // Phase 32: the probes over the same 20 ms the level reads, while the part plays (not its tails).
+        const double midPower = lastMid[0] + lastMid[1] + lastMid[2] + lastMid[3];
+        if (db > recentPeakDb - kLevelWindowDb && midPower > 1e-12)
+        {
+            for (int p = 0; p < kDynamicBands; ++p)
+            {
+                const auto& last = lastProbe[static_cast<size_t>(p)];
+                const double probe = last[0] + last[1] + last[2] + last[3];
+                const double relative = probe > 1e-20 ? 10.0 * std::log10(probe / midPower) : -60.0;
+                const int at = std::clamp(static_cast<int>(std::floor((relative + 60.0) * 2.0)), 0, 159);
+                ++probeHistogram[static_cast<size_t>(p)][static_cast<size_t>(at)];
+            }
+            ++probeHops;
+        }
         const double note = pitchTracker.pitchHz();
         if (note > 0.0)
         {
@@ -225,6 +261,26 @@ InstrumentFeatures::Summary InstrumentFeatures::summary() const
         }
         return 0.0;
     };
+    if (probeHops * hopSeconds >= 2.0)
+    {
+        s.probesValid = true;
+        for (int p = 0; p < kDynamicBands; ++p)
+        {
+            const auto& h = probeHistogram[static_cast<size_t>(p)];
+            const auto at = [&](double share) {
+                long long seen = 0;
+                for (size_t b = 0; b < h.size(); ++b)
+                {
+                    seen += h[b];
+                    if (static_cast<double>(seen) >= share * static_cast<double>(probeHops))
+                        return -60.0 + (static_cast<double>(b) + 0.5) / 2.0;
+                }
+                return 20.0;
+            };
+            s.probeP50[static_cast<size_t>(p)] = at(0.50);
+            s.probeP95[static_cast<size_t>(p)] = at(0.95);
+        }
+    }
     if (total > 0)
     {
         s.levelP10 = percentile(0.10);

@@ -6,6 +6,7 @@
 #include "ma/TonalBalance.h"
 #include "ma/Decibels.h"
 #include "ma/Ducker.h"
+#include "ma/DynamicEq.h"
 #include "ma/Harmonics.h"
 #include "ma/Translation.h"
 #include "ma/Transient.h"
@@ -3537,6 +3538,151 @@ void testLoudMasterClip()
     check(quiet[0].loudMasterClipDb < plans[0].loudMasterClipDb, "a relaxed limiter gives the clipping back");
 }
 
+// Phase 32: the dynamic bands cut only while their range sticks out of the part, whatever its level;
+// the rider evens phrases; the Learn probes see sibilance that comes and goes.
+void testDynamicEq()
+{
+    const double sr = 48000.0;
+    // A 500 Hz "voice" at -18 dB with 120 ms bursts of 7 kHz "s" every 600 ms (-22 dB).
+    const auto voice = [&](double gainDb, bool esses) {
+        std::vector<float> l(static_cast<size_t>(sr * 4.0));
+        const double g = std::pow(10.0, gainDb / 20.0);
+        for (size_t i = 0; i < l.size(); ++i)
+        {
+            const double t = static_cast<double>(i) / sr;
+            double x = std::pow(10.0, -18.0 / 20.0) * std::sqrt(2.0) * std::sin(2.0 * kPi * 500.0 * t);
+            if (esses && std::fmod(t, 0.6) < 0.12)
+                x += std::pow(10.0, -22.0 / 20.0) * std::sqrt(2.0) * std::sin(2.0 * kPi * 7000.0 * t);
+            l[i] = static_cast<float>(g * x);
+        }
+        return l;
+    };
+    ma::DynamicEqSettings s;
+    auto& deEss = s.bands[static_cast<size_t>(ma::DynamicProbe::sibilance)];
+    deEss.on = 1.0f;
+    deEss.hz = 7000.0f;
+    deEss.q = 1.2f;
+    deEss.thresholdDb = -20.0f;
+    deEss.rangeDb = 6.0f;
+    deEss.attackMs = 1.0f;
+    deEss.releaseMs = 50.0f;
+    const auto deepest = [&](std::vector<float> l) {
+        auto r = l;
+        ma::DynamicEq eq;
+        eq.prepare(sr);
+        eq.setSettings(s);
+        double most = 0.0;
+        for (size_t start = 0; start < l.size(); start += 512)
+        {
+            float* ch[] = { l.data() + start, r.data() + start };
+            eq.process(ch, 2, static_cast<int>(std::min<size_t>(512, l.size() - start)));
+            if (start > static_cast<size_t>(sr))
+                most = std::max(most, eq.reductionDb(static_cast<int>(ma::DynamicProbe::sibilance)));
+        }
+        return most;
+    };
+    const double withEsses = deepest(voice(0.0, true));
+    check(withEsses > 2.0, "the de-esser cuts the esses");
+    check(withEsses <= 6.05, "the de-esser stays within its range");
+    check(deepest(voice(0.0, false)) < 0.3, "without esses it leaves the voice alone");
+    check(deepest(voice(-12.0, false)) < 0.3 && deepest(voice(12.0, false)) < 0.3, "the level alone does not trigger it");
+    checkNear(deepest(voice(-10.0, true)), withEsses, 0.5, "quieter phrases are de-essed alike");
+
+    // The rider: phrases alternating -12 / -24 dB RMS every second, target -18 dB, range 6 dB.
+    {
+        std::vector<float> l(static_cast<size_t>(sr * 8.0));
+        for (size_t i = 0; i < l.size(); ++i)
+        {
+            const bool loud = (i / static_cast<size_t>(sr)) % 2 == 0;
+            l[i] = static_cast<float>(std::pow(10.0, (loud ? -12.0 : -24.0) / 20.0) * std::sqrt(2.0)
+                                      * std::sin(2.0 * kPi * 300.0 * static_cast<double>(i) / sr));
+        }
+        auto r = l;
+        ma::DynamicEqSettings rs;
+        rs.rider.on = 1.0f;
+        rs.rider.targetDb = -18.0f;
+        rs.rider.rangeDb = 6.0f;
+        rs.rider.speedMs = 150.0f;
+        ma::DynamicEq eq;
+        eq.prepare(sr);
+        eq.setSettings(rs);
+        for (size_t start = 0; start < l.size(); start += 512)
+        {
+            float* ch[] = { l.data() + start, r.data() + start };
+            eq.process(ch, 2, static_cast<int>(std::min<size_t>(512, l.size() - start)));
+        }
+        const auto rmsDb = [&](double from, double to) {
+            double sum = 0.0;
+            const auto a = static_cast<size_t>(from * sr), b = static_cast<size_t>(to * sr);
+            for (size_t i = a; i < b; ++i)
+                sum += static_cast<double>(l[i]) * l[i];
+            return 10.0 * std::log10(sum / static_cast<double>(b - a));
+        };
+        const double spread = rmsDb(6.5, 7.0) - rmsDb(7.5, 8.0);
+        check(spread < 4.0, "the rider evens the phrases (12 dB apart before)");
+        check(spread > -1.0, "the rider does not flip them");
+    }
+
+    // The Learn probes: esses that come and go stand out at P95, not at P50.
+    {
+        auto l = voice(0.0, true);
+        ma::InstrumentFeatures f;
+        f.prepare(sr);
+        const float* ch[] = { l.data(), l.data() };
+        f.process(ch, 2, static_cast<int>(l.size()));
+        const auto summary = f.summary();
+        const auto at = static_cast<size_t>(ma::DynamicProbe::sibilance);
+        check(summary.probesValid, "the probes measured the part");
+        check(summary.probeP95[at] - summary.probeP50[at] > 10.0, "the esses stick out at P95");
+        checkNear(summary.probeP95[at], -4.5, 2.5, "P95 reads the ess against the voice");
+    }
+
+    // The planner: a vocal whose esses spike gets a de-esser where the mix hears them, and a rider
+    // for phrases at different levels; the same esses under a loud cymbal-like part are left alone.
+    {
+        const auto vocalChannel = [](double sibilanceSpike) {
+            ma::ChainChannel c;
+            c.role = ma::Role::vocal;
+            c.priority = 2;
+            c.valid = c.hasStats = c.probesValid = true;
+            c.bandsDb.fill(-30.0);
+            c.levelP10 = -30.0;
+            c.levelP50 = -22.0;
+            c.levelP95 = -18.0;
+            c.truePeakDb = -8.0;
+            for (int p = 0; p < ma::kDynamicBands; ++p)
+            {
+                c.probeP50[static_cast<size_t>(p)] = -16.0;
+                c.probeP95[static_cast<size_t>(p)] = -14.0;
+            }
+            c.probeP95[static_cast<size_t>(ma::DynamicProbe::sibilance)] = -16.0 + sibilanceSpike;
+            return c;
+        };
+        auto plans = ma::planChains({ vocalChannel(12.0) });
+        const auto& deEss = plans[0].dynamicEq.bands[static_cast<size_t>(ma::DynamicProbe::sibilance)];
+        check(ma::dynamicBandOn(deEss), "spiky esses get a de-esser");
+        check(deEss.thresholdDb > -16.0f && deEss.thresholdDb < -4.0f, "the de-esser starts between the usual and the spikes");
+        check(!ma::dynamicBandOn(plans[0].dynamicEq.bands[static_cast<size_t>(ma::DynamicProbe::harsh)]), "steady upper mids are left alone");
+        check(ma::riderOn(plans[0].dynamicEq.rider), "phrases 8 dB apart get the rider");
+        check(!ma::dynamicBandOn(ma::planChains({ vocalChannel(4.0) })[0].dynamicEq.bands[static_cast<size_t>(ma::DynamicProbe::sibilance)]),
+              "gentle esses need no de-esser");
+        auto loud = vocalChannel(12.0);
+        loud.role = ma::Role::percussion;
+        loud.priority = 6;
+        loud.bandsDb.fill(-30.0);
+        for (int b = 0; b < ma::bus::kBands; ++b)
+            if (ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b) > 4000.0)
+                loud.bandsDb[static_cast<size_t>(b)] = 5.0;
+        plans = ma::planChains({ vocalChannel(12.0), loud });
+        check(!ma::dynamicBandOn(plans[0].dynamicEq.bands[static_cast<size_t>(ma::DynamicProbe::sibilance)]) && plans[0].probeBuried[2],
+              "esses buried under a much louder top end are left alone");
+        auto lead = vocalChannel(12.0);
+        lead.role = ma::Role::lead;
+        check(!ma::dynamicBandOn(ma::planChains({ lead })[0].dynamicEq.bands[2]) && !ma::riderOn(ma::planChains({ lead })[0].dynamicEq.rider),
+              "a lead gets no de-esser or rider");
+    }
+}
+
 int main()
 {
     testLoudness();
@@ -3547,6 +3693,7 @@ int main()
     testEqualLoudness();
     testTrimPlan();
     testPercussionLevel();
+    testDynamicEq();
     testChannelAnalyzerSpeed();
     testMixBus();
     testMasking();

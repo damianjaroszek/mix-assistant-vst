@@ -367,6 +367,51 @@ AgentEditor::AgentEditor(AgentProcessor& p)
     clipOnAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(state, AgentProcessor::clipOnId, clipOnButton);
     evenOnAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(state, AgentProcessor::evenOnId, evenOnButton);
 
+    // Phase 32: the dynamic bands and the rider.
+    styleLabel(dynamicTitle, pl("Dynamiczne EQ i rider wokalu"), colours::text, 16.0f);
+    styleLabel(dynamicIntro, pl("Pasmo tnie tylko wtedy, gdy jego zakres wystaje z brzmienia partii bardziej niż zwykle "
+                                "(liczone względem całej partii, więc głośniejsza fraza go nie uruchamia). Próg to poziom pasma "
+                                "względem całości. Rider wyrównuje frazy wokalu, zanim zobaczy je kompresor."),
+               colours::quiet, 13.0f);
+    dynamicIntro.setJustificationType(juce::Justification::topLeft);
+    const juce::String dynamicNames[ma::kDynamicBands] = { pl("Dudnienie (zbliżenie)"), pl("Ostrość"), pl("De-esser (sybilanty)") };
+    for (int b = 0; b < ma::kDynamicBands; ++b)
+    {
+        const auto at = static_cast<size_t>(b);
+        styleLabel(dynamicLabels[at], dynamicNames[b], colours::quiet);
+        styleLabel(dynamicFreqLabels[at], pl("Częst."), colours::quiet, 13.0f);
+        styleLabel(dynamicThresholdLabels[at], pl("Próg"), colours::quiet, 13.0f);
+        styleLabel(dynamicRangeLabels[at], pl("Maks. cięcie"), colours::quiet, 13.0f);
+        styleLabel(dynamicStatus[at], {}, colours::quiet, 13.0f);
+        dynamicOnButtons[at].setButtonText(pl("Włącz"));
+        dynamicOnButtons[at].setColour(juce::ToggleButton::textColourId, colours::quiet);
+        for (auto [slider, id] : { std::pair { &dynamicFreqSliders[at], AgentProcessor::dynamicIds[b][1] },
+                                   std::pair { &dynamicThresholdSliders[at], AgentProcessor::dynamicIds[b][2] },
+                                   std::pair { &dynamicRangeSliders[at], AgentProcessor::dynamicIds[b][3] } })
+        {
+            styleSlider(*slider);
+            slider->setTextBoxStyle(juce::Slider::TextBoxRight, false, 70, 20);
+            chainAttachments.push_back(std::make_unique<SliderAttachment>(state, id, *slider));
+        }
+        dynamicButtonAttachments.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            state, AgentProcessor::dynamicIds[b][0], dynamicOnButtons[at]));
+    }
+    styleLabel(riderLabel, pl("Rider wokalu"), colours::quiet);
+    styleLabel(riderTargetLabel, pl("Cel"), colours::quiet, 13.0f);
+    styleLabel(riderRangeLabel, pl("Zakres"), colours::quiet, 13.0f);
+    styleLabel(riderStatus, {}, colours::quiet, 13.0f);
+    styleLabel(dynamicDecision, {}, colours::quiet, 13.0f);
+    dynamicDecision.setJustificationType(juce::Justification::topLeft);
+    riderOnButton.setButtonText(pl("Włącz"));
+    riderOnButton.setColour(juce::ToggleButton::textColourId, colours::quiet);
+    for (auto [slider, id] : { std::pair { &riderTargetSlider, AgentProcessor::riderTargetId }, std::pair { &riderRangeSlider, AgentProcessor::riderRangeId } })
+    {
+        styleSlider(*slider);
+        slider->setTextBoxStyle(juce::Slider::TextBoxRight, false, 70, 20);
+        chainAttachments.push_back(std::make_unique<SliderAttachment>(state, id, *slider));
+    }
+    dynamicButtonAttachments.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(state, AgentProcessor::riderOnId, riderOnButton));
+
     roleAttachment = std::make_unique<ComboAttachment>(state, AgentProcessor::roleId, roleBox);
     measureAttachment = std::make_unique<ComboAttachment>(state, AgentProcessor::measureId, measureBox);
     priorityAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::priorityId, prioritySlider);
@@ -435,6 +480,24 @@ AgentEditor::AgentEditor(AgentProcessor& p)
            &clipCeilingLabel, &clipCeilingSlider, &clipSoftnessLabel, &clipSoftnessSlider, &clipStatus, &evenLabel,
            &evenOnButton, &evenAmountLabel, &evenAmountSlider, &evenRefLabel, &evenRefSlider, &evenStatus },
          [this](auto area) { layoutChain(area); });
+    {
+        std::vector<juce::Component*> children { &dynamicTitle, &origins[11], &dynamicIntro, &riderLabel, &riderOnButton, &riderTargetLabel,
+                                                 &riderTargetSlider, &riderRangeLabel, &riderRangeSlider, &riderStatus, &dynamicDecision };
+        for (int b = 0; b < ma::kDynamicBands; ++b)
+        {
+            const auto at = static_cast<size_t>(b);
+            for (juce::Component* c : { static_cast<juce::Component*>(&dynamicLabels[at]), static_cast<juce::Component*>(&dynamicOnButtons[at]),
+                                        static_cast<juce::Component*>(&dynamicFreqLabels[at]), static_cast<juce::Component*>(&dynamicFreqSliders[at]),
+                                        static_cast<juce::Component*>(&dynamicThresholdLabels[at]), static_cast<juce::Component*>(&dynamicThresholdSliders[at]),
+                                        static_cast<juce::Component*>(&dynamicRangeLabels[at]), static_cast<juce::Component*>(&dynamicRangeSliders[at]),
+                                        static_cast<juce::Component*>(&dynamicStatus[at]) })
+                children.push_back(c);
+        }
+        for (auto* c : children)
+            dynamicsPage.addAndMakeVisible(c);
+        dynamicsPage.layout = [this](auto area) { layoutDynamics(area); };
+        tabs.add(pl("Dynamika"), dynamicsPage);
+    }
     page(stereoPage, "Stereo",
          { &stereoLabel, &origins[5], &stereoView, &stereoStatus, &widthLabel, &widthSlider, &widthMonoMark, &widthNeutralMark, &widthMaxMark,
            &widthFromLabel, &widthFromSlider, &widthStatusLabel },
@@ -523,6 +586,7 @@ void AgentEditor::showResult(const AgentProcessor::LearnResult& r)
 void AgentEditor::timerCallback()
 {
     updateOrigins();
+    updateDynamicStatus();
     const bool connected = processor.isConnectedToBrain();
     connection.setText(connected ? pl("Połączony z Mózgiem") : pl("Brak Mózgu na masterze"), juce::dontSendNotification);
     connection.setColour(juce::Label::textColourId, connected ? colours::good : colours::quiet);
@@ -1047,6 +1111,86 @@ void AgentEditor::layoutChain(juce::Rectangle<int> area)
     sliderRow(right, evenAmountLabel, evenAmountSlider);
     sliderRow(right, evenRefLabel, evenRefSlider);
     statusRow(right, evenStatus);
+}
+
+void AgentEditor::layoutDynamics(juce::Rectangle<int> area)
+{
+    area.reduce(12, 12);
+    {
+        auto row = area.removeFromTop(24);
+        origin(ma::bus::toolDynamicEq).setBounds(row.removeFromRight(170));
+        dynamicTitle.setBounds(row);
+    }
+    dynamicIntro.setBounds(area.removeFromTop(40));
+    area.removeFromTop(8);
+    const auto bandRow = [](juce::Rectangle<int> row, juce::Label& name, juce::ToggleButton& on, juce::Label* labels[3], juce::Slider* sliders[3],
+                            juce::Label& status) {
+        auto top = row.removeFromTop(24);
+        name.setBounds(top.removeFromLeft(190));
+        on.setBounds(top.removeFromLeft(72));
+        status.setBounds(top);
+        row.removeFromTop(4);
+        auto controls = row.removeFromTop(24);
+        const int width = controls.getWidth() / 3;
+        for (int k = 0; k < 3; ++k)
+        {
+            auto cell = controls.removeFromLeft(width).withTrimmedRight(12);
+            if (labels[k] == nullptr)
+                continue;
+            labels[k]->setBounds(cell.removeFromLeft(86));
+            sliders[k]->setBounds(cell);
+        }
+    };
+    for (int b = 0; b < ma::kDynamicBands; ++b)
+    {
+        const auto at = static_cast<size_t>(b);
+        juce::Label* labels[3] = { &dynamicFreqLabels[at], &dynamicThresholdLabels[at], &dynamicRangeLabels[at] };
+        juce::Slider* sliders[3] = { &dynamicFreqSliders[at], &dynamicThresholdSliders[at], &dynamicRangeSliders[at] };
+        bandRow(area.removeFromTop(52), dynamicLabels[at], dynamicOnButtons[at], labels, sliders, dynamicStatus[at]);
+        area.removeFromTop(14);
+    }
+    {
+        juce::Label* labels[3] = { &riderTargetLabel, &riderRangeLabel, nullptr };
+        juce::Slider* sliders[3] = { &riderTargetSlider, &riderRangeSlider, nullptr };
+        bandRow(area.removeFromTop(52), riderLabel, riderOnButton, labels, sliders, riderStatus);
+    }
+    area.removeFromTop(14);
+    dynamicDecision.setBounds(area);
+}
+
+void AgentEditor::updateDynamicStatus()
+{
+    const auto dynamics = processor.currentDynamics();
+    const auto result = processor.lastResult();
+    for (int b = 0; b < ma::kDynamicBands; ++b)
+    {
+        const auto at = static_cast<size_t>(b);
+        const auto& band = dynamics.dynamicEq.bands[at];
+        juce::String text;
+        if (ma::dynamicBandOn(band))
+            text = pl("Tnie teraz do ") + juce::String(processor.dynamicReductionDb(b), 1) + " dB";
+        else
+            text = pl("Wyłączone");
+        if (result.probesValid)
+            text += pl(" · przy nauce: zwykle ") + juce::String(result.probeP50[at], 1) + pl(" dB, w szczytach ")
+                    + juce::String(result.probeP95[at], 1) + pl(" dB względem całości");
+        dynamicStatus[at].setText(text, juce::dontSendNotification);
+        dynamicStatus[at].setColour(juce::Label::textColourId, ma::dynamicBandOn(band) ? colours::good : colours::quiet);
+    }
+    const bool riding = ma::riderOn(dynamics.dynamicEq.rider);
+    riderStatus.setText(riding ? pl("Wzmocnienie teraz ") + signedDb(processor.riderGainDb()) : pl("Wyłączony"), juce::dontSendNotification);
+    riderStatus.setColour(juce::Label::textColourId, riding ? colours::good : colours::quiet);
+
+    const auto& notes = processor.brainNotes();
+    int t = 0;
+    while ((1 << t) != ma::bus::toolDynamicEq)
+        ++t;
+    const int decision = notes.decision[static_cast<size_t>(t)];
+    const auto text = notes.madeMs == 0 || decision <= 0
+                          ? pl("Mózg ma dostęp do tych pasm i ridera. Po „Analizuj” w Mózgu zobaczysz tu, co postanowił i dlaczego.")
+                          : pl("Decyzja Mózgu: ") + ma::ui::decisionNames()[decision] + ", " + notes.text[static_cast<size_t>(t)];
+    if (dynamicDecision.getText() != text)
+        dynamicDecision.setText(text, juce::dontSendNotification);
 }
 
 void AgentEditor::layoutStereo(juce::Rectangle<int> area)

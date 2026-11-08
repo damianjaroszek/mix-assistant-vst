@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ChannelChain.h"
+#include "DynamicEq.h"
 #include "Harmonics.h"
 #include "Instrument.h"
 #include "Resonance.h"
@@ -42,6 +43,10 @@ struct ChainChannel
     // far its clipper (as the Agent has it now) takes them down: what a loud master needs.
     bool carriesMasterPeaks = false;
     double currentClipDb = 0.0;
+    // Phase 32: the Learn pass's probe ranges (DynamicProbe order) against the whole part, while it
+    // plays: the usual share (P50) and the moments it sticks out (P95), dB.
+    bool probesValid = false;
+    std::array<double, kDynamicBands> probeP50 {}, probeP95 {};
 };
 
 // Phase 28: a loud master. When the limiter of the master preview works too hard at the target
@@ -111,6 +116,15 @@ struct ChainPlan
     bool sineSub = false;              // the bass is that thin: the enhancer comes first
     double harmonicsAfterDb = -200.0;  // overtones predicted with the planned enhancer
     int harmonicsWouldCover = -1;      // the more important channel that kept it gentler or off (index)
+
+    // Phase 32: dynamic bands (boom, harshness, sibilance) where a range sticks out only at moments,
+    // and the rider on a vocal whose phrases sit at different levels.
+    DynamicEqSettings dynamicEq {};
+    std::array<double, kDynamicBands> probeSpikeDb {};   // P95 - P50 of each probe (0 = not measured)
+    std::array<bool, kDynamicBands> probeBuried {};      // sticks out, but the mix covers that range
+    std::array<bool, kDynamicBands> probeCoversImportant {};
+    bool dynamicConsidered = false;                       // a role that may take them, with probe stats
+    double riderSpreadDb = 0.0;                           // P50 - P10 when the rider was considered
 
     // Phase 15: glue compression on a bus. A gentle ratio and a slow attack that lets the hits
     // through, the release on the groove, a couple of dB on the loud parts: the sources move as

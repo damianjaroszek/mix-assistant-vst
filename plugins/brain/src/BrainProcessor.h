@@ -177,13 +177,15 @@ struct Proposal
             clipper,
             evener,
             stereo,
-            saturation // phase 13
+            saturation, // phase 13
+            dynamicEq // phase 32: dynamic bands and the vocal rider
         };
         ChainTool tool = ChainTool::none; // with Action::solver unused
         ma::CleanupSettings cleanup {};
         ma::CompressorSettings compressor {};
         ma::ClipperSettings clipper {};
         ma::BassEvenerSettings evener {};
+        ma::DynamicEqSettings dynamicEq {}; // phase 32
         ma::StereoSettings stereo {};
         ma::SaturationSettings saturation {};
 

@@ -230,6 +230,18 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   own hats and sub balance (+5 dB each) made the mix worse. Idempotent: after apply the group's trims differ only by chain loss.
   Group levels count what each Agent's chain takes away over the drop (`chainLossDb`: K-weighted output vs heard, summed in
   `DropSum::chainIn/chainOut`, only losses, <= 15 dB), so a refining round gives back what compressors, ducks and dips took.
+- Phase 32 problems that come and go (`ma/DynamicEq.h`): three dynamic band slots (`DynamicProbe` boom 250 Hz, harsh 3.2 kHz,
+  sibilance 6.8 kHz; width, attack, release per slot from `dynamicProbeBand`), each cutting a bell 3:1 over its threshold up to its
+  range while the band's 5 ms level minus the whole part's (mono) exceeds `thresholdDb` (relative, so a louder phrase does not
+  trigger it; coefficients every 16 samples), plus `RiderSettings` (100 ms level towards `targetDb` within +-range, holds in pauses
+  24 dB under target). After the Agent's EQ, before the clipper. Learn: `InstrumentFeatures` probes (band-pass on the mid, 20 ms,
+  only within 20 dB of the recent peak) give `probeP50/probeP95` (band minus mid, dB), saved with the stats (13 numbers) and on the bus.
+  `planChains` step 6: vocal/lead/pad/other only; harshness any of them, sibilance and boom vocals only; P95-P50 >= 6 dB (sibilance 8)
+  and P95 >= -20 dB, skipped where the mix covers the range at its spikes (`probeBuried`), threshold max(P50+3, P95-5), range
+  spike/2 (+1.5 over a more important channel; sibilance <= 6, others <= 4); rider on vocals with P50-P10 >= 4 dB (target P50,
+  range <= 4). Part of `Command` (rider target moves with the channel's gain on apply), the A/B backup and `brainSet` (packed
+  dynamics 97 floats; 72 = before phase 32), `ToolBit::toolDynamicEq`, `kToolCount` 12, `bus::kVersion` 18. Agent tab "Dynamika";
+  the Brain's chain item `ChainTool::dynamicEq` (a Brain-made setting the plan drops goes off, the user's stays), notes and verdict line.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

@@ -3221,6 +3221,53 @@ bool sameCompressor(const ma::CompressorSettings& a, const ma::CompressorSetting
            && std::abs(a.releaseMs - b.releaseMs) < 5.0f && std::abs(a.makeupDb - b.makeupDb) < 0.3f;
 }
 
+// Phase 32: the same dynamic EQ, within what a parameter round trip and a re-measure change.
+bool sameDynamicEq(const ma::DynamicEqSettings& a, const ma::DynamicEqSettings& b)
+{
+    for (int k = 0; k < ma::kDynamicBands; ++k)
+    {
+        const auto& x = a.bands[static_cast<size_t>(k)];
+        const auto& y = b.bands[static_cast<size_t>(k)];
+        if (ma::dynamicBandOn(x) != ma::dynamicBandOn(y))
+            return false;
+        if (ma::dynamicBandOn(x) && (std::abs(x.thresholdDb - y.thresholdDb) > 1.0f || std::abs(x.rangeDb - y.rangeDb) > 0.5f
+                                     || std::abs(std::log2(x.hz / std::max(y.hz, 1.0f))) > 0.1f))
+            return false;
+    }
+    if (ma::riderOn(a.rider) != ma::riderOn(b.rider))
+        return false;
+    return !ma::riderOn(a.rider) || (std::abs(a.rider.targetDb - b.rider.targetDb) < 1.0f && std::abs(a.rider.rangeDb - b.rider.rangeDb) < 0.5f);
+}
+
+juce::String dynamicBandName(int probe)
+{
+    switch (static_cast<ma::DynamicProbe>(probe))
+    {
+        case ma::DynamicProbe::boom: return pl("dudnienie ");
+        case ma::DynamicProbe::harsh: return pl("ostrość ");
+        case ma::DynamicProbe::sibilance: return pl("de-esser ");
+    }
+    return {};
+}
+
+juce::String dynamicEqText(const ma::ChainPlan& plan)
+{
+    juce::StringArray parts;
+    for (int p = 0; p < ma::kDynamicBands; ++p)
+    {
+        const auto& band = plan.dynamicEq.bands[static_cast<size_t>(p)];
+        if (!ma::dynamicBandOn(band))
+            continue;
+        parts.add(dynamicBandName(p) + hzText(band.hz) + pl(" do -") + juce::String(band.rangeDb, 1)
+                  + pl(" dB, tylko gdy wystaje (w szczytach ") + juce::String(plan.probeSpikeDb[static_cast<size_t>(p)], 1)
+                  + pl(" dB ponad zwykły poziom)") + (plan.probeCoversImportant[static_cast<size_t>(p)] ? pl(", zasłania tam ważniejszy kanał") : juce::String()));
+    }
+    if (ma::riderOn(plan.dynamicEq.rider))
+        parts.add(pl("rider ±") + juce::String(plan.dynamicEq.rider.rangeDb, 1) + pl(" dB (frazy różnią się o ")
+                  + juce::String(plan.riderSpreadDb, 1) + pl(" dB), przed kompresorem"));
+    return parts.isEmpty() ? pl("dynamiczne EQ wyłączone: nic już nie wystaje chwilami") : pl("dynamiczne EQ: ") + parts.joinIntoString("; ");
+}
+
 juce::String stereoFixText(const ma::StereoPlan::Fix& fix)
 {
     const auto range = hzText(fix.lowHz) + pl("–") + hzText(fix.highHz);
@@ -3352,6 +3399,12 @@ void BrainProcessor::proposeWholeMix()
         in.contentConfidence = channel.data.detectedConfidence;
         for (int r = 0; r < ma::kMaxResonances; ++r)
             in.resonances[static_cast<size_t>(r)] = channel.data.resonances[r];
+        in.probesValid = channel.data.probesValid != 0;
+        for (int p = 0; p < ma::kDynamicBands; ++p)
+        {
+            in.probeP50[static_cast<size_t>(p)] = channel.data.probeP50[p];
+            in.probeP95[static_cast<size_t>(p)] = channel.data.probeP95[p];
+        }
     }
     ma::ChainContext context;
     context.bpm = tempoBpm();
@@ -3631,6 +3684,22 @@ void BrainProcessor::proposeWholeMix()
                 item.saturation = wantOn ? want : have;
                 item.saturation.on = wantOn ? 1.0f : 0.0f;
                 item.text = name + saturationText(plan);
+                chainItems.push_back(item);
+            }
+        }
+
+        // Phase 32: dynamic bands and the rider where the plan looks after them; a setting the Brain
+        // made and the plan no longer wants goes off, one the user made stays.
+        if (plan.dynamicConsidered && !intentional)
+        {
+            const auto& have = channel.data.dynamicEq;
+            const bool brainMade = (channel.data.brainTools & ma::bus::toolDynamicEq) != 0;
+            const bool wantOn = ma::dynamicEqOn(plan.dynamicEq);
+            if ((wantOn && !sameDynamicEq(plan.dynamicEq, have)) || (!wantOn && ma::dynamicEqOn(have) && brainMade))
+            {
+                item.tool = Proposal::Item::ChainTool::dynamicEq;
+                item.dynamicEq = plan.dynamicEq;
+                item.text = name + dynamicEqText(plan);
                 chainItems.push_back(item);
             }
         }
@@ -3969,6 +4038,8 @@ Proposal::Verdict BrainProcessor::judge(size_t index, const ma::ChainPlan& plan,
 
     if (plan.evener.on > 0.5f)
         verdict.reasons.add(pl("Linia basu wokół ") + noteName(plan.evener.referenceHz) + pl(": niskie nuty wyrównane dla ucha."));
+    if (ma::dynamicEqOn(plan.dynamicEq))
+        verdict.reasons.add(pl("Dynamiczne EQ: ") + dynamicEqText(plan).fromFirstOccurrenceOf(": ", false, false) + ".");
 
     // Its place in the mix: what still covers it, and the fixes on the way.
     for (const auto& issue : mix.masking.issues)
@@ -4073,6 +4144,8 @@ Proposal::Verdict BrainProcessor::judge(size_t index, const ma::ChainPlan& plan,
             tool = ma::bus::toolSaturation;
         else if (reason.startsWith(pl("Ustępuje ")))
             tool = ma::bus::toolUnmask;
+        else if (reason.startsWith(pl("Dynamiczne EQ: ")))
+            tool = ma::bus::toolDynamicEq;
         verdict.reasonTools.push_back(tool);
     }
     return verdict;
@@ -4325,6 +4398,34 @@ void BrainProcessor::buildToolNotes(bool wholeMix)
                 set(ma::bus::toolSaturation, D::kept, saturationText(p));
             else
                 set(ma::bus::toolSaturation, D::notNeeded, saturationText(p).fromFirstOccurrenceOf(": ", false, false));
+
+            // Phase 32: dynamic bands and the rider.
+            if (const auto* item = chainItem(Tool::dynamicEq))
+                set(ma::bus::toolDynamicEq, D::proposed, strip(item->text));
+            else if (intentional)
+                set(ma::bus::toolDynamicEq, D::yours, pl("„Celowy przester”: brzmienie zostawiam tak, jak jest"));
+            else if (!p.dynamicConsidered)
+            {
+                const auto why = percussive ? pl("stopa i perkusja: uderzenia mają wystawać, dynamiczne EQ by je przytępiło")
+                                 : role == ma::Role::bass ? pl("bas: dół trzymają kompresor i wyrównanie nut, nie dynamiczne pasma")
+                                 : role == ma::Role::effects || role == ma::Role::send || bus
+                                     ? pl("efekty, wysyłki i busy to Twoje brzmienie, ich nie ruszam")
+                                     : pl("brak pomiaru chwilowych pasm: kliknij „Naucz poziom” w Agencie, gdy partia gra");
+                set(ma::bus::toolDynamicEq, role == ma::Role::vocal || role == ma::Role::lead || role == ma::Role::pad || role == ma::Role::other
+                                                ? D::notChecked : D::notNeeded, why);
+            }
+            else if (ma::dynamicEqOn(p.dynamicEq))
+                set(ma::bus::toolDynamicEq, D::kept, dynamicEqText(p).fromFirstOccurrenceOf(": ", false, false));
+            else
+            {
+                juce::StringArray why;
+                for (int k = 0; k < ma::kDynamicBands; ++k)
+                    if (p.probeBuried[static_cast<size_t>(k)])
+                        why.add(dynamicBandName(k).trim() + pl(" wystaje chwilami, ale miks zakrywa ten zakres"));
+                why.add(role == ma::Role::vocal ? pl("sybilanty, ostrość i dudnienie nie wystają chwilami ponad zwykły poziom; frazy są równe")
+                                                : pl("ostrość nie wystaje chwilami ponad zwykły poziom (sybilanty i rider są dla wokalu)"));
+                set(ma::bus::toolDynamicEq, D::notNeeded, why.joinIntoString("; "));
+            }
 
             // Phase 31: the enhancer on a thin bass, or why the plan picked saturation instead.
             if (!intentional && role == ma::Role::bass && p.saturationConsidered)
@@ -5592,6 +5693,7 @@ int BrainProcessor::applySelected(bool refining)
         auto compressor = channel.data.compressor;
         auto clipper = channel.data.clipper;
         auto evener = channel.data.evener;
+        auto dynamicEq = channel.data.dynamicEq;
         auto stereoEq = channel.data.stereo;
         auto saturation = channel.data.saturation;
         // Phase 30: the dips go along as the Agent has them, unless the proposal sets one.
@@ -5636,6 +5738,7 @@ int BrainProcessor::applySelected(bool refining)
                     case Proposal::Item::ChainTool::evener: evener = item.evener; break;
                     case Proposal::Item::ChainTool::stereo: stereoEq = item.stereo; break;
                     case Proposal::Item::ChainTool::saturation: saturation = item.saturation; break;
+                    case Proposal::Item::ChainTool::dynamicEq: dynamicEq = item.dynamicEq; break;
                     case Proposal::Item::ChainTool::none: break;
                 }
                 dynamicChanges = true;
@@ -5681,6 +5784,10 @@ int BrainProcessor::applySelected(bool refining)
         command.evener = evener;
         command.stereo = stereoEq;
         command.saturation = saturation;
+        // The rider's target is a level at its input: it moves with the channel's gain, its bands are relative.
+        if (ma::riderOn(dynamicEq.rider))
+            dynamicEq.rider.targetDb = static_cast<float>(juce::jlimit(-60.0, 0.0, dynamicEq.rider.targetDb + levelGain));
+        command.dynamicEq = dynamicEq;
         command.inputShiftDb = inMixSums(channel) ? 0.0f : static_cast<float>(levelGain);
         for (int d = 0; d < ma::kMaxUnmask; ++d)
         {
