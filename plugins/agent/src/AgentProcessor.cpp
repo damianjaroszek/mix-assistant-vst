@@ -1484,11 +1484,32 @@ void AgentProcessor::applyLearned()
     const double measured = learnMeasured.load();
     const double peak = learnTruePeak.load();
     const auto role = static_cast<ma::Role>(juce::jlimit(0, ma::kRoles - 1, juce::roundToInt(parameters.getRawParameterValue(roleId)->load())));
-    const double offset = parameters.getRawParameterValue(roleLevelId)->load() > 0.5f ? ma::roleLevelOffsetDb(role) : 0.0;
+    ma::SpectrumAnalyzer::Bands raw {}; // the profile is stored ear-weighted
+    const auto& weights = ma::erbEqualLoudnessWeights();
+    for (size_t b = 0; b < kBands; ++b)
+        raw[b] = learnProfile[b].load() + weights[b];
+    const bool rawKnown = std::isfinite(learnMeasured.load());
+    const double offset = parameters.getRawParameterValue(roleLevelId)->load() > 0.5f ? ma::roleLevelOffsetDb(role, rawKnown ? &raw : nullptr) : 0.0;
     const double target = parameters.getRawParameterValue(targetId)->load() + offset;
     // A channel meant to distort may peak where it likes: only the level target counts.
     const double ceiling = intentionalDrive() ? 100.0 : parameters.getRawParameterValue(peakCeilingId)->load();
-    const auto plan = ma::planTrim(measured, peak, target, ceiling);
+    auto plan = ma::planTrim(measured, peak, target, ceiling);
+    // mixcheck (real multitracks): a part that hardly plays in the learned passage (a synth's tail,
+    // a fill) was measured near silence and got the full boost, then blasted where it really plays.
+    // Its trim stays; it is learned where it plays.
+    result.barelyPlayed = plan.valid && (measured < kLearnFloorDb || result.activeShare < kLearnMinActiveShare);
+    if (result.barelyPlayed)
+    {
+        plan = {};
+        result.statsValid = false; // its dynamics there say nothing either
+    }
+
+    result.boostCapped = plan.valid && plan.trimDb > kLearnMaxBoostDb;
+    if (result.boostCapped)
+    {
+        plan.trimDb = kLearnMaxBoostDb;
+        plan.limitedByPeak = false;
+    }
 
     result.serial += 1;
     inputShiftDb = 0.0; // measured anew
@@ -1520,6 +1541,7 @@ void AgentProcessor::recogniseRole()
     const auto summary = learnFeatures.summary();
     result.guess = ma::recogniseRole(summary, raw);
     result.statsValid = summary.valid && summary.levelP95 > -100.0;
+    result.activeShare = summary.valid ? summary.activeShare : 0.0;
     if (result.statsValid)
     {
         result.levelP10 = summary.levelP10;

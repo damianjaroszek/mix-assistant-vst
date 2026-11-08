@@ -63,7 +63,21 @@ struct Track
     String name;
     AudioBuffer<float> audio; // stereo
     int role = 0;             // ma::Role, 0 = let the Learn pass recognise it
+    ma::SpectrumAnalyzer::Bands dropDb {}; // ERB over the drop as it comes in, the way an Agent measures
 };
+
+// Power sum (dB) of ERB bands with centres in [lowHz, highHz).
+double bandPowerDb(const ma::SpectrumAnalyzer::Bands& db, double lowHz, double highHz)
+{
+    double sum = 0.0;
+    for (int b = 0; b < ma::SpectrumAnalyzer::numBandsFor(ma::BandScale::erb); ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        if (hz >= lowHz && hz < highHz)
+            sum += std::pow(10.0, db[static_cast<size_t>(b)] / 10.0);
+    }
+    return sum > 1e-20 ? 10.0 * std::log10(sum) : -200.0;
+}
 
 // The role from the file name, the way stems are usually called; 0 when nothing fits.
 int roleFromName(const String& fileName)
@@ -81,14 +95,14 @@ int roleFromName(const String& fileName)
         return static_cast<int>(ma::Role::vocal);
     if (any({ "snare", "clap", "hat", "hh", "perc", "shaker", "ride", "cymbal", "crash", "toms", "conga", "bongo", "top", "loop", "drum" }))
         return static_cast<int>(ma::Role::percussion);
+    if (any({ "fx", "riser", "sweep", "impact", "noise", "uplifter", "downlifter", "atmos", "reverse" })) // before bass: "BassFX"
+        return static_cast<int>(ma::Role::effects);
     if (any({ "bass", "sub", "808", "reese" }))
         return static_cast<int>(ma::Role::bass);
     if (any({ "pad", "chord", "keys", "piano", "organ", "string", "rhodes", "stab" }))
         return static_cast<int>(ma::Role::pad);
     if (any({ "lead", "synth", "pluck", "arp", "melody", "hook", "guitar", "sax" }))
         return static_cast<int>(ma::Role::lead);
-    if (any({ "fx", "riser", "sweep", "impact", "noise", "uplifter", "downlifter", "atmos", "reverse" }))
-        return static_cast<int>(ma::Role::effects);
     return 0;
 }
 
@@ -371,6 +385,18 @@ int main(int argc, char** argv)
     const auto dropStart = loudestStretch(raw, rate, kDropSeconds);
     const auto dropLength = static_cast<int64>(std::min<double>(kDropSeconds * rate, length - dropStart));
     std::printf("%zu stems at %.0f Hz, %.0f s; drop from %.0f s\n", tracks.size(), rate, length / rate, dropStart / rate);
+    for (auto& t : tracks)
+    {
+        ma::SpectrumAnalyzer analyser;
+        analyser.prepare(rate, ma::BandScale::erb);
+        for (int64 start = dropStart; start < dropStart + dropLength; start += kBlock)
+        {
+            const int n = static_cast<int>(std::min<int64>(kBlock, dropStart + dropLength - start));
+            const float* ch[] = { t.audio.getReadPointer(0, static_cast<int>(start)), t.audio.getReadPointer(1, static_cast<int>(start)) };
+            analyser.process(ch, 2, n);
+        }
+        t.dropDb = analyser.averageDb();
+    }
 
     // Genre target from other references (never the reference mix itself).
     if (!targetRefs.isEmpty())
@@ -428,7 +454,16 @@ int main(int argc, char** argv)
 
     AudioBuffer<float> block(2, kBlock), sum(2, kBlock);
     MidiBuffer midi;
-    // Plays from `from` for `seconds`; inside the drop when `loop`. `render` collects the sum.
+    // Plays from `from` for `seconds`; inside the drop when `loop`, carrying on where the last loop
+    // stopped (short calls each restarting at the drop's first seconds left parts that come in later
+    // out of every measurement after "Zastosuj"). `render` collects the sum.
+    int64 loopPhase = 0;
+    // Each part after its whole chain over the drop, measured while rendering (the Agents' published
+    // output spectrum is only their latest second, so a part that plays now and then read as gone).
+    std::vector<ma::SpectrumAnalyzer> outAnalysers(tracks.size());
+    for (auto& a : outAnalysers)
+        a.prepare(rate, ma::BandScale::erb);
+    bool measureOut = false;
     const auto play = [&](int64 from, double seconds, bool loop, AudioBuffer<float>* render) {
         const auto total = static_cast<int64>(seconds * rate);
         int64 done = 0;
@@ -438,7 +473,10 @@ int main(int argc, char** argv)
             const int n = static_cast<int>(std::min<int64>(kBlock, total - done));
             int64 position = from + done;
             if (loop)
-                position = dropStart + (done % dropLength);
+            {
+                position = dropStart + loopPhase;
+                loopPhase = (loopPhase + n) % dropLength;
+            }
             transport.position = position;
             sum.clear();
             for (size_t t = 0; t < tracks.size(); ++t)
@@ -455,6 +493,11 @@ int main(int argc, char** argv)
                 }
                 AudioBuffer<float> view(block.getArrayOfWritePointers(), 2, n);
                 agents[t]->processBlock(view, midi);
+                if (measureOut && !loop && position >= dropStart && position + n <= dropStart + dropLength)
+                {
+                    const float* ch[] = { block.getReadPointer(0), block.getReadPointer(1) };
+                    outAnalysers[t].process(ch, 2, n);
+                }
                 for (int c = 0; c < 2; ++c)
                     sum.addFrom(c, 0, block, c, 0, n);
             }
@@ -480,6 +523,12 @@ int main(int argc, char** argv)
         if (agent->isLearning())
             agent->stopLearning();
     MessageManager::getInstance()->runDispatchLoopUntil(500);
+    for (size_t t = 0; t < tracks.size(); ++t)
+    {
+        const auto r = agents[t]->lastResult();
+        std::printf("  learn %-30s measured %6.1f, active %3.0f%%, trim %+5.1f%s\n", tracks[t].name.toRawUTF8(), r.measuredDb,
+                    r.activeShare * 100.0, r.trimDb, r.barelyPlayed ? " (barely played: trim left)" : r.applied ? "" : " (nothing heard)");
+    }
 
     // 2. The Brain measures the drop, then "Analizuj" (whole chain).
     brain->requestReset();
@@ -493,17 +542,32 @@ int main(int argc, char** argv)
 
     // 3. "Zastosuj", then the refining rounds by themselves.
     brain->applyByUser();
+    String lastStatus;
     for (int s = 0; s < 240 && (s < 4 || brain->isRefining()); s += 4)
+    {
         play(dropStart, 4.0, true, nullptr);
+        // Each refining step and where the peak stands.
+        if (brain->refineStatus() != lastStatus)
+        {
+            lastStatus = brain->refineStatus();
+            std::printf("  %s (peak %.1f dBTP)\n", lastStatus.toRawUTF8(), brain->truePeakDb());
+        }
+    }
     std::printf("refined: %s\n", brain->refineStatus().toRawUTF8());
-    play(dropStart, 1.2 * kDropSeconds, true, nullptr);
+    for (int s = 0; s < 5; ++s)
+    {
+        play(dropStart, 4.0, true, nullptr);
+        std::printf("  after refining, %d s: peak %.1f dBTP\n", (s + 1) * 4, brain->truePeakDb());
+    }
     const auto after = brain->snapshot();
 
     // 4. The whole song as the Agents ended up.
     std::printf("rendering...\n");
     AudioBuffer<float> ours(2, length);
     ours.clear();
+    measureOut = true;
     play(0, length / rate, false, &ours);
+    measureOut = false;
     writeWav(outDir.getChildFile("ours.wav"), ours, rate);
     writeWav(outDir.getChildFile("raw.wav"), raw, rate);
 
@@ -558,14 +622,33 @@ int main(int argc, char** argv)
                << " | " << db(widthDb(*m, 6000, 20000)) << " |\n";
     }
 
-    md << "\n## Channels after\n\n| channel | role | trim dB | output in drop dBFS |\n|---|---|---|---|\n";
+    // What the Agents did to each part over the drop: level as it came in, after its whole chain, and
+    // the change in TBC's four ranges (where a channel's change tilts the mix).
+    md << "\n## Channels after (drop)\n\n| channel | role | trim dB | in dBFS | out dBFS | change | Low | Low-Mid | High-Mid | High |\n"
+          "|---|---|---|---|---|---|---|---|---|---|\n";
     for (const auto& channel : after.channels)
     {
-        double out = 0.0;
-        for (int b = 0; b < ma::bus::kBands; ++b)
-            out += std::pow(10.0, channel.outputDb[static_cast<size_t>(b)] / 10.0);
+        const auto track = std::find_if(tracks.begin(), tracks.end(), [&](const Track& t) { return t.name == channel.name; });
+        ma::SpectrumAnalyzer::Bands out {};
+        out.fill(-200.0);
+        if (track != tracks.end())
+            out = outAnalysers[static_cast<size_t>(track - tracks.begin())].averageDb();
+        const double outDb = bandPowerDb(out, 0.0, 1e9);
         md << "| " << channel.name << " | " << roles[jlimit(0, roles.size() - 1, static_cast<int>(channel.data.role))] << " | "
-           << signedDb(channel.data.trimDb) << " | " << db(out > 1e-20 ? 10.0 * std::log10(out) : -INFINITY) << " |\n";
+           << signedDb(channel.data.trimDb) << " | ";
+        if (track == tracks.end() || outDb < -150.0 || bandPowerDb(track->dropDb, 0.0, 1e9) < -150.0)
+        {
+            md << (track != tracks.end() ? db(bandPowerDb(track->dropDb, 0.0, 1e9)) : String("?")) << " | " << db(outDb) << " | | | | | |\n";
+            continue;
+        }
+        md << db(bandPowerDb(track->dropDb, 0.0, 1e9)) << " | " << db(outDb) << " | " << signedDb(outDb - bandPowerDb(track->dropDb, 0.0, 1e9));
+        for (int z = 0; z < ma::kTonalZones; ++z)
+        {
+            const double low = ma::tonalZoneEdgeHz(z), high = ma::tonalZoneEdgeHz(z + 1);
+            const double in = bandPowerDb(track->dropDb, low, high), o = bandPowerDb(out, low, high);
+            md << " | " << (in > -120.0 && o > -120.0 ? signedDb(o - in) : String("-"));
+        }
+        md << " |\n";
     }
 
     md << "\n## Collisions\n\nBefore: " << String(static_cast<int>(before.masking.issues.size())) << ", after: "

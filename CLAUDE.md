@@ -184,7 +184,7 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   Phase 29 balance without references: `ma::roleLevelOffsetDb` (Instrument.h: kick 0, bass -2, vocal -4, lead/percussion -6,
   pad -8, effects/send -10) is added to the Learn target when the Agent's `roleLevel` param is on (default; the role is recognised
   before the trim is planned; `LearnResult::roleOffsetDb/targetDb`). Without stem references (`typicalLevelsReady`) `proposeWholeMix`
-  plans group levels against `typicalLevelTarget(present)` (Sketch.h: typicalArrangement levels +-1.5 dB, shifted so the present
+  plans group levels against `typicalLevelTarget(present)` (Sketch.h: typicalArrangement levels +-2 dB (drums -8.5, bass -7.9, vocals -5, music -2 vs the whole: measured on two real productions with ma-lab), shifted so the present
   groups sum to the whole; level corridors only, no profiles: `planStemLevels` now needs only valid level corridors) and
   `anchorStemLevels` keeps the drums at 0 dB.
   Phase 30 no cable (`ma/Unmask.h`): `KeyFollower` (output, mono, 8 octave bands 125 Hz-16 kHz, 3 ms mean square then 5/25 ms
@@ -209,6 +209,27 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   Brain tab "Jak zacząć" (`GuideView`, `updateGuide`). `planChains` step 4: a near-sine bass (overtones > 12 dB under target)
   gets the harmonic enhancer (`ChainPlan::harmonics`, `sineSub`) instead of saturation; each is the other's fallback when it
   would cover a more important channel; `proposeWholeMix` adds its predicted overtones to the mix copy the proposal sees.
+  mixcheck fixes (`tools/mixcheck`, `synth_song.py` makes its synthetic test song): while refining, `proposeOnce` gives back up to
+  `Refine::globalGainDb` (the ceiling cut since the click, sized before the planned clippers) as a positive `globalGain`, leaving
+  `kRestoreMarginDb` 1.5 dB (a refine round measures 8 s of the drop). The solver keeps each collision on its own EQ slot, records the
+  depth it set (`SolverChange::gainDb`) and gives a dropped cut's depth back on a shared band; a ghost item shows its own <= 3 dB and
+  names the real cut sharing the band. `roleLevelOffsetDb(role, raw)`: percussion with >= 60% of its power above 5 kHz (hats) -12 dB.
+  A restore waits until the drop is measured as long as at the click (`Refine::peakSeconds`, <= 32 s). Learn leaves the trim (and
+  drops the stats) of a part that hardly played (`LearnResult::barelyPlayed`: < -60 dB or active < 15% of the passage).
+  mixcheck keeps its drop loop's phase across calls (short calls used to replay the drop's first 4 s), prints each Agent's learn
+  result, and its channel table shows each part's change over the drop per TBC range.
+  Second real-multitrack round: level percentiles count the 100 ms level only within 20 dB of the recent peak (`kLevelWindowDb`,
+  release tails and pause edges are not quiet passages); vocal saturation drive <= 6 dB (`SaturationProfile::maxDriveDb`); Learn
+  lifts at most `kLearnMaxBoostDb` 12 dB (`LearnResult::boostCapped`); `settledAdvice` gives drums "hits cover only for a moment"
+  and a kick covering >= 1 kHz "another hit in the same track, split it" instead of "an octave up". mixcheck's channel table
+  measures each part's output over the drop while rendering (the Agents' published spectrum is their latest second only).
+  Producer's balance inside a group (`planGroupBalance`, whole-mix analysis only): music and vocal parts get back their raw-track
+  level against the rest of their group (K-weighted over the drop, after trim and chain loss; group loudness kept; <= 15 dB, steps
+  >= 0.5 dB) as `Action::balance` items (channel gain, like `channelLevel`), counted in the group levels and the solver
+  (`balanceGain`, set only while `proposeWholeMix` runs). Drums and bass stay at the role levels: on both real songs the stems'
+  own hats and sub balance (+5 dB each) made the mix worse. Idempotent: after apply the group's trims differ only by chain loss.
+  Group levels count what each Agent's chain takes away over the drop (`chainLossDb`: K-weighted output vs heard, summed in
+  `DropSum::chainIn/chainOut`, only losses, <= 15 dB), so a refining round gives back what compressors, ducks and dips took.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

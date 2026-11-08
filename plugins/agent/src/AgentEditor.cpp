@@ -474,7 +474,11 @@ void AgentEditor::showResult(const AgentProcessor::LearnResult& r)
     const juce::String unit = measureBox.getSelectedItemIndex() == 1 ? "LUFS" : "dBFS";
     if (!r.applied)
     {
-        status.setText(pl("Nic nie było słychać, trim bez zmian."), juce::dontSendNotification);
+        status.setText(r.barelyPlayed ? pl("Kanał prawie nie grał w tym fragmencie (") + juce::String(juce::roundToInt(r.activeShare * 100.0))
+                                            + pl("% czasu, ") + ma::ui::formatDb(r.measuredDb, unit.toRawUTF8())
+                                            + pl("), więc trim bez zmian. Naucz go tam, gdzie gra.")
+                                      : pl("Nic nie było słychać, trim bez zmian."),
+                       juce::dontSendNotification);
         status.setColour(juce::Label::textColourId, colours::quiet);
         return;
     }
@@ -485,6 +489,8 @@ void AgentEditor::showResult(const AgentProcessor::LearnResult& r)
     if (std::abs(r.roleOffsetDb) > 0.05)
         text += pl(" Cel dla roli: ") + ma::ui::formatDb(r.targetDb, unit.toRawUTF8()) + " (" + signedDb(r.roleOffsetDb)
                 + pl(" względem stopy).");
+    if (r.boostCapped)
+        text += pl(" Podbicie ograniczone do +12 dB: partia była dużo cichsza niż typowo dla roli, pewnie celowo.");
     if (r.limitedByPeak)
     {
         // Nauka ustawia tylko trim. Kompresor i clipper z zakładki „Inżynier miksu” ustawia Mózg,

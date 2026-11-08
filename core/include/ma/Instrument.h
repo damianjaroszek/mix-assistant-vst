@@ -103,6 +103,11 @@ int defaultPriority(Role role);
 // mostly sub), the bass just under, the vocal, the lead, the percussion and the pads further
 // back (sustained and in the ear's most sensitive range), effects and returns furthest. Unknown
 // roles and buses stay at the target. The Brain's group balance refines it ("Analizuj").
-double roleLevelOffsetDb(Role role);
+// With the part's raw ERB spectrum (dBFS), percussion that lives only up top (hats, shakers,
+// rides: most of its power above 5 kHz) goes further back than a clap or a snare: the kick
+// and the hats share the drums group, so nothing after "Naucz poziom" sets the two apart.
+double roleLevelOffsetDb(Role role, const SpectrumAnalyzer::Bands* rawBandsDb = nullptr);
+// Phase 32: the share of a raw ERB spectrum's power above `hz`.
+double powerShareAbove(const SpectrumAnalyzer::Bands& rawBandsDb, double hz);
 
 } // namespace ma

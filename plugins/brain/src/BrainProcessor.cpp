@@ -803,6 +803,8 @@ ma::SolverResult BrainProcessor::solveNow(double headroomGainDb, const ma::StemS
                 channels[c].currentEq[static_cast<size_t>(b)] = channel.data.eq[b];
         const int group = groupOfChannel(channel);
         channels[c].gainDb = groupGain != nullptr && group >= 0 ? (*groupGain)[static_cast<size_t>(group)] : 0.0;
+        if (const auto balance = balanceGain.find(channel.owner); balance != balanceGain.end())
+            channels[c].gainDb += balance->second;
         if (const auto extra = translationExtra.find(channel.owner); extra != translationExtra.end())
             channels[c].extraDb = extra->second;
     }
@@ -1174,6 +1176,20 @@ void BrainProcessor::accumulateDrop()
             if (channel.data.stereoValid != 0)
                 sum.side[at] += std::pow(10.0, (channel.data.sideDb[b] + channel.data.trimDb) / 10.0);
         }
+        if (channel.outputValid && channel.spectrumValid)
+        {
+            double in = 0.0, out = 0.0;
+            for (int b = 0; b < ma::bus::kBands; ++b)
+            {
+                const auto at = static_cast<size_t>(b);
+                const double w = ma::kWeightingDb(ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b));
+                in += std::pow(10.0, (channel.heardDb[at] + w) / 10.0);
+                out += std::pow(10.0, (channel.outputDb[at] + w) / 10.0);
+            }
+            sum.chainIn += in;
+            sum.chainOut += out;
+            ++sum.chainUpdates;
+        }
     }
     ++dropUpdates;
     mix.dropSeconds = static_cast<double>(dropUpdates) / kUpdateHz;
@@ -1342,11 +1358,14 @@ BrainProcessor::stemGroupDb(bool withEq, std::array<bool, ma::kStemGroups>& pres
             for (int b = 0; b < ma::kEqBands; ++b)
                 eq[static_cast<size_t>(b)] = channel.data.eq[b];
         bool any = false;
+        double loss = chainLossDb(channel.owner);
+        if (const auto balance = balanceGain.find(channel.owner); balance != balanceGain.end())
+            loss += balance->second;
         for (int b = 0; b < ma::bus::kBands; ++b)
         {
             const auto at = static_cast<size_t>(b);
             const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
-            const double gain = std::pow(10.0, (ma::cleanupResponseDb(cleanup, hz) + ma::eqResponseDb(eq, hz)) / 10.0);
+            const double gain = std::pow(10.0, (ma::cleanupResponseDb(cleanup, hz) + ma::eqResponseDb(eq, hz) + loss) / 10.0);
             const double p = found->second.power[at] / updates * gain;
             power[static_cast<size_t>(group)][at] += p;
             sidePower[static_cast<size_t>(group)][at] += found->second.side[at] / updates * gain
@@ -1369,6 +1388,75 @@ BrainProcessor::stemGroupDb(bool withEq, std::array<bool, ma::kStemGroups>& pres
             (*side)[static_cast<size_t>(g)] = toDb(sidePower[static_cast<size_t>(g)]);
     }
     return out;
+}
+
+double BrainProcessor::chainLossDb(std::uint64_t owner) const
+{
+    const auto found = drop.find(owner);
+    if (found == drop.end() || found->second.chainUpdates < static_cast<long>(kMinimumDropSeconds * kUpdateHz) / 2
+        || found->second.chainIn <= 1e-20 || found->second.chainOut <= 1e-20)
+        return 0.0;
+    // Only what the chain takes away: what it adds (saturation, harmonics) is counted where it lands.
+    return std::clamp(10.0 * std::log10(found->second.chainOut / found->second.chainIn), -kMaxChainLossDb, 0.0);
+}
+
+void BrainProcessor::planGroupBalance()
+{
+    balanceGain.clear();
+    const double updates = static_cast<double>(std::max(1L, dropUpdates));
+    struct Part
+    {
+        std::uint64_t owner;
+        double heardDb, rawDb; // K-weighted over the drop (as Learn measures): as the mix hears it after the chain, and before trim and chain
+        bool kick;
+    };
+    std::array<std::vector<Part>, ma::kStemGroups> parts;
+    for (const auto& channel : mix.channels)
+    {
+        const int group = groupOfChannel(channel);
+        const auto found = drop.find(channel.owner);
+        // Only the arrangement's parts (music, vocals). In both real songs the stems' own drums and bass
+        // balance (hats and the sub far louder than the pro mixes have them) made the mix worse, so
+        // there the roles' levels from Learn stay.
+        const bool arrangement = group == static_cast<int>(ma::StemGroup::music) || group == static_cast<int>(ma::StemGroup::vocals);
+        if (!arrangement || found == drop.end() || !inMixSums(channel))
+            continue;
+        ma::EqSettings eq {};
+        if (channel.data.eqBypass == 0)
+            for (int b = 0; b < ma::kEqBands; ++b)
+                eq[static_cast<size_t>(b)] = channel.data.eq[b];
+        double power = 0.0;
+        for (int b = 0; b < ma::bus::kBands; ++b)
+        {
+            const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+            power += found->second.power[static_cast<size_t>(b)] / updates
+                     * std::pow(10.0, (ma::cleanupResponseDb(channel.data.cleanup, hz) + ma::eqResponseDb(eq, hz) + ma::kWeightingDb(hz)) / 10.0);
+        }
+        if (power <= 1e-12) // under -120 dB: not playing in the drop
+            continue;
+        const double loss = chainLossDb(channel.owner);
+        const double heard = 10.0 * std::log10(power) + loss;
+        parts[static_cast<size_t>(group)].push_back({ channel.owner, heard, heard - channel.data.trimDb - loss });
+    }
+    for (const auto& group : parts)
+    {
+        if (group.size() < 2)
+            continue;
+        // The group keeps its loudness, so the group levels see the same group as before.
+        double heard = 0.0, raw = 0.0;
+        for (const auto& part : group)
+        {
+            heard += std::pow(10.0, part.heardDb / 10.0);
+            raw += std::pow(10.0, part.rawDb / 10.0);
+        }
+        const double shift = 10.0 * std::log10(heard / raw);
+        for (const auto& part : group)
+        {
+            const double gain = std::clamp(part.rawDb + shift - part.heardDb, -kMaxBalanceDb, kMaxBalanceDb);
+            if (std::abs(gain) >= kMinBalanceDb)
+                balanceGain[part.owner] = std::round(gain * 2.0) / 2.0;
+        }
+    }
 }
 
 ma::StemShapeInput BrainProcessor::stemShapeInput() const
@@ -2564,6 +2652,7 @@ bool BrainProcessor::isPendingFor(const Proposal::Item& item, std::uint64_t mask
         case Proposal::Item::Action::harmonics:
         case Proposal::Item::Action::transients:
         case Proposal::Item::Action::level:
+        case Proposal::Item::Action::balance:
             return false;
     }
     return false;
@@ -2615,6 +2704,8 @@ std::array<double, ma::bus::kBands> BrainProcessor::predictedHeard(const MixSnap
         if (item.action == Proposal::Item::Action::solver && item.change.kind == ma::SolverChange::Kind::globalGain)
             gain += item.change.gainDb;
         else if (item.action == Proposal::Item::Action::level && group >= 0 && item.group == group)
+            gain += item.gainDb;
+        else if (item.action == Proposal::Item::Action::balance && item.owner == channel.owner)
             gain += item.gainDb;
     }
     if (!inMixSums(channel))
@@ -2879,6 +2970,20 @@ void BrainProcessor::planCollisionSteps()
     }
 }
 
+juce::String BrainProcessor::settledAdvice(const ma::MaskingIssue& issue) const
+{
+    const auto& masker = mix.channels[static_cast<size_t>(issue.masker)];
+    const auto role = static_cast<ma::Role>(juce::jlimit(0, ma::kRoles - 1, static_cast<int>(masker.data.role)));
+    // mixcheck (a "KickSnare" stem): a kick covering something well above its own register carries
+    // another hit in the same track, which no setting on one channel can separate.
+    if (role == ma::Role::kick && issue.lowHz >= 1000.0)
+        return pl("W śladzie ") + quoted(masker.name) + pl(" gra też coś wysokiego (werbel, clap?): rozdziel to na osobny kanał z własnym Agentem.");
+    // Hits cover only for a moment; moving them an octave says nothing about a drum.
+    if (role == ma::Role::kick || role == ma::Role::percussion)
+        return pl("Uderzenia zasłaniają tylko na chwilę: zostaw albo wybierz próbkę ") + quoted(masker.name) + pl(" o innym brzmieniu.");
+    return pl("To ten sam rejestr: przenieś ") + quoted(masker.name) + pl(" oktawę wyżej, zmień brzmienie albo zostaw (lekkie nakładanie jest normalne).");
+}
+
 juce::String BrainProcessor::describeIssue(const ma::MaskingIssue& issue) const
 {
     const auto& masker = mix.channels[static_cast<size_t>(issue.masker)];
@@ -2905,8 +3010,7 @@ juce::String BrainProcessor::describeIssue(const ma::MaskingIssue& issue) const
             break;
         }
         case IssueHandling::settled:
-            text += pl(": miks zrobił, ile mógł. To ten sam rejestr: przenieś ") + quoted(masker.name)
-                    + pl(" oktawę wyżej, zmień brzmienie albo zostaw (lekkie nakładanie jest normalne)");
+            text += pl(": miks zrobił, ile mógł. ") + settledAdvice(issue);
             break;
         case IssueHandling::open: text += pl(": kliknij „Analizuj”"); break;
     }
@@ -2953,9 +3057,19 @@ void BrainProcessor::proposeOnce(const std::array<double, ma::kStemGroups>* grou
 
     const double peak = truePeakDb();
     const double over = std::isfinite(peak) ? peak - peakCeilingDb() : 0.0;
+    double headroomGain = over > 0.0 ? -std::ceil((over + 0.5) * 2.0) / 2.0 : 0.0;
+    // mixcheck: the cut for the ceiling is sized on the peaks before the planned clippers, which
+    // then take the kick's and hats' peaks down too, so the master landed ~5 dB under the ceiling.
+    // While refining, what the clippers freed comes back (never more than was taken, 1 dB kept).
+    if (over <= 0.0 && std::isfinite(peak) && refine.active && refine.globalGainDb < 0.0)
+    {
+        const double room = std::floor((-over - kRestoreMarginDb) * 2.0) / 2.0;
+        const double back = std::min(-refine.globalGainDb, room);
+        if (back >= 0.5)
+            headroomGain = back;
+    }
     const auto stems = stemShapeInput();
-    const auto solved = solveNow(over > 0.0 ? -std::ceil((over + 0.5) * 2.0) / 2.0 : 0.0, stems.target != nullptr ? &stems : nullptr,
-                                 groupGain);
+    const auto solved = solveNow(headroomGain, stems.target != nullptr ? &stems : nullptr, groupGain);
     currentProposal.crowdingBefore = solved.crowdingBefore;
     currentProposal.crowdingAfter = solved.crowdingAfter;
     for (size_t c = 0; c < mix.channels.size(); ++c)
@@ -2970,8 +3084,12 @@ void BrainProcessor::proposeOnce(const std::array<double, ma::kStemGroups>* grou
         const auto range = hzText(change.lowHz) + pl("–") + hzText(change.highHz);
         if (change.kind == ma::SolverChange::Kind::globalGain)
         {
-            item.text = pl("Wszystkie kanały: ") + juce::String(change.gainDb, 1) + pl(" dB, bo szczyt sumy jest ")
-                        + juce::String(over, 1) + pl(" dB ponad limitem pre-master");
+            if (change.gainDb > 0.0)
+                item.text = pl("Wszystkie kanały: +") + juce::String(change.gainDb, 1) + pl(" dB z powrotem: po zastosowaniu szczyt sumy jest ")
+                            + juce::String(-over, 1) + pl(" dB pod limitem pre-master, bo clippery ścięły szczyty. Oddaję część ściszenia, zapas 1.5 dB zostaje");
+            else
+                item.text = pl("Wszystkie kanały: ") + juce::String(change.gainDb, 1) + pl(" dB, bo szczyt sumy jest ")
+                            + juce::String(over, 1) + pl(" dB ponad limitem pre-master");
         }
         else if (change.kind == ma::SolverChange::Kind::tonalAdvice)
         {
@@ -3023,11 +3141,23 @@ void BrainProcessor::proposeOnce(const std::array<double, ma::kStemGroups>* grou
             const auto& ghost = mix.sketch.analysis.ghosts[static_cast<size_t>(change.maskedChannel) - mix.channels.size()];
             item.owner = masker.owner;
             item.band = solved.eq[static_cast<size_t>(change.channel)][static_cast<size_t>(change.eqSlot)];
-            item.text = quoted(masker.name) + ": " + juce::String(item.band.gainDb, 1) + pl(" dB przy ") + hzText(item.band.hz)
+            // Room for a ghost is at most 3 dB; a band that ends deeper is shared with a real collision's cut.
+            const double own = std::max(static_cast<double>(item.band.gainDb), change.gainDb < 0.0 ? change.gainDb : -1e9);
+            item.text = quoted(masker.name) + ": " + juce::String(own, 1) + pl(" dB przy ") + hzText(item.band.hz)
                         + " (Q " + juce::String(item.band.q, 1) + pl("), zostawia miejsce na partię, której jeszcze nie ma: ")
                         + ghostName(ghost) + pl(" w ") + hzText(change.lowHz) + pl("–") + hzText(change.highHz) + " ("
                         + juce::String(juce::roundToInt(change.scoreBefore * 100.0)) + pl("% → ")
                         + juce::String(juce::roundToInt(change.scoreAfter * 100.0)) + "%)";
+            if (item.band.gainDb < own - 0.05)
+                for (const auto& other : solved.changes)
+                    if (other.kind == ma::SolverChange::Kind::eqCut && other.channel == change.channel && other.eqSlot == change.eqSlot
+                        && static_cast<size_t>(other.maskedChannel) < mix.channels.size())
+                    {
+                        item.text += pl(". To samo pasmo pogłębia cięcie dla ")
+                                     + quoted(mix.channels[static_cast<size_t>(other.maskedChannel)].name) + pl(", razem ")
+                                     + juce::String(item.band.gainDb, 1) + " dB";
+                        break;
+                    }
         }
         else
         {
@@ -3310,6 +3440,7 @@ void BrainProcessor::proposeWholeMix()
     // Phase 9 and 18: the stem groups' levels against the references. Planned before the EQ, so
     // the solver's tonal stage works on what the level moves leave instead of filling the same
     // hole twice, then again with the proposed EQ (its cuts and boosts move the groups too).
+    planGroupBalance(); // inside each group first: the group levels then place the group as it will play
     const bool typicalLevels = typicalLevelsReady();
     ma::StemTarget levelTarget;
     auto planLevels = [&](bool withProposal) {
@@ -3573,6 +3704,23 @@ void BrainProcessor::proposeWholeMix()
             chainItems.insert(chainItems.begin(), item);
         }
     }
+    // Each part back to the producer's balance inside its group.
+    for (const auto& channel : mix.channels)
+    {
+        const auto balance = balanceGain.find(channel.owner);
+        if (balance == balanceGain.end())
+            continue;
+        const int group = groupOfChannel(channel);
+        Proposal::Item item;
+        item.action = Proposal::Item::Action::balance;
+        item.owner = channel.owner;
+        item.gainDb = balance->second;
+        item.text = quoted(channel.name) + ": " + (balance->second > 0.0 ? "+" : "") + juce::String(balance->second, 1)
+                    + pl(" dB, wraca do proporcji ze śladu względem reszty grupy ") + stemGroupName(group)
+                    + pl(" (nauka wyrównała każdą partię do celu roli, a producent ustawił je inaczej)");
+        chainItems.push_back(item);
+    }
+    balanceGain.clear();
     mix = saved;
 
     currentProposal.items.insert(currentProposal.items.begin(), chainItems.begin(), chainItems.end());
@@ -3847,8 +3995,7 @@ Proposal::Verdict BrainProcessor::judge(size_t index, const ma::ChainPlan& plan,
                     break;
                 case IssueHandling::levelStep: how = pl(": EQ zrobił, ile mógł, reszta to poziom ") + quoted(masker.name) + pl(" (decyzja Twoja)."); break;
                 case IssueHandling::settled:
-                    how = pl(": miks zrobił, ile mógł. To ten sam rejestr: przenieś ") + quoted(masker.name)
-                          + pl(" oktawę wyżej, zmień brzmienie albo zostaw.");
+                    how = pl(": miks zrobił, ile mógł. ") + settledAdvice(issue);
                     break;
                 case IssueHandling::open:
                 case IssueHandling::pending: how = pl(": kliknij „Analizuj”."); break;
@@ -5399,6 +5546,7 @@ int BrainProcessor::applySelected(bool refining)
     for (const auto& item : currentProposal.items)
         if (item.selected && item.action == Proposal::Item::Action::solver && item.change.kind == ma::SolverChange::Kind::globalGain)
             globalGain += item.change.gainDb;
+    refine.globalGainDb += globalGain;
 
     // Phase 9: a stem group's level moves every channel of the group, its thresholds with it.
     std::array<double, ma::kStemGroups> groupGain {};
@@ -5422,7 +5570,8 @@ int BrainProcessor::applySelected(bool refining)
         }
         // Phase 23: one channel quieter for a collision EQ cannot take further.
         for (const auto& item : currentProposal.items)
-            if (item.selected && item.action == Proposal::Item::Action::channelLevel && item.owner == channel.owner && inMixSums(channel))
+            if (item.selected && (item.action == Proposal::Item::Action::channelLevel || item.action == Proposal::Item::Action::balance)
+                && item.owner == channel.owner && inMixSums(channel))
             {
                 gain += item.gainDb;
                 levelGain += item.gainDb;
@@ -5581,6 +5730,8 @@ int BrainProcessor::applyByUser()
         if (!item.advisory && !item.selected && !item.inPlace)
             unticked.push_back(itemSignature(item));
     const int scope = analysisScope;
+    refine.globalGainDb = 0.0;
+    refine.peakSeconds = std::min(mix.dropSeconds, kMaxRestoreWaitSeconds);
     const int sent = applySelected(false);
     if (sent > 0 && autoRefineOn())
     {
@@ -5625,6 +5776,14 @@ void BrainProcessor::updateRefine(std::uint64_t now)
         refine.readyMs = 0;
         refine.status = roundText + pl("puść drop, mierzę efekt ") + juce::String(juce::roundToInt(mix.dropSeconds)) + " / "
                         + juce::String(juce::roundToInt(kMinimumDropSeconds)) + " s.";
+        return;
+    }
+    // Gain comes back only from a peak measured over as much of the drop as the cut was.
+    if (refine.globalGainDb < 0.0 && mix.dropSeconds < refine.peakSeconds)
+    {
+        refine.readyMs = 0;
+        refine.status = roundText + pl("mierzę szczyty całego dropu ") + juce::String(juce::roundToInt(mix.dropSeconds)) + " / "
+                        + juce::String(juce::roundToInt(refine.peakSeconds)) + " s.";
         return;
     }
     // The loud-master preview needs a little longer; it gets kRefinePreviewWaitMs more at most.
