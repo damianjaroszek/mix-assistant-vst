@@ -2130,7 +2130,7 @@ void BrainProcessor::buildReport()
 
     // Kick and bass in time: dynamic give-way and polarity, measured by Agents with a sidechain.
     {
-        juce::StringArray noSignal, cancelling, ducking;
+        juce::StringArray noSignal, cancelling, ducking, keyed;
         bool kick = false, bass = false, anySidechain = false;
         for (const auto& channel : mix.channels)
         {
@@ -2138,7 +2138,10 @@ void BrainProcessor::buildReport()
             bass = bass || channel.data.role == 2;
             const bool connected = channel.data.sidechainConnected != 0;
             anySidechain = anySidechain || connected;
-            if (channel.data.duck.on > 0.5f && !connected)
+            // Phase 30: without a cable the duck listens to the kick's Agent through the shared memory.
+            if (channel.data.duck.on > 0.5f && !connected && channel.data.duckKeyFound != 0)
+                keyed.add(channel.name + pl(" do ") + juce::String(channel.data.duckReductionDb, 1) + " dB");
+            else if (channel.data.duck.on > 0.5f && !connected)
                 noSignal.add(channel.name);
             if (connected && channel.data.correlationValid != 0 && channel.data.sidechainLowCorrelation < kCancellingCorrelation)
                 cancelling.add(channel.name + " (" + juce::String(channel.data.sidechainLowCorrelation, 2) + ")");
@@ -2167,10 +2170,18 @@ void BrainProcessor::buildReport()
             item.detail = ducking.isEmpty() ? pl("Sidechain podłączony, faza w basie w porządku.")
                                             : pl("Faza w porządku. Ustępuje: ") + joinNames(ducking) + ".";
         }
+        else if (!keyed.isEmpty())
+        {
+            item.status = Status::good;
+            item.detail = pl("Ustępuje stopie bez kabla (Agent stopy podaje obwiednię przez wspólną pamięć): ") + joinNames(keyed)
+                          + pl(". Fazę stopa-bas sprawdzi tylko sidechain: podłącz stopę do Agenta basu, jeśli chcesz ją znać.");
+        }
         else if (kick && bass)
         {
             item.detail = pl("Podłącz stopę jako sidechain do Agenta basu, żeby sprawdzić fazę i ustępować dynamicznie.");
         }
+        if (!keyed.isEmpty() && anySidechain && item.status == Status::good)
+            item.detail += pl(" Bez kabla: ") + joinNames(keyed) + ".";
         if (item.detail.isNotEmpty())
             report.push_back(item);
     }

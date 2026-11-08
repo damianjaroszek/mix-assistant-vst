@@ -375,6 +375,25 @@ Dla każdego pliku: LUFS integrated, najgłośniejsze 3 s (LUFS-S), true peak, R
 crest factor i trim potrzebny do poziomu docelowego. Przy kilku plikach dochodzi wiersz
 `SUM (mix)`, czyli analiza sumy stemów. `--json` dodaje widmo w 31 pasmach.
 
+### Sprawdzian na prawdziwych śladach (mixcheck)
+
+`mixcheck` uruchamia prawdziwych Agentów i Mózg (ten sam kod co wtyczki) na folderze stemów, tak jak
+w FL: „Naucz poziom” na dropie, pomiar dropu, „Analizuj” (cały łańcuch), „Zastosuj” i dopracowanie.
+Potem renderuje cały utwór (`ours.wav`, obok surowa suma `raw.wav`) i porównuje go z miksem
+referencyjnym na jego dropie, przy wyrównanej głośności: cztery zakresy jak w Tonal Balance Control,
+LUFS, true peak, PLR, rozpiętość głośności, szerokość w czterech pasmach. Zapisuje też
+`reference-at-our-level.wav` do odsłuchu A/B, `report.md` (liczby, raport Mózgu, propozycja, decyzje
+per narzędzie i kanał) i `report.json`.
+
+```
+cmake -S . -B build -DMA_BUILD_MIXCHECK=ON && cmake --build build --target MixCheck
+mixcheck --stems folder_ze_stemami --reference miks.wav [--target-refs a.wav b.wav] [--bpm 124] [--out wynik]
+```
+
+Rola z nazwy pliku (kick, bass/sub, vox, hat/clap/perc, pad/chord, lead/synth, fx), reszta z nauki.
+`--target-refs` buduje cel tonalny z innych utworów (nigdy z miksu referencyjnego). Mózg liczy czas
+zegarem, więc przebieg trwa mniej więcej tyle, ile utwór plus nauka i dopracowanie (ok. 5-8 min).
+
 ## Budowanie lokalnie
 
 Wymagane: CMake 3.22+, kompilator C++17 (na Windows Visual Studio 2022). JUCE pobiera się automatycznie.

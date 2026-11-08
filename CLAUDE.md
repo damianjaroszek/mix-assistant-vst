@@ -216,6 +216,10 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
 
 - Core only (fast, no JUCE): `cmake -S . -B build-core -DMA_BUILD_PLUGINS=OFF && cmake --build build-core && ctest --test-dir build-core`
 - Everything: `cmake -S . -B build && cmake --build build --config Release`
+- Offline check on real stems: `-DMA_BUILD_MIXCHECK=ON`, target `MixCheck` (`tools/mixcheck`): the real Agents and Brain
+  on a stems folder (learn on the loudest 16 s, Brain window flagged open so Agents send spectra, `analyse(1)`, `applyByUser`,
+  refine), renders `ours.wav` and compares with `--reference` at matched loudness (TBC zones, LUFS, PLR, width). Runs at
+  about real time (Brain timers use the wall clock); run it with HOME pointed at a scratch folder.
 - CI (`.github/workflows/build.yml`) builds the Windows VST3s and uploads them as an artifact.
 
 ## Design reference
