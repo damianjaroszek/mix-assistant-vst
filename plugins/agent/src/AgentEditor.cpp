@@ -87,6 +87,10 @@ AgentEditor::AgentEditor(AgentProcessor& p)
     learnButton.setColour(juce::TextButton::buttonColourId, colours::panel);
     learnButton.setColour(juce::TextButton::buttonOnColourId, colours::accent);
     learnButton.onClick = [this] { toggleLearning(); };
+    roleLevelButton.setButtonText(pl("Poziom według roli"));
+    roleLevelButton.setTooltip(pl("Nauka ustawia kanał względem celu według roli: stopa na celu, bas 2 dB niżej, wokal 4, "
+                                  "lead i perkusja 6, pad 8, efekty 10 dB niżej. Bez tego każdy kanał dostaje ten sam poziom."));
+    roleLevelButton.setColour(juce::ToggleButton::textColourId, colours::text);
 
     showProfileButton.setButtonText(pl("Pokaż nauczony profil"));
     showProfileButton.setColour(juce::ToggleButton::textColourId, colours::quiet);
@@ -263,6 +267,7 @@ AgentEditor::AgentEditor(AgentProcessor& p)
     attackFreqAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::attackFreqId, attackFreqSlider);
     attackAmountAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::attackAmountId, attackAmountSlider);
     satOnAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(state, AgentProcessor::satOnId, satOnButton);
+    roleLevelAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(state, AgentProcessor::roleLevelId, roleLevelButton);
     intentionalAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         state, AgentProcessor::intentionalDriveId, intentionalButton);
     satModeAttachment = std::make_unique<ComboAttachment>(state, AgentProcessor::satModeId, satModeBox);
@@ -282,7 +287,7 @@ AgentEditor::AgentEditor(AgentProcessor& p)
     page(levelPage, pl("Poziom"),
          { &roleLabel, &roleBox, &priorityLabel, &prioritySlider, &inputLabel, &inputValue, &inputBar, &lufsLabel, &lufsValue,
            &outputLabel, &outputValue, &outputBar, &measureLabel, &measureBox, &targetSlider, &trimLabel, &trimSlider,
-           &ceilingLabel, &ceilingSlider, &learnTimeLabel, &learnTimeSlider, &learnButton, &status, &spectrumLabel,
+           &ceilingLabel, &ceilingSlider, &learnTimeLabel, &learnTimeSlider, &learnButton, &roleLevelButton, &status, &spectrumLabel,
            &showProfileButton, &spectrumView },
          [this](auto area) { layoutLevel(area); });
     page(eqPage, pl("EQ i ustępowanie"),
@@ -348,6 +353,9 @@ void AgentEditor::showResult(const AgentProcessor::LearnResult& r)
     juce::String text = pl("Zmierzone: ") + ma::ui::formatDb(r.measuredDb, unit.toRawUTF8())
                         + ", true peak " + ma::ui::formatDb(r.truePeakDb, "dBTP")
                         + pl(". Ustawiono trim ") + signedDb(r.trimDb) + ".";
+    if (std::abs(r.roleOffsetDb) > 0.05)
+        text += pl(" Cel dla roli: ") + ma::ui::formatDb(r.targetDb, unit.toRawUTF8()) + " (" + signedDb(r.roleOffsetDb)
+                + pl(" względem stopy).");
     if (r.limitedByPeak)
     {
         // Nauka ustawia tylko trim. Kompresor i clipper z zakładki „Inżynier miksu” ustawia Mózg,
@@ -655,7 +663,10 @@ void AgentEditor::layoutLevel(juce::Rectangle<int> area)
     sliderRow(learnTimeLabel, learnTimeSlider);
 
     area.removeFromTop(8);
-    learnButton.setBounds(area.removeFromTop(32).removeFromLeft(200));
+    row = area.removeFromTop(32);
+    learnButton.setBounds(row.removeFromLeft(200));
+    row.removeFromLeft(12);
+    roleLevelButton.setBounds(row.removeFromLeft(220));
     area.removeFromTop(6);
     status.setBounds(area);
 

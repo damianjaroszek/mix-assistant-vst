@@ -1307,6 +1307,12 @@ bool BrainProcessor::stemsReady() const
     return currentStems.valid() && mix.dropSeconds >= kMinimumDropSeconds && dropUpdates > 0;
 }
 
+// Phase 29: no stem references, but the drop is measured: the groups get the typical balance.
+bool BrainProcessor::typicalLevelsReady() const
+{
+    return !currentStems.valid() && mix.dropSeconds >= kMinimumDropSeconds && dropUpdates > 0;
+}
+
 std::array<ma::SpectrumAnalyzer::Bands, ma::kStemGroups>
 BrainProcessor::stemGroupDb(bool withEq, std::array<bool, ma::kStemGroups>& present,
                             std::array<ma::SpectrumAnalyzer::Bands, ma::kStemGroups>* side,
@@ -1858,7 +1864,7 @@ void BrainProcessor::buildReport()
                                          : no + pl("cel tonalny"))
                   + pl(" → balans tonalny, korekcje barwy"));
         lines.add((currentStems.valid() ? yes + pl("referencje ze stemów ") + quoted(juce::String::fromUTF8(currentStems.name.c_str()))
-                                        : no + pl("referencje ze stemów (szkic porównuje z typowym dropem house'u)"))
+                                        : no + pl("referencje ze stemów (proporcje grup i szkic: typowy house)"))
                   + pl(" → proporcje grup, intro, build, break, przebieg"));
         lines.add((keyed.isEmpty() ? no + pl("sidechain stopy") : yes + pl("sidechain stopy na ") + joinNames(keyed))
                   + pl(" → ustępowanie na każde uderzenie, faza stopa-bas"));
@@ -3078,6 +3084,8 @@ void BrainProcessor::proposeWholeMix()
     // Phase 9 and 18: the stem groups' levels against the references. Planned before the EQ, so
     // the solver's tonal stage works on what the level moves leave instead of filling the same
     // hole twice, then again with the proposed EQ (its cuts and boosts move the groups too).
+    const bool typicalLevels = typicalLevelsReady();
+    ma::StemTarget levelTarget;
     auto planLevels = [&](bool withProposal) {
         std::vector<ma::EqSettings> eqs;
         for (const auto& channel : mix.channels)
@@ -3098,9 +3106,15 @@ void BrainProcessor::proposeWholeMix()
         std::array<bool, ma::kStemGroups> present {}, ghostOnly {};
         auto groups = stemGroupDb(true, present, nullptr, &eqs);
         addGhostGroups(groups, present, ghostOnly);
-        return ma::planStemLevels(groups, present, keyedStems, &ghostOnly);
+        // Phase 29: without stem references, the typical house balance of the groups.
+        if (typicalLevels)
+            levelTarget = ma::typicalLevelTarget(present);
+        auto plan = ma::planStemLevels(groups, present, typicalLevels ? levelTarget : keyedStems, &ghostOnly);
+        if (typicalLevels)
+            ma::anchorStemLevels(plan, static_cast<int>(ma::StemGroup::drums));
+        return plan;
     };
-    const bool levelsPlanned = stemsReady();
+    const bool levelsPlanned = stemsReady() || typicalLevels;
     ma::StemLevelPlan levels;
     std::array<double, ma::kStemGroups> groupGain {};
     if (levelsPlanned)
@@ -3288,7 +3302,8 @@ void BrainProcessor::proposeWholeMix()
     // Phase 9: each stem group's level against the references, with the planned cleanup.
     if (levelsPlanned)
     {
-        const auto setName = quoted(juce::String::fromUTF8(currentStems.name.c_str()));
+        const auto setName = typicalLevels ? pl("(brak referencji, więc typowe proporcje house'u)")
+                                           : quoted(juce::String::fromUTF8(currentStems.name.c_str()));
         for (int g = 0; g < ma::kStemGroups && levels.any; ++g)
         {
             const double gain = levels.gainDb[static_cast<size_t>(g)];
@@ -3300,7 +3315,7 @@ void BrainProcessor::proposeWholeMix()
                     names.add(quoted(channel.name));
             if (names.isEmpty())
                 continue;
-            const auto& corridor = keyedStems.level[static_cast<size_t>(g)];
+            const auto& corridor = (typicalLevels ? levelTarget : keyedStems).level[static_cast<size_t>(g)];
             Proposal::Item item;
             item.action = Proposal::Item::Action::level;
             item.group = g;
@@ -3312,7 +3327,9 @@ void BrainProcessor::proposeWholeMix()
                                           : juce::String());
             if (!corridor.valid || std::abs(levels.before[static_cast<size_t>(g)] - std::clamp(levels.before[static_cast<size_t>(g)], corridor.low, corridor.high)) < 0.05)
                 item.text = pl("Grupa ") + stemGroupName(g) + " (" + joinNames(names) + "): " + (gain > 0.0 ? "+" : "")
-                            + juce::String(gain, 1) + pl(" dB, żeby cały miks został tak samo głośny po zmianie innych grup");
+                            + juce::String(gain, 1)
+                            + (typicalLevels ? pl(" dB, razem z resztą względem perkusji (stopa zostaje tam, gdzie ustawiła ją nauka)")
+                                             : pl(" dB, żeby cały miks został tak samo głośny po zmianie innych grup"));
             chainItems.insert(chainItems.begin(), item);
         }
     }

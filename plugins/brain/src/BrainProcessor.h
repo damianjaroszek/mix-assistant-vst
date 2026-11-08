@@ -545,6 +545,7 @@ private:
     // (more than 3 dB of it): the report does not ask for it back.
     bool cutOnPurpose(int group, int region) const;
     bool stemsReady() const;
+    bool typicalLevelsReady() const; // phase 29
     ma::StemShapeInput stemShapeInput() const; // per channel of mix.channels
 
     std::atomic<float>* peakCeiling = nullptr;

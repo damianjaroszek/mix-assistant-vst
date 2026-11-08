@@ -181,6 +181,12 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   (kick/percussion within 6 dB of the highest unclipped peak: max(held output, learned true peak + trim)) and `currentClipDb`;
   planner step 3b adds `loudMasterClipDb` (applied extra + measured - 2.5, dead zone 1.5-3 dB, total <= 6 dB). `peakHold` only
   fills once the preview reset is consumed and 1 s measured. Editor viewports re-lay without shrinking (`fitToViewport`).
+  Phase 29 balance without references: `ma::roleLevelOffsetDb` (Instrument.h: kick 0, bass -2, vocal -4, lead/percussion -6,
+  pad -8, effects/send -10) is added to the Learn target when the Agent's `roleLevel` param is on (default; the role is recognised
+  before the trim is planned; `LearnResult::roleOffsetDb/targetDb`). Without stem references (`typicalLevelsReady`) `proposeWholeMix`
+  plans group levels against `typicalLevelTarget(present)` (Sketch.h: typicalArrangement levels +-1.5 dB, shifted so the present
+  groups sum to the whole; level corridors only, no profiles: `planStemLevels` now needs only valid level corridors) and
+  `anchorStemLevels` keeps the drums at 0 dB.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

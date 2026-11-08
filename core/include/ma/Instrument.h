@@ -98,5 +98,11 @@ RoleGuess recogniseRole(const InstrumentFeatures::Summary& features, const Spect
 
 // Starting priority for a recognised role (1 = most important), as a house mix is usually built.
 int defaultPriority(Role role);
+// Phase 29: where "Naucz poziom" puts a part against the level target, as a house / tech house
+// mix starts out: the kick at the target (its RMS is low for how loud it sounds: short hits,
+// mostly sub), the bass just under, the vocal, the lead, the percussion and the pads further
+// back (sustained and in the ear's most sensitive range), effects and returns furthest. Unknown
+// roles and buses stay at the target. The Brain's group balance refines it ("Analizuj").
+double roleLevelOffsetDb(Role role);
 
 } // namespace ma

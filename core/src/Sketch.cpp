@@ -168,6 +168,44 @@ Arrangement typicalArrangement()
     return out;
 }
 
+void anchorStemLevels(StemLevelPlan& plan, int group)
+{
+    if (group < 0 || group >= kStemGroups || plan.before[static_cast<size_t>(group)] <= -100.0)
+        return;
+    const double shift = plan.gainDb[static_cast<size_t>(group)];
+    plan.any = false;
+    for (auto& g : plan.gainDb)
+    {
+        g -= shift;
+        plan.any = plan.any || std::abs(g) >= 0.05;
+    }
+}
+
+StemTarget typicalLevelTarget(const std::array<bool, kStemGroups>& present)
+{
+    StemTarget out;
+    out.name = "typowy house";
+    const auto typical = typicalArrangement();
+    double total = 0.0;
+    for (int g = 0; g < kStemGroups; ++g)
+        if (present[static_cast<size_t>(g)])
+            total += std::pow(10.0, typical.groups[static_cast<size_t>(g)].levelDb / 10.0);
+    if (total <= 0.0)
+        return out;
+    const double shift = 10.0 * std::log10(total);
+    for (int g = 0; g < kStemGroups; ++g)
+    {
+        if (!present[static_cast<size_t>(g)])
+            continue;
+        auto& c = out.level[static_cast<size_t>(g)];
+        c.valid = true;
+        c.centre = typical.groups[static_cast<size_t>(g)].levelDb - shift;
+        c.low = c.centre - kTypicalLevelSpanDb;
+        c.high = c.centre + kTypicalLevelSpanDb;
+    }
+    return out;
+}
+
 Arrangement arrangementFromStems(const StemTarget& target)
 {
     Arrangement out;
