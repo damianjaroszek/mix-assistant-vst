@@ -5609,6 +5609,7 @@ int BrainProcessor::applyByUser()
             unticked.push_back(itemSignature(item));
     const int scope = analysisScope;
     refine.globalGainDb = 0.0;
+    refine.peakSeconds = std::min(mix.dropSeconds, kMaxRestoreWaitSeconds);
     const int sent = applySelected(false);
     if (sent > 0 && autoRefineOn())
     {
@@ -5653,6 +5654,14 @@ void BrainProcessor::updateRefine(std::uint64_t now)
         refine.readyMs = 0;
         refine.status = roundText + pl("puść drop, mierzę efekt ") + juce::String(juce::roundToInt(mix.dropSeconds)) + " / "
                         + juce::String(juce::roundToInt(kMinimumDropSeconds)) + " s.";
+        return;
+    }
+    // Gain comes back only from a peak measured over as much of the drop as the cut was.
+    if (refine.globalGainDb < 0.0 && mix.dropSeconds < refine.peakSeconds)
+    {
+        refine.readyMs = 0;
+        refine.status = roundText + pl("mierzę szczyty całego dropu ") + juce::String(juce::roundToInt(mix.dropSeconds)) + " / "
+                        + juce::String(juce::roundToInt(refine.peakSeconds)) + " s.";
         return;
     }
     // The loud-master preview needs a little longer; it gets kRefinePreviewWaitMs more at most.

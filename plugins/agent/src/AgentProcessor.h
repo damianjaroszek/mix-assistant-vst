@@ -85,12 +85,17 @@ public:
         // Role recognised from the same passage; set on the channel when it still had none.
         ma::RoleGuess guess {};
         bool roleSet = false, prioritySet = false;
+        // Hardly played in the passage (under kLearnFloorDb, or active < kLearnMinActiveShare): trim left alone.
+        bool barelyPlayed = false;
+        double activeShare = 0.0;
         // Dynamics of the passage for the Brain's engineer pass (pre-trim).
         bool statsValid = false;
         double levelP10 = -200.0, levelP50 = -200.0, levelP95 = -200.0, lowNoteHz = 0.0, tailPitchHz = 0.0;
         ma::Resonances resonances {}; // narrow peaks that stood out through the passage
     };
     LearnResult lastResult() const;
+    static constexpr double kLearnFloorDb = -60.0;       // a passage measured under this is too quiet to set a trim from
+    static constexpr double kLearnMinActiveShare = 0.15; // ... or one the part plays less of than this
 
     // Live meters (input before the trim, output after it).
     double inputRmsDb() const { return inputRms.load(); }

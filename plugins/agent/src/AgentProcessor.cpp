@@ -1493,7 +1493,16 @@ void AgentProcessor::applyLearned()
     const double target = parameters.getRawParameterValue(targetId)->load() + offset;
     // A channel meant to distort may peak where it likes: only the level target counts.
     const double ceiling = intentionalDrive() ? 100.0 : parameters.getRawParameterValue(peakCeilingId)->load();
-    const auto plan = ma::planTrim(measured, peak, target, ceiling);
+    auto plan = ma::planTrim(measured, peak, target, ceiling);
+    // mixcheck (real multitracks): a part that hardly plays in the learned passage (a synth's tail,
+    // a fill) was measured near silence and got the full boost, then blasted where it really plays.
+    // Its trim stays; it is learned where it plays.
+    result.barelyPlayed = plan.valid && (measured < kLearnFloorDb || result.activeShare < kLearnMinActiveShare);
+    if (result.barelyPlayed)
+    {
+        plan = {};
+        result.statsValid = false; // its dynamics there say nothing either
+    }
 
     result.serial += 1;
     inputShiftDb = 0.0; // measured anew
@@ -1525,6 +1534,7 @@ void AgentProcessor::recogniseRole()
     const auto summary = learnFeatures.summary();
     result.guess = ma::recogniseRole(summary, raw);
     result.statsValid = summary.valid && summary.levelP95 > -100.0;
+    result.activeShare = summary.valid ? summary.activeShare : 0.0;
     if (result.statsValid)
     {
         result.levelP10 = summary.levelP10;

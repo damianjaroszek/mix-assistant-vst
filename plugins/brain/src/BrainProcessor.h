@@ -400,9 +400,10 @@ public:
     // click, "Analizuj", "Cofnij" or "Przed / po" stop it. One undo takes everything back.
     static constexpr const char* autoRefineId = "autoRefine";
     static constexpr int kRefineRounds = 2;
-    // Kept under the pre-master ceiling when gain comes back: a refining round measures 8 s of the
-    // drop, and mixcheck found the rest of it peaking up to 1.3 dB higher.
+    // Kept under the pre-master ceiling when gain comes back (the rest of the song can peak higher
+    // than its drop).
     static constexpr double kRestoreMarginDb = 1.5;
+    static constexpr double kMaxRestoreWaitSeconds = 32.0; // a round never waits for more drop than this before giving gain back
     static constexpr std::uint64_t kRefinePreviewWaitMs = 15000;
     bool autoRefineOn() const;
     int applyByUser(); // the user's "Zastosuj": apply, then refine by itself when that is on
@@ -682,6 +683,9 @@ private:
         // The gain every channel got for the pre-master ceiling since the user's click. It was sized on
         // the peaks before the planned clippers; what they take off comes back in the refining rounds.
         double globalGainDb = 0.0;
+        // How much drop the peak behind that cut was measured over: before gain comes back, a round
+        // measures as much (mixcheck: the peaks of one song's drop differed by 8 dB between its halves).
+        double peakSeconds = 0.0;
     };
     Refine refine;
     bool autoSelectedTarget = false;

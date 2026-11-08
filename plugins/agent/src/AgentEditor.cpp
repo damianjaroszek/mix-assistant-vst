@@ -474,7 +474,11 @@ void AgentEditor::showResult(const AgentProcessor::LearnResult& r)
     const juce::String unit = measureBox.getSelectedItemIndex() == 1 ? "LUFS" : "dBFS";
     if (!r.applied)
     {
-        status.setText(pl("Nic nie było słychać, trim bez zmian."), juce::dontSendNotification);
+        status.setText(r.barelyPlayed ? pl("Kanał prawie nie grał w tym fragmencie (") + juce::String(juce::roundToInt(r.activeShare * 100.0))
+                                            + pl("% czasu, ") + ma::ui::formatDb(r.measuredDb, unit.toRawUTF8())
+                                            + pl("), więc trim bez zmian. Naucz go tam, gdzie gra.")
+                                      : pl("Nic nie było słychać, trim bez zmian."),
+                       juce::dontSendNotification);
         status.setColour(juce::Label::textColourId, colours::quiet);
         return;
     }

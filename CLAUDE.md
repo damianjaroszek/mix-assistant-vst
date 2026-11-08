@@ -214,6 +214,10 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   `kRestoreMarginDb` 1.5 dB (a refine round measures 8 s of the drop). The solver keeps each collision on its own EQ slot, records the
   depth it set (`SolverChange::gainDb`) and gives a dropped cut's depth back on a shared band; a ghost item shows its own <= 3 dB and
   names the real cut sharing the band. `roleLevelOffsetDb(role, raw)`: percussion with >= 60% of its power above 5 kHz (hats) -12 dB.
+  A restore waits until the drop is measured as long as at the click (`Refine::peakSeconds`, <= 32 s). Learn leaves the trim (and
+  drops the stats) of a part that hardly played (`LearnResult::barelyPlayed`: < -60 dB or active < 15% of the passage).
+  mixcheck keeps its drop loop's phase across calls (short calls used to replay the drop's first 4 s), prints each Agent's learn
+  result, and its channel table shows each part's change over the drop per TBC range.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 
