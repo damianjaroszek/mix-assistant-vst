@@ -1,4 +1,5 @@
 #include "BrainProcessor.h"
+#include "ma/Audibility.h"
 
 #include "BrainEditor.h"
 #include "MaUi.h"
@@ -947,6 +948,21 @@ ma::SolverResult BrainProcessor::solveNow(double headroomGainDb, const ma::StemS
         options.tonalMasterDb = mix.sketch.active() ? ma::addGhosts(tonalMasterSpectrum(), mix.sketch.analysis) : tonalMasterSpectrum();
         options.centreZones = true; // phase 24
     }
+    // Without a tonal target the producer's own balance is the target: collision cuts, level moves and
+    // cleanup must not tilt the mix (on real songs they lifted the top by about 3 dB).
+    ma::TonalTarget own;
+    if (!currentTarget.valid() && !capturing && !comparing && secondsAnalysed() >= kMinimumSeconds)
+    {
+        own = producerBalanceTarget();
+        if (own.valid())
+        {
+            // Compared in the same measurement: the channels' outputs as the Agents read them (the
+            // master analyser reads the stereo sum differently, wide tops look darker there).
+            options.tonalTarget = &own;
+            options.tonalMasterDb = channelOutputSum();
+            options.centreZones = true;
+        }
+    }
     options.stems = stems;
     return ma::solve(channels, options);
 }
@@ -1758,6 +1774,75 @@ ma::Curve BrainProcessor::limiterTilt() const
     return tilt;
 }
 
+constexpr std::uint32_t kLostRefreshMs = 2000;
+constexpr size_t kMaxLostListed = 5;
+constexpr double kMonoFoldLowHz = 150.0, kMonoFoldHighHz = 8000.0;
+constexpr double kMonoFoldAudibleDb = -30.0; // a part this far under the mix does not count
+constexpr double kMonoFoldWarnDb = 3.0, kMonoFoldProblemDb = 6.0;
+constexpr double kOwnBalanceHalfDb = 1.0, kOwnBalanceEdgeHalfDb = 1.5;
+
+// The tracks as the producer balanced them (before trims and the Agents' chains), summed as the Agents
+// measure them: a one-reference target that keeps the mix's own tonal balance.
+ma::Curve BrainProcessor::channelOutputSum() const
+{
+    ma::Curve sum {};
+    sum.fill(0.0);
+    for (const auto& channel : mix.channels)
+    {
+        if (!channel.spectrumValid || !inMixSums(channel))
+            continue;
+        for (int b = 0; b < ma::bus::kBands; ++b)
+        {
+            const auto at = static_cast<size_t>(b);
+            const double db = channel.outputValid ? channel.outputDb[at] : channel.heardDb[at];
+            if (db > -150.0)
+                sum[at] += std::pow(10.0, db / 10.0);
+        }
+    }
+    for (auto& v : sum)
+        v = v > 1e-20 ? 10.0 * std::log10(v) : -200.0;
+    return sum;
+}
+
+ma::TonalTarget BrainProcessor::producerBalanceTarget() const
+{
+    ma::TonalTarget target;
+    ma::Curve sum {};
+    sum.fill(0.0);
+    bool any = false;
+    for (const auto& channel : mix.channels)
+    {
+        if (!channel.spectrumValid || !inMixSums(channel))
+            continue;
+        for (int b = 0; b < ma::bus::kBands; ++b)
+        {
+            const double db = channel.rawDb[static_cast<size_t>(b)] - channel.data.trimDb;
+            if (db > -150.0)
+            {
+                sum[static_cast<size_t>(b)] += std::pow(10.0, db / 10.0);
+                any = true;
+            }
+        }
+    }
+    if (!any)
+        return target;
+    ma::Curve db {};
+    for (size_t b = 0; b < db.size(); ++b)
+        db[b] = sum[b] > 1e-20 ? 10.0 * std::log10(sum[b]) : -200.0;
+    target.name = "own balance";
+    target.references.push_back(ma::normaliseCurve(db));
+    target.rebuild();
+    // A narrow corridor: the producer's balance is a point, not a spread of references.
+    for (int b = 0; b < ma::bus::kBands; ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        const double half = hz < 60.0 || hz > 10000.0 ? kOwnBalanceEdgeHalfDb : kOwnBalanceHalfDb;
+        target.low[static_cast<size_t>(b)] = target.centre[static_cast<size_t>(b)] - half;
+        target.high[static_cast<size_t>(b)] = target.centre[static_cast<size_t>(b)] + half;
+    }
+    return target;
+}
+
 ma::Curve BrainProcessor::tonalMasterSpectrum() const
 {
     auto master = averageSpectrum();
@@ -2106,6 +2191,71 @@ void BrainProcessor::buildReport()
                            + pl(". W mono te pasma osłabną. „Analizuj” (cały łańcuch) zdejmie tam side na winnym kanale.");
         }
         report.push_back(perBand);
+
+        // Each part folded to mono (club, phone, a mono speaker): how much more it loses than the mix.
+        MixSnapshot::ReportItem folded;
+        folded.title = pl("Ślady w mono");
+        struct Fold
+        {
+            juce::String name;
+            double mid = 0.0, side = 0.0;
+        };
+        std::vector<Fold> folds;
+        double mixMid = 0.0, mixSide = 0.0;
+        for (const auto& channel : mix.channels)
+        {
+            if (!channel.spectrumValid || !channel.stereoValid || !inMixSums(channel))
+                continue;
+            Fold fold { juce::String::fromUTF8(channel.data.name) };
+            for (int b = 0; b < ma::bus::kBands; ++b)
+            {
+                const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+                if (hz < kMonoFoldLowHz || hz > kMonoFoldHighHz)
+                    continue;
+                // As it plays: after the Agent's side bells, widener and width slider.
+                const double m = std::pow(10.0, channel.midDb[static_cast<size_t>(b)] / 10.0);
+                fold.mid += m;
+                fold.side += ma::processedSidePower(channel.data.stereo, channel.data.width, hz, m,
+                                                    std::pow(10.0, channel.sideDb[static_cast<size_t>(b)] / 10.0));
+            }
+            mixMid += fold.mid;
+            mixSide += fold.side;
+            folds.push_back(fold);
+        }
+        const double mixTotal = mixMid + mixSide;
+        if (folds.empty() || mixTotal <= 1e-20)
+        {
+            folded.detail = pl("Czekam na muzykę.");
+        }
+        else
+        {
+            const double mixLoss = 10.0 * std::log10(std::max(mixMid, 1e-20) / mixTotal);
+            juce::StringArray worse, bad;
+            for (const auto& fold : folds)
+            {
+                const double total = fold.mid + fold.side;
+                if (total <= 1e-20 || 10.0 * std::log10(total / mixTotal) < kMonoFoldAudibleDb)
+                    continue;
+                const double extra = 10.0 * std::log10(std::max(fold.mid, 1e-20) / total) - mixLoss;
+                if (extra > -kMonoFoldWarnDb)
+                    continue;
+                const auto line = quoted(fold.name) + " " + juce::String(extra, 1) + " dB";
+                (extra <= -kMonoFoldProblemDb ? bad : worse).add(line);
+            }
+            folded.status = !bad.isEmpty() ? Status::problem : !worse.isEmpty() ? Status::warning : Status::good;
+            if (bad.isEmpty() && worse.isEmpty())
+                folded.detail = pl("Po zsumowaniu do mono żaden ślad nie cichnie wyraźnie bardziej niż cały miks (150 Hz–8 kHz).");
+            else
+            {
+                juce::StringArray all;
+                all.addArray(bad);
+                all.addArray(worse);
+                folded.detail = pl("W mono (klub, telefon, jeden głośnik) cichną bardziej niż reszta miksu: ") + all.joinIntoString(", ")
+                                + pl(". Ich szerokość to głównie side, którego mono nie słyszy. Zawęź je (suwak „Szerokość” w Agencie poniżej 100%) "
+                                     "albo zamień poszerzacz/chorus na krótki delay po jednej stronie.");
+            }
+        }
+        report.push_back(folded);
     }
 
     // Agents connected.
@@ -2472,6 +2622,92 @@ void BrainProcessor::buildReport()
             item.detail += pl(" Bez kabla: ") + joinNames(keyed) + ".";
         if (item.detail.isNotEmpty())
             report.push_back(item);
+    }
+
+    // Phase 38: nothing lost anywhere in the song. From the song's seconds, as the mix hears them now
+    // (each second's raw + trim power plus the channel's present EQ and cleanup), worked out every 2 s.
+    {
+        const auto nowMs = juce::Time::getMillisecondCounter();
+        if (lostAtMs == 0 || nowMs - lostAtMs >= kLostRefreshMs)
+        {
+            lostAtMs = nowMs;
+            lostSpans.clear();
+            lostNames.clear();
+            int last = -1;
+            for (const auto& [second, bin] : songBins)
+                if (bin.updates > 0)
+                    last = std::max(last, second);
+            std::vector<ma::AudibilityChannel> in;
+            for (const auto& channel : mix.channels)
+            {
+                if (!inMixSums(channel) || last < 0)
+                    continue;
+                ma::AudibilityChannel a;
+                a.valid = true;
+                a.background = channel.data.role == static_cast<int>(ma::Role::send);
+                a.secondsDb.resize(static_cast<size_t>(last + 1));
+                for (auto& sec : a.secondsDb)
+                    sec.fill(-200.0);
+                for (const auto& [second, bin] : songBins)
+                {
+                    const auto found = bin.sums.find(channel.owner);
+                    if (bin.updates <= 0 || found == bin.sums.end() || second < 0)
+                        continue;
+                    auto& sec = a.secondsDb[static_cast<size_t>(second)];
+                    for (int b = 0; b < ma::bus::kBands; ++b)
+                    {
+                        const auto at = static_cast<size_t>(b);
+                        const double p = found->second.power[at] / static_cast<double>(bin.updates);
+                        const double eq = channel.spectrumValid && channel.heardDb[at] > -150.0 && channel.rawDb[at] > -150.0
+                                              ? channel.heardDb[at] - channel.rawDb[at]
+                                              : 0.0;
+                        sec[at] = p > 1e-20 ? 10.0 * std::log10(p) + eq : -200.0;
+                    }
+                }
+                in.push_back(std::move(a));
+                lostNames.push_back(channel.name);
+            }
+            lostSpans = ma::findLostSpans(in);
+        }
+        MixSnapshot::ReportItem item;
+        item.title = pl("Słyszalność w czasie");
+        const auto clock = [](int second) {
+            return juce::String(second / 60) + ":" + juce::String(second % 60).paddedLeft('0', 2);
+        };
+        if (lostNames.empty())
+        {
+            item.detail = pl("Puść cały utwór od początku: sprawdzę, czy w którymś fragmencie jakiś ślad nie ginie.");
+        }
+        else if (lostSpans.empty())
+        {
+            item.status = Status::good;
+            item.detail = pl("W odsłuchanych fragmentach żaden ślad nie ginie na dłużej niż 3 s (każdy w swoim głównym paśmie).");
+        }
+        else
+        {
+            item.status = Status::warning;
+            auto spans = lostSpans;
+            std::stable_sort(spans.begin(), spans.end(), [](const auto& a, const auto& b) {
+                return a.spanShareDb - a.typicalShareDb < b.spanShareDb - b.typicalShareDb;
+            });
+            juce::StringArray parts;
+            for (size_t k = 0; k < spans.size() && k < kMaxLostListed; ++k)
+            {
+                const auto& span = spans[k];
+                auto part = quoted(lostNames[static_cast<size_t>(span.channel)]) + " " + clock(span.fromSecond) + pl("–")
+                            + clock(span.toSecond + 1) + " (" + hzText(span.lowHz) + pl("–") + hzText(span.highHz) + ", "
+                            + juce::String(span.typicalShareDb - span.spanShareDb, 1) + pl(" dB słabiej niż zwykle");
+                if (span.coveredBy >= 0)
+                    part += pl(", zasłania go ") + quoted(lostNames[static_cast<size_t>(span.coveredBy)]);
+                parts.add(part + ")");
+            }
+            if (spans.size() > kMaxLostListed)
+                parts.add(pl("i ") + juce::String(static_cast<int>(spans.size() - kMaxLostListed)) + pl(" innych"));
+            item.detail = pl("Ginie na chwilę: ") + parts.joinIntoString("; ")
+                          + pl(". Mózg ustawia balans na dropie, te fragmenty popraw automatyką głośności w FL: podnieś ten ślad "
+                               "albo ścisz zasłaniający na czas fragmentu (przed Agentem, w głośności kanału).");
+        }
+        report.push_back(item);
     }
 
     // Phase 34: depth. How loud the sends (reverb, delay) are against the dry parts, 200 Hz-8 kHz.
@@ -3448,7 +3684,9 @@ void BrainProcessor::proposeOnce(const std::array<double, ma::kStemGroups>* grou
     {
         Proposal::Item item;
         item.change = change;
-        const auto targetName = quoted(juce::String::fromUTF8(currentTarget.name.c_str()));
+        const auto targetName = currentTarget.valid()
+                                    ? quoted(juce::String::fromUTF8(currentTarget.name.c_str()))
+                                    : pl("„własny balans śladów” (bez nagranego celu Mózg trzyma barwę, z jaką przyszły ślady)");
         const auto range = hzText(change.lowHz) + pl("–") + hzText(change.highHz);
         if (change.kind == ma::SolverChange::Kind::globalGain)
         {
@@ -5029,7 +5267,7 @@ void BrainProcessor::buildToolNotes(bool wholeMix)
                 auto why = masks ? pl("jego kolizje biorą na siebie inne narzędzia (ustępowanie, poziom grup) albo inne kanały")
                                  : pl("nie zasłania innych kanałów");
                 why += currentTarget.valid() ? pl(", a balans tonalny nie potrzebuje jego pasm")
-                                             : pl("; balansu tonalnego nie sprawdzam, bo nie ma celu (zakładka „Balans tonalny”)");
+                                             : pl("; bez nagranego celu trzymam barwę, z jaką przyszły ślady, a jego pasma jej nie przesuwają");
                 set(ma::bus::toolEq, D::notNeeded, why);
             }
         }

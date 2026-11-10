@@ -47,6 +47,7 @@
 #include <cstring>
 #include <functional>
 #include <memory>
+#include "ma/Audibility.h"
 #include <string>
 #include <vector>
 
@@ -3686,6 +3687,35 @@ void testDynamicEq()
     }
 }
 
+void testAudibility()
+{
+    const int bands = ma::SpectrumAnalyzer::numBandsFor(ma::BandScale::erb);
+    const auto part = [&](double lowHz, double highHz, double db, int from, int to, int seconds) {
+        ma::AudibilityChannel c;
+        c.valid = true;
+        c.secondsDb.resize(static_cast<size_t>(seconds));
+        for (int t = 0; t < seconds; ++t)
+            for (int b = 0; b < bands; ++b)
+            {
+                const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+                c.secondsDb[static_cast<size_t>(t)][static_cast<size_t>(b)] = t >= from && t <= to && hz >= lowHz && hz <= highHz ? db : -200.0;
+            }
+        return c;
+    };
+    std::vector<ma::AudibilityChannel> song { part(100.0, 800.0, -12.0, 0, 39, 40), part(2000.0, 5000.0, -20.0, 0, 39, 40),
+                                              part(1500.0, 6000.0, -8.0, 15, 22, 40) };
+    const auto spans = ma::findLostSpans(song);
+    check(spans.size() == 1 && spans[0].channel == 1 && spans[0].coveredBy == 2, "audibility 1");
+    check(!spans.empty() && spans[0].fromSecond == 15 && spans[0].toSecond == 22, "audibility 2");
+    check(!spans.empty() && spans[0].spanShareDb < spans[0].typicalShareDb - 6.0, "audibility 3");
+    // Too short a cover (3 s) is not a loss; a send is never counted.
+    song[2] = part(1500.0, 6000.0, -8.0, 15, 17, 40);
+    check(ma::findLostSpans(song).empty(), "audibility 4");
+    song[2] = part(1500.0, 6000.0, -8.0, 15, 22, 40);
+    song[1].background = true;
+    check(ma::findLostSpans(song).empty(), "audibility 5");
+}
+
 void testPan()
 {
     // The law: unity in the centre, constant power, silent on the far side.
@@ -4034,6 +4064,7 @@ int main()
     testPercussionLevel();
     testDynamicEq();
     testPan();
+    testAudibility();
     testDepth();
     testSendDuck();
     testSendSources();

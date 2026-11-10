@@ -37,7 +37,8 @@ add_library(ma_core STATIC
     src/Sketch.cpp
     src/EnergyMap.cpp
     src/GhostNoise.cpp
-    src/Unmask.cpp)
+    src/Unmask.cpp
+    src/Audibility.cpp)
 target_include_directories(ma_core PUBLIC include)
 
 # WAV reading/writing, used by the lab and tests only.
