@@ -1493,6 +1493,21 @@ BrainProcessor::stemGroupDb(bool withEq, std::array<bool, ma::kStemGroups>& pres
     return out;
 }
 
+ma::SpectrumAnalyzer::Bands BrainProcessor::dropSpectrumDb(std::uint64_t owner) const
+{
+    ma::SpectrumAnalyzer::Bands db {};
+    db.fill(-200.0);
+    const auto found = drop.find(owner);
+    if (found == drop.end() || dropUpdates < static_cast<long>(kMinimumDropSeconds * kUpdateHz) / 2)
+        return db;
+    for (int b = 0; b < ma::bus::kBands; ++b)
+    {
+        const double p = found->second.power[static_cast<size_t>(b)] / static_cast<double>(dropUpdates);
+        db[static_cast<size_t>(b)] = p > 1e-20 ? 10.0 * std::log10(p) : -200.0;
+    }
+    return db;
+}
+
 double BrainProcessor::chainLossDb(std::uint64_t owner) const
 {
     const auto found = drop.find(owner);
@@ -4135,11 +4150,20 @@ void BrainProcessor::proposeWholeMix()
         }
         if (voice->data.keyId == 0 || channel.data.keyId == 0)
             continue;
+        // Phase 36: only in the voice's range, as deep as the tail needs (from the drop's spectra).
+        const auto sendDuck = ma::planSendDuck(dropSpectrumDb(channel.owner), dropSpectrumDb(voice->owner));
         const auto& have = channel.data.duck;
-        if (have.on > 0.5f && have.wholeSignal > 0.5f && channel.data.duckKey == voice->data.keyId)
+        const auto howDeep = [&]() {
+            return sendDuck.valid ? pl(" (ogon w 1–5 kHz ") + juce::String(sendDuck.tailVsVoiceDb, 1) + pl(" dB względem głosu, po ustąpieniu ")
+                                    + juce::String(sendDuck.tailVsVoiceDb - sendDuck.depthDb, 1) + " dB)"
+                              : pl(" (drop jeszcze niezmierzony, więc łagodnie)");
+        };
+        if (have.on > 0.5f && have.wholeSignal < 0.5f && channel.data.duckKey == voice->data.keyId
+            && std::abs(have.depthDb - sendDuck.depthDb) < 1.0 && std::abs(std::log2(have.hz / sendDuck.hz)) < 0.3)
         {
             noteTool(channel.owner, ma::bus::toolDuck, ma::bus::ToolDecision::kept,
-                     pl("już ustępuje ") + quoted(voice->name) + pl(", gdy ten gra"));
+                     pl("już ustępuje ") + quoted(voice->name) + pl(" o ") + juce::String(have.depthDb, 1) + pl(" dB wokół ")
+                         + hzText(have.hz) + pl(", gdy ten gra") + howDeep());
             continue;
         }
         Proposal::Item item;
@@ -4148,10 +4172,10 @@ void BrainProcessor::proposeWholeMix()
         item.maskedOwner = voice->owner;
         auto& duck = item.duck;
         duck.on = 1.0f;
-        duck.wholeSignal = 1.0f;
-        duck.hz = 1000.0f;
-        duck.q = 0.7f;
-        duck.depthDb = ma::kSendDuckDb;
+        duck.wholeSignal = 0.0f;
+        duck.hz = static_cast<float>(sendDuck.hz);
+        duck.q = static_cast<float>(sendDuck.q);
+        duck.depthDb = static_cast<float>(sendDuck.depthDb);
         duck.thresholdDb = -30.0f;
         duck.attackMs = 10.0f;
         constexpr int quarterSync = 4; // 1/4: the room comes back between phrases, not between syllables
@@ -4159,8 +4183,9 @@ void BrainProcessor::proposeWholeMix()
         item.duckSync = bpm > 0.0 ? quarterSync : 0;
         item.duckKey = voice->data.keyId;
         item.text = name + pl(": ustępuje ") + quoted(voice->name) + pl(" o ") + juce::String(duck.depthDb, 1)
-                    + pl(" dB, gdy ten gra (powrót ") + juce::String(juce::roundToInt(duck.releaseMs))
-                    + pl(" ms): głos stoi z przodu, pogłos wraca w przerwach. Bez kabla, przez wspólną pamięć");
+                    + pl(" dB wokół ") + hzText(duck.hz) + pl(" (tylko w paśmie głosu, przestrzeń i dół zostają), gdy ten gra")
+                    + howDeep() + pl("; powrót ") + juce::String(juce::roundToInt(duck.releaseMs))
+                    + pl(" ms, więc pogłos wraca w przerwach. Bez kabla, przez wspólną pamięć");
         chainItems.push_back(item);
     }
     // The times for the user's own reverb and delay plugins.

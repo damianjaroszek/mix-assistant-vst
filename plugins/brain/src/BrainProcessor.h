@@ -614,6 +614,8 @@ private:
     // mixcheck: compressors, ducks and dips took 5-15 dB off parts the group levels were planned
     // without, so after the whole chain everything sat far under the kick. The group levels count it.
     double chainLossDb(std::uint64_t owner) const;
+    // The channel's raw spectrum after its trim, averaged over the drop (-200 where unknown).
+    ma::SpectrumAnalyzer::Bands dropSpectrumDb(std::uint64_t owner) const;
     // mixcheck (real multitracks): Learn brings every part to its role's level, so a quiet piano bed
     // ended as loud as the main lead. The whole-mix analysis gives each part of the music and vocal
     // groups its level in the raw tracks against the others (the group as loud as before), after its chain; the group levels then place the group. Only set while `proposeWholeMix` runs.

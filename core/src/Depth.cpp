@@ -99,4 +99,33 @@ double topTiltDb(const SpectrumAnalyzer::Bands& erbDb)
     return 10.0 * std::log10(std::max(top, 1e-30) / mid);
 }
 
+SendDuck planSendDuck(const SpectrumAnalyzer::Bands& sendDb, const SpectrumAnalyzer::Bands& voiceDb)
+{
+    SendDuck d;
+    double send = 0.0, voice = 0.0, loudest = -1.0;
+    for (int b = 0; b < SpectrumAnalyzer::numBandsFor(BandScale::erb); ++b)
+    {
+        const double hz = SpectrumAnalyzer::bandCentreHz(BandScale::erb, b);
+        const auto power = [](double db) { return db <= -150.0 || !std::isfinite(db) ? 0.0 : std::pow(10.0, db / 10.0); };
+        const double v = power(voiceDb[static_cast<size_t>(b)]);
+        if (hz >= 1000.0 && hz <= 5000.0)
+        {
+            send += power(sendDb[static_cast<size_t>(b)]);
+            voice += v;
+        }
+        if (hz >= 800.0 && hz <= 5000.0 && v > loudest)
+        {
+            loudest = v;
+            d.hz = hz;
+        }
+    }
+    if (voice <= 1e-12 || send <= 1e-15)
+        return d;
+    d.valid = true;
+    d.tailVsVoiceDb = 10.0 * std::log10(send / voice);
+    const double depth = std::clamp(d.tailVsVoiceDb + kSendUnderVoiceDb, kSendDuckMinDb, kSendDuckMaxDb);
+    d.depthDb = std::round(depth * 2.0) / 2.0;
+    return d;
+}
+
 } // namespace ma

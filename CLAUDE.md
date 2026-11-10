@@ -270,6 +270,10 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   Agent param `alignDelay` on the "EQ i ustępowanie" tab. `ReportItem::gate` "Gotowe dla Ozone?" is inserted first: red items outside the
   arrangement group (plus ghosts / playback simulator on) block, amber ones are listed to check; the view always shows it on top and the
   guide's and HTML's problem counts skip it. mixcheck `--kick-cable` feeds the kick stem into the bass Agents' sidechain, `--shift-bass MS`.
+- Phase 36 ducked reverb: `ma::planSendDuck` (Depth.h) sizes a send's duck under `mainVoice()` from both drop spectra (`dropSpectrumDb`,
+  raw + trim, pre-duck so it is idempotent): a bell (not the whole signal) at the voice's loudest ERB band in 800 Hz-5 kHz, Q 0.8, depth =
+  send minus voice over 1-5 kHz + `kSendUnderVoiceDb` 12, clamped 2-8 dB in 0.5 dB steps (3 dB until the drop is measured). Kept while the
+  Agent's duck is a bell keyed to the voice within 1 dB and 0.3 octave.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

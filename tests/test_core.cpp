@@ -3805,6 +3805,40 @@ void testPan()
                 planned.balancePlannedDb, planned.worstRegionPlannedDb);
 }
 
+void testSendDuck()
+{
+    using Bands = ma::SpectrumAnalyzer::Bands;
+    const int n = ma::SpectrumAnalyzer::numBandsFor(ma::BandScale::erb);
+    Bands voice {}, send {};
+    for (int b = 0; b < n; ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        voice[static_cast<size_t>(b)] = hz > 300.0 && hz < 8000.0 ? (std::abs(hz - 2000.0) < 300.0 ? -14.0 : -20.0) : -80.0;
+        send[static_cast<size_t>(b)] = -30.0;
+    }
+    auto d = ma::planSendDuck(send, voice);
+    check(d.valid, "send duck: valid with both spectra");
+    check(std::abs(d.hz - 2000.0) < 300.0, "send duck: bell over the voice's loudest part");
+    // A loud tail: deep, capped.
+    for (auto& v : send)
+        v = -10.0;
+    d = ma::planSendDuck(send, voice);
+    check(d.depthDb == ma::kSendDuckMaxDb, "send duck: a tail as loud as the voice ducks the most");
+    // A quiet tail: the gentlest.
+    for (auto& v : send)
+        v = -60.0;
+    d = ma::planSendDuck(send, voice);
+    check(d.depthDb == ma::kSendDuckMinDb, "send duck: a tail far under the voice ducks the least");
+    // In between: the tail 12 dB under the voice after the duck.
+    for (auto& v : send)
+        v = -25.0;
+    d = ma::planSendDuck(send, voice);
+    check(std::abs(d.tailVsVoiceDb - d.depthDb + ma::kSendUnderVoiceDb) <= 0.25 + 1e-9, "send duck: tail 12 dB under the voice");
+    Bands silent {};
+    silent.fill(-200.0);
+    check(!ma::planSendDuck(send, silent).valid, "send duck: no voice, no plan");
+}
+
 void testDepth()
 {
     // The high cut: as its response says, and off means untouched.
@@ -3936,6 +3970,7 @@ int main()
     testDynamicEq();
     testPan();
     testDepth();
+    testSendDuck();
     testAlignment();
     testChannelAnalyzerSpeed();
     testMixBus();

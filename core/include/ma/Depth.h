@@ -50,6 +50,24 @@ double topTiltDb(const SpectrumAnalyzer::Bands& erbDb);
 
 constexpr double kSendHighCutHz = 9000.0;
 constexpr double kDarkerThanMixDb = 3.0; // a send at least this much darker than the mix already sits behind
-constexpr float kSendDuckDb = 3.0f;      // under the main voice: enough to clear it, the room stays
+constexpr float kSendDuckDb = 3.0f;      // under the main voice when the levels are not known yet
+
+// Phase 36: how a send gives way to the main voice. Only in the voice's own range (a bell over where it
+// is loudest, 800 Hz-5 kHz), so the room keeps its width and low end while the words clear, and as deep
+// as it takes to put the tail `kSendUnderVoiceDb` under the voice there (from the drop's spectra, both
+// after their trims, before the duck), between kSendDuckMinDb (the room still breathes with the phrases)
+// and kSendDuckMaxDb.
+struct SendDuck
+{
+    bool valid = false;  // both spectra known and the voice plays in its range
+    double hz = 2500.0;  // bell centre
+    double q = 0.8;      // about two octaves
+    double depthDb = kSendDuckDb;
+    double tailVsVoiceDb = 0.0; // the send against the voice, 1-5 kHz, before the duck
+};
+constexpr double kSendUnderVoiceDb = 12.0;
+constexpr double kSendDuckMinDb = 2.0;
+constexpr double kSendDuckMaxDb = 8.0;
+SendDuck planSendDuck(const SpectrumAnalyzer::Bands& sendDb, const SpectrumAnalyzer::Bands& voiceDb);
 
 } // namespace ma
