@@ -68,6 +68,22 @@ struct Biquad
         return f;
     }
 
+    // RBJ cookbook band-pass, 0 dB at the centre.
+    static Biquad bandPass(double sampleRate, double hz, double q)
+    {
+        constexpr double kPi = 3.14159265358979323846;
+        const double w = 2.0 * kPi * hz / sampleRate;
+        const double alpha = std::sin(w) / (2.0 * q);
+        const double a0 = 1.0 + alpha;
+        Biquad f;
+        f.b0 = alpha / a0;
+        f.b1 = 0.0;
+        f.b2 = -alpha / a0;
+        f.a1 = -2.0 * std::cos(w) / a0;
+        f.a2 = (1.0 - alpha) / a0;
+        return f;
+    }
+
     // Complex response at `hz`.
     std::complex<double> response(double hz, double sampleRate) const
     {

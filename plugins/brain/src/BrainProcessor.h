@@ -4,6 +4,7 @@
 
 #include <map>
 #include "ma/ChainPlanner.h"
+#include "ma/Pan.h"
 #include "ma/StereoPlanner.h"
 #include "ma/StemReference.h"
 #include "ma/CorrelationMeter.h"
@@ -177,13 +178,17 @@ struct Proposal
             clipper,
             evener,
             stereo,
-            saturation // phase 13
+            saturation, // phase 13
+            dynamicEq, // phase 32: dynamic bands and the vocal rider
+            pan        // phase 33
         };
         ChainTool tool = ChainTool::none; // with Action::solver unused
         ma::CleanupSettings cleanup {};
         ma::CompressorSettings compressor {};
         ma::ClipperSettings clipper {};
         ma::BassEvenerSettings evener {};
+        ma::DynamicEqSettings dynamicEq {}; // phase 32
+        ma::PanSettings pan {};             // phase 33
         ma::StereoSettings stereo {};
         ma::SaturationSettings saturation {};
 
@@ -554,6 +559,15 @@ private:
     std::map<std::uint64_t, ToolNoteSet> toolWhy, lastToolNotes;
     std::map<std::uint64_t, ma::ChainPlan> lastPlans;   // whole-mix analysis only
     std::map<std::uint64_t, ma::StereoPlan> lastStereoPlans;
+    // Phase 33: each channel's place from the last whole-mix analysis, with its partner's name.
+    struct PanNote
+    {
+        ma::PanPlan plan;
+        juce::String partner;
+        double inputBalanceDb = 0.0;
+    };
+    std::map<std::uint64_t, PanNote> lastPanPlans;
+    ma::PanResult lastPanResult;
     std::int64_t lastNotesMs = 0, lastApplyMs = 0;
     bool lastNotesWholeMix = false;
     void noteTool(std::uint64_t owner, int toolBit, ma::bus::ToolDecision decision, const juce::String& text);

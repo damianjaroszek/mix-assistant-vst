@@ -92,7 +92,7 @@ private:
     juce::Label chainTitle, cleanLabel, compLabel, clipLabel, evenLabel;
     // Phase 23: per tool (bit order of ma::bus::ToolBit) whether the Brain set it, it was changed by hand
     // since, or it was set by hand only.
-    std::array<juce::Label, 11> origins;
+    std::array<juce::Label, ma::bus::kToolCount> origins;
     juce::Label& origin(int bit);
     void updateOrigins();
     juce::Label hpfLabel, monoLabel, mudFreqLabel, mudGainLabel;
@@ -107,6 +107,9 @@ private:
     // Phase 26: the width slider.
     juce::Label widthLabel, widthFromLabel, widthStatusLabel, widthMonoMark, widthNeutralMark, widthMaxMark;
     juce::Slider widthSlider, widthFromSlider;
+    // Phase 33: the pan.
+    juce::Label panLabel, panMonoLabel, panStatus;
+    juce::Slider panSlider, panMonoSlider;
     ma::ui::CoherenceView stereoView;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> compOnAttachment, clipOnAttachment, evenOnAttachment;
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>> chainAttachments;
@@ -126,8 +129,22 @@ private:
     void updateDuckStatus();
     void updateUnmaskStatus();
 
+    // Phase 32: the dynamic bands and the vocal rider.
+    juce::Label dynamicTitle, dynamicIntro, riderLabel, riderStatus, dynamicDecision;
+    std::array<juce::Label, ma::kDynamicBands> dynamicLabels, dynamicStatus;
+    std::array<juce::ToggleButton, ma::kDynamicBands> dynamicOnButtons;
+    std::array<juce::Label, ma::kDynamicBands> dynamicFreqLabels, dynamicThresholdLabels, dynamicRangeLabels;
+    std::array<juce::Slider, ma::kDynamicBands> dynamicFreqSliders, dynamicThresholdSliders, dynamicRangeSliders;
+    juce::ToggleButton riderOnButton;
+    juce::Label riderTargetLabel, riderRangeLabel;
+    juce::Slider riderTargetSlider, riderRangeSlider;
+    std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>> dynamicButtonAttachments;
+    void updateDynamicStatus();
+    void updatePanStatus();
+    void layoutDynamics(juce::Rectangle<int> area);
+
     // Fixed window: a header plus one tab of controls at a time.
-    ma::ui::Page levelPage, eqPage, tonePage, chainPage, stereoPage, decisionsPage;
+    ma::ui::Page levelPage, eqPage, tonePage, chainPage, dynamicsPage, stereoPage, decisionsPage;
     BrainDecisionsView decisionsView; // phase 31
     juce::Label toneDecisions;        // phase 31: the Brain's word on the three tone tools, under them
     juce::TooltipWindow tooltipWindow { this, 500 }; // without one no tooltip in the editor ever showed

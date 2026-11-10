@@ -3221,6 +3221,93 @@ bool sameCompressor(const ma::CompressorSettings& a, const ma::CompressorSetting
            && std::abs(a.releaseMs - b.releaseMs) < 5.0f && std::abs(a.makeupDb - b.makeupDb) < 0.3f;
 }
 
+// Phase 32: the same dynamic EQ, within what a parameter round trip and a re-measure change.
+bool sameDynamicEq(const ma::DynamicEqSettings& a, const ma::DynamicEqSettings& b)
+{
+    for (int k = 0; k < ma::kDynamicBands; ++k)
+    {
+        const auto& x = a.bands[static_cast<size_t>(k)];
+        const auto& y = b.bands[static_cast<size_t>(k)];
+        if (ma::dynamicBandOn(x) != ma::dynamicBandOn(y))
+            return false;
+        if (ma::dynamicBandOn(x) && (std::abs(x.thresholdDb - y.thresholdDb) > 1.0f || std::abs(x.rangeDb - y.rangeDb) > 0.5f
+                                     || std::abs(std::log2(x.hz / std::max(y.hz, 1.0f))) > 0.1f))
+            return false;
+    }
+    if (ma::riderOn(a.rider) != ma::riderOn(b.rider))
+        return false;
+    return !ma::riderOn(a.rider) || (std::abs(a.rider.targetDb - b.rider.targetDb) < 1.0f && std::abs(a.rider.rangeDb - b.rider.rangeDb) < 0.5f);
+}
+
+juce::String dynamicBandName(int probe)
+{
+    switch (static_cast<ma::DynamicProbe>(probe))
+    {
+        case ma::DynamicProbe::boom: return pl("dudnienie ");
+        case ma::DynamicProbe::harsh: return pl("ostrość ");
+        case ma::DynamicProbe::sibilance: return pl("de-esser ");
+    }
+    return {};
+}
+
+juce::String dynamicEqText(const ma::ChainPlan& plan)
+{
+    juce::StringArray parts;
+    for (int p = 0; p < ma::kDynamicBands; ++p)
+    {
+        const auto& band = plan.dynamicEq.bands[static_cast<size_t>(p)];
+        if (!ma::dynamicBandOn(band))
+            continue;
+        parts.add(dynamicBandName(p) + hzText(band.hz) + pl(" do -") + juce::String(band.rangeDb, 1)
+                  + pl(" dB, tylko gdy wystaje (w szczytach ") + juce::String(plan.probeSpikeDb[static_cast<size_t>(p)], 1)
+                  + pl(" dB ponad zwykły poziom)") + (plan.probeCoversImportant[static_cast<size_t>(p)] ? pl(", zasłania tam ważniejszy kanał") : juce::String()));
+    }
+    if (ma::riderOn(plan.dynamicEq.rider))
+        parts.add(pl("rider ±") + juce::String(plan.dynamicEq.rider.rangeDb, 1) + pl(" dB (frazy różnią się o ")
+                  + juce::String(plan.riderSpreadDb, 1) + pl(" dB), przed kompresorem"));
+    return parts.isEmpty() ? pl("dynamiczne EQ wyłączone: nic już nie wystaje chwilami") : pl("dynamiczne EQ: ") + parts.joinIntoString("; ");
+}
+
+// Phase 33: why a channel stays in the centre, and where it goes.
+juce::String panReasonText(ma::PanPlan::Reason reason, double inputBalanceDb)
+{
+    using R = ma::PanPlan::Reason;
+    switch (reason)
+    {
+        case R::centreRole: return pl("stopa, bas, busy i wysyłki trzymają środek");
+        case R::mainPart: return pl("główny wokal albo lead trzyma środek");
+        case R::prePanned:
+            return pl("wejście już przechyla się w ") + (inputBalanceDb > 0.0 ? pl("lewo") : pl("prawo")) + " o "
+                   + juce::String(std::abs(inputBalanceDb), 1) + pl(" dB, to panorama producenta");
+        case R::wide: return pl("kanał jest już szeroki, przesunięcie tylko by go przechyliło");
+        case R::quiet: return pl("za cichy w miksie, żeby jego miejsce coś zmieniało");
+        case R::alone: return pl("nie ma go czym zrównoważyć po drugiej stronie, więc zostaje w środku");
+        case R::user: return pl("panorama ustawiona ręcznie w Agencie");
+        case R::paired:
+        case R::balance:
+        case R::none: break;
+    }
+    return {};
+}
+
+juce::String panText(const ma::PanPlan& plan, const juce::String& partner, double inputBalanceDb)
+{
+    const double p = plan.settings.position;
+    if (!ma::panOn(plan.settings))
+        return pl("panorama na środku: ") + panReasonText(plan.reason, inputBalanceDb);
+    auto text = pl("panorama ") + juce::String(juce::roundToInt(std::abs(p) * 100.0)) + (p < 0.0 ? pl("% w lewo") : pl("% w prawo"));
+    if (plan.reason == ma::PanPlan::Reason::paired && partner.isNotEmpty())
+        text += pl(" naprzeciw ") + partner + pl(" (grają w tym samym zakresie, wspólne ") + juce::String(juce::roundToInt(plan.overlap * 100.0))
+                + pl("% widma: rozstawione nie zasłaniają się)");
+    else
+        text += pl(", po stronie, która trzyma miks w równowadze lewo/prawo");
+    if (plan.limited)
+        text += pl(", bliżej środka, żeby miks nie przechylił się na bok");
+    if (plan.settings.monoBelowHz > 0.0f)
+        text += pl(", poniżej ") + juce::String(juce::roundToInt(plan.settings.monoBelowHz)) + pl(" Hz zostaje w środku");
+    return text;
+}
+
 juce::String stereoFixText(const ma::StereoPlan::Fix& fix)
 {
     const auto range = hzText(fix.lowHz) + pl("–") + hzText(fix.highHz);
@@ -3352,6 +3439,12 @@ void BrainProcessor::proposeWholeMix()
         in.contentConfidence = channel.data.detectedConfidence;
         for (int r = 0; r < ma::kMaxResonances; ++r)
             in.resonances[static_cast<size_t>(r)] = channel.data.resonances[r];
+        in.probesValid = channel.data.probesValid != 0;
+        for (int p = 0; p < ma::kDynamicBands; ++p)
+        {
+            in.probeP50[static_cast<size_t>(p)] = channel.data.probeP50[p];
+            in.probeP95[static_cast<size_t>(p)] = channel.data.probeP95[p];
+        }
     }
     ma::ChainContext context;
     context.bpm = tempoBpm();
@@ -3400,6 +3493,35 @@ void BrainProcessor::proposeWholeMix()
     {
         lastPlans[mix.channels[c].owner] = plans[c];
         lastStereoPlans[mix.channels[c].owner] = stereoPlans[c];
+    }
+
+    // Phase 33: every channel's place between the speakers, from the same pre-pan mid/side.
+    std::vector<ma::PanChannel> panIn(mix.channels.size());
+    for (size_t c = 0; c < mix.channels.size(); ++c)
+    {
+        const auto& channel = mix.channels[c];
+        auto& in = panIn[c];
+        in.role = chain[c].role;
+        in.priority = channel.data.priority;
+        in.valid = channel.spectrumValid && channel.stereoValid;
+        in.midDb = stereoIn[c].midDb;
+        in.sideDb = stereoIn[c].sideDb;
+        in.balanceKnown = channel.data.balanceValid != 0;
+        in.inputBalanceDb = channel.data.inputBalanceDb;
+        in.current = channel.data.pan;
+        // A pan the Brain did not set (or that was moved since) is the user's.
+        in.userPan = ma::panOn(channel.data.pan) && (channel.data.brainTools & ma::bus::toolPan) == 0;
+    }
+    lastPanResult = ma::planPan(panIn);
+    lastPanPlans.clear();
+    for (size_t c = 0; c < mix.channels.size(); ++c)
+    {
+        PanNote note;
+        note.plan = lastPanResult.plans[c];
+        note.inputBalanceDb = panIn[c].inputBalanceDb;
+        if (note.plan.partner >= 0 && note.plan.partner < static_cast<int>(mix.channels.size()))
+            note.partner = quoted(mix.channels[static_cast<size_t>(note.plan.partner)].name);
+        lastPanPlans[mix.channels[c].owner] = note;
     }
 
     // Collisions, kick and bass, translation: the usual proposal, made on the mix as it will
@@ -3634,6 +3756,22 @@ void BrainProcessor::proposeWholeMix()
                 chainItems.push_back(item);
             }
         }
+
+        // Phase 32: dynamic bands and the rider where the plan looks after them; a setting the Brain
+        // made and the plan no longer wants goes off, one the user made stays.
+        if (plan.dynamicConsidered && !intentional)
+        {
+            const auto& have = channel.data.dynamicEq;
+            const bool brainMade = (channel.data.brainTools & ma::bus::toolDynamicEq) != 0;
+            const bool wantOn = ma::dynamicEqOn(plan.dynamicEq);
+            if ((wantOn && !sameDynamicEq(plan.dynamicEq, have)) || (!wantOn && ma::dynamicEqOn(have) && brainMade))
+            {
+                item.tool = Proposal::Item::ChainTool::dynamicEq;
+                item.dynamicEq = plan.dynamicEq;
+                item.text = name + dynamicEqText(plan);
+                chainItems.push_back(item);
+            }
+        }
     }
     for (size_t c = 0; c < mix.channels.size(); ++c)
     {
@@ -3667,6 +3805,25 @@ void BrainProcessor::proposeWholeMix()
         for (const auto& fix : stereoPlan.fixes)
             parts.add(stereoFixText(fix));
         item.text = quoted(channel.name) + ": " + (parts.isEmpty() ? pl("mid-side EQ wyłączony, faza jest w porządku") : parts.joinIntoString("; "));
+        chainItems.push_back(item);
+    }
+    // Phase 33: the places that differ from where the channels sit now.
+    for (const auto& channel : mix.channels)
+    {
+        const auto note = lastPanPlans.find(channel.owner);
+        if (note == lastPanPlans.end() || !note->second.plan.considered || note->second.plan.reason == ma::PanPlan::Reason::user)
+            continue;
+        const auto& want = note->second.plan.settings;
+        const auto& have = channel.data.pan;
+        if (std::abs(want.position - have.position) < 0.025f
+            && (!ma::panOn(want) || std::abs(want.monoBelowHz - have.monoBelowHz) < 2.5f))
+            continue;
+        Proposal::Item item;
+        item.action = Proposal::Item::Action::chain;
+        item.tool = Proposal::Item::ChainTool::pan;
+        item.owner = channel.owner;
+        item.pan = want;
+        item.text = quoted(channel.name) + ": " + panText(note->second.plan, note->second.partner, note->second.inputBalanceDb);
         chainItems.push_back(item);
     }
 
@@ -3969,6 +4126,13 @@ Proposal::Verdict BrainProcessor::judge(size_t index, const ma::ChainPlan& plan,
 
     if (plan.evener.on > 0.5f)
         verdict.reasons.add(pl("Linia basu wokół ") + noteName(plan.evener.referenceHz) + pl(": niskie nuty wyrównane dla ucha."));
+    if (ma::dynamicEqOn(plan.dynamicEq))
+        verdict.reasons.add(pl("Dynamiczne EQ: ") + dynamicEqText(plan).fromFirstOccurrenceOf(": ", false, false) + ".");
+    if (const auto pan = lastPanPlans.find(channel.owner);
+        pan != lastPanPlans.end() && pan->second.plan.considered && ma::panOn(pan->second.plan.settings))
+        verdict.reasons.add(pl("Panorama: ") + panText(pan->second.plan, pan->second.partner, pan->second.inputBalanceDb)
+                                                   .fromFirstOccurrenceOf(pl("panorama "), false, false)
+                            + ".");
 
     // Its place in the mix: what still covers it, and the fixes on the way.
     for (const auto& issue : mix.masking.issues)
@@ -4073,6 +4237,10 @@ Proposal::Verdict BrainProcessor::judge(size_t index, const ma::ChainPlan& plan,
             tool = ma::bus::toolSaturation;
         else if (reason.startsWith(pl("Ustępuje ")))
             tool = ma::bus::toolUnmask;
+        else if (reason.startsWith(pl("Dynamiczne EQ: ")))
+            tool = ma::bus::toolDynamicEq;
+        else if (reason.startsWith(pl("Panorama: ")))
+            tool = ma::bus::toolPan;
         verdict.reasonTools.push_back(tool);
     }
     return verdict;
@@ -4241,7 +4409,7 @@ void BrainProcessor::buildToolNotes(bool wholeMix)
         if (!wholeMix || plan == lastPlans.end())
         {
             for (const int bit : { ma::bus::toolCleanup, ma::bus::toolCompressor, ma::bus::toolClipper, ma::bus::toolEvener,
-                                   ma::bus::toolSaturation, ma::bus::toolStereo })
+                                   ma::bus::toolSaturation, ma::bus::toolStereo, ma::bus::toolPan })
                 if (!has(bit))
                     set(bit, D::notChecked, notInScope);
         }
@@ -4326,6 +4494,34 @@ void BrainProcessor::buildToolNotes(bool wholeMix)
             else
                 set(ma::bus::toolSaturation, D::notNeeded, saturationText(p).fromFirstOccurrenceOf(": ", false, false));
 
+            // Phase 32: dynamic bands and the rider.
+            if (const auto* item = chainItem(Tool::dynamicEq))
+                set(ma::bus::toolDynamicEq, D::proposed, strip(item->text));
+            else if (intentional)
+                set(ma::bus::toolDynamicEq, D::yours, pl("„Celowy przester”: brzmienie zostawiam tak, jak jest"));
+            else if (!p.dynamicConsidered)
+            {
+                const auto why = percussive ? pl("stopa i perkusja: uderzenia mają wystawać, dynamiczne EQ by je przytępiło")
+                                 : role == ma::Role::bass ? pl("bas: dół trzymają kompresor i wyrównanie nut, nie dynamiczne pasma")
+                                 : role == ma::Role::effects || role == ma::Role::send || bus
+                                     ? pl("efekty, wysyłki i busy to Twoje brzmienie, ich nie ruszam")
+                                     : pl("brak pomiaru chwilowych pasm: kliknij „Naucz poziom” w Agencie, gdy partia gra");
+                set(ma::bus::toolDynamicEq, role == ma::Role::vocal || role == ma::Role::lead || role == ma::Role::pad || role == ma::Role::other
+                                                ? D::notChecked : D::notNeeded, why);
+            }
+            else if (ma::dynamicEqOn(p.dynamicEq))
+                set(ma::bus::toolDynamicEq, D::kept, dynamicEqText(p).fromFirstOccurrenceOf(": ", false, false));
+            else
+            {
+                juce::StringArray why;
+                for (int k = 0; k < ma::kDynamicBands; ++k)
+                    if (p.probeBuried[static_cast<size_t>(k)])
+                        why.add(dynamicBandName(k).trim() + pl(" wystaje chwilami, ale miks zakrywa ten zakres"));
+                why.add(role == ma::Role::vocal ? pl("sybilanty, ostrość i dudnienie nie wystają chwilami ponad zwykły poziom; frazy są równe")
+                                                : pl("ostrość nie wystaje chwilami ponad zwykły poziom (sybilanty i rider są dla wokalu)"));
+                set(ma::bus::toolDynamicEq, D::notNeeded, why.joinIntoString("; "));
+            }
+
             // Phase 31: the enhancer on a thin bass, or why the plan picked saturation instead.
             if (!intentional && role == ma::Role::bass && p.saturationConsidered)
             {
@@ -4363,6 +4559,20 @@ void BrainProcessor::buildToolNotes(bool wholeMix)
             else
                 set(ma::bus::toolStereo, D::notNeeded, keyedStems.valid() ? pl("każde pasmo w fazie, szerokość jak w referencjach")
                                                                           : pl("każde pasmo w fazie, nic do zmiany"));
+
+            // Phase 33: the pan.
+            const auto pan = lastPanPlans.find(channel.owner);
+            if (pan == lastPanPlans.end() || !pan->second.plan.considered)
+                set(ma::bus::toolPan, D::notChecked, pl("brak pomiaru stereo (kanał mono albo Agent jeszcze nie wysłał danych)"));
+            else if (pan->second.plan.reason == ma::PanPlan::Reason::user)
+                set(ma::bus::toolPan, D::yours, pl("panorama ustawiona ręcznie (") + juce::String(juce::roundToInt(channel.data.pan.position * 100.0f))
+                                                    + pl("%), Mózg jej nie zmienia, ale liczy ją w równowadze miksu"));
+            else if (const auto* item = chainItem(Tool::pan))
+                set(ma::bus::toolPan, D::proposed, strip(item->text));
+            else if (ma::panOn(pan->second.plan.settings))
+                set(ma::bus::toolPan, D::kept, panText(pan->second.plan, pan->second.partner, pan->second.inputBalanceDb));
+            else
+                set(ma::bus::toolPan, D::notNeeded, panReasonText(pan->second.plan.reason, pan->second.inputBalanceDb));
         }
 
         // Duck under the kick.
@@ -4493,6 +4703,8 @@ std::vector<Proposal::Verdict> BrainProcessor::verdictsNow() const
             case ma::bus::toolEvener: return Tool::evener;
             case ma::bus::toolStereo: return Tool::stereo;
             case ma::bus::toolSaturation: return Tool::saturation;
+            case ma::bus::toolDynamicEq: return Tool::dynamicEq;
+            case ma::bus::toolPan: return Tool::pan;
             default: return Tool::none;
         }
     };
@@ -5592,8 +5804,10 @@ int BrainProcessor::applySelected(bool refining)
         auto compressor = channel.data.compressor;
         auto clipper = channel.data.clipper;
         auto evener = channel.data.evener;
+        auto dynamicEq = channel.data.dynamicEq;
         auto stereoEq = channel.data.stereo;
         auto saturation = channel.data.saturation;
+        auto pan = channel.data.pan;
         // Phase 30: the dips go along as the Agent has them, unless the proposal sets one.
         std::array<ma::UnmaskSettings, ma::kMaxUnmask> unmask {};
         std::array<std::uint64_t, ma::kMaxUnmask> unmaskKey {};
@@ -5636,6 +5850,8 @@ int BrainProcessor::applySelected(bool refining)
                     case Proposal::Item::ChainTool::evener: evener = item.evener; break;
                     case Proposal::Item::ChainTool::stereo: stereoEq = item.stereo; break;
                     case Proposal::Item::ChainTool::saturation: saturation = item.saturation; break;
+                    case Proposal::Item::ChainTool::dynamicEq: dynamicEq = item.dynamicEq; break;
+                    case Proposal::Item::ChainTool::pan: pan = item.pan; break;
                     case Proposal::Item::ChainTool::none: break;
                 }
                 dynamicChanges = true;
@@ -5681,6 +5897,11 @@ int BrainProcessor::applySelected(bool refining)
         command.evener = evener;
         command.stereo = stereoEq;
         command.saturation = saturation;
+        // The rider's target is a level at its input: it moves with the channel's gain, its bands are relative.
+        if (ma::riderOn(dynamicEq.rider))
+            dynamicEq.rider.targetDb = static_cast<float>(juce::jlimit(-60.0, 0.0, dynamicEq.rider.targetDb + levelGain));
+        command.dynamicEq = dynamicEq;
+        command.pan = pan;
         command.inputShiftDb = inMixSums(channel) ? 0.0f : static_cast<float>(levelGain);
         for (int d = 0; d < ma::kMaxUnmask; ++d)
         {
@@ -5811,6 +6032,25 @@ void BrainProcessor::updateRefine(std::uint64_t now)
     if (left == 0 || refine.roundsLeft <= 0 || repeating)
     {
         refine.active = false;
+        // mixcheck: the last round's other changes (levels, EQ, a vocal rider) can lift the peak past what
+        // its give-back left as margin. The rounds end inside the ceiling: only the analysis's own ceiling
+        // cut goes out then, everything else stays as it is.
+        const double peak = truePeakDb();
+        const auto cut = std::find_if(currentProposal.items.begin(), currentProposal.items.end(), [](const auto& i) {
+            return !i.advisory && i.action == Proposal::Item::Action::solver && i.change.kind == ma::SolverChange::Kind::globalGain
+                   && i.change.gainDb < 0.0;
+        });
+        if (std::isfinite(peak) && peak > peakCeilingDb() && cut != currentProposal.items.end())
+        {
+            for (auto& item : currentProposal.items)
+                item.selected = &item == &*cut ? true : item.inPlace;
+            const double cutDb = cut->change.gainDb;
+            applySelected(true);
+            refine.status = pl("Dopracowane (") + juce::String(refine.round) + (refine.round == 1 ? pl(" runda") : pl(" rundy"))
+                            + pl("). Szczyt wyszedł ") + juce::String(peak, 1) + pl(" dBTP, ponad limit pre-master: ściszyłem wszystko o ")
+                            + juce::String(-cutDb, 1) + pl(" dB.");
+            return;
+        }
         if (left == 0)
             refine.status = refine.round == 0 ? pl("Efekt zmierzony: nic więcej do zmiany.")
                                               : pl("Dopracowane (") + juce::String(refine.round)

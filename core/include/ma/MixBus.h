@@ -5,6 +5,8 @@
 #include "Stereo.h"
 #include "ChannelEq.h"
 #include "Ducker.h"
+#include "DynamicEq.h"
+#include "Pan.h"
 #include "Harmonics.h"
 #include "Saturator.h"
 #include "Transient.h"
@@ -28,7 +30,7 @@ namespace ma::bus
 {
 
 constexpr std::uint32_t kMagic = 0x4D414255; // "MABU"
-constexpr std::uint32_t kVersion = 17; // phase 31: the Brain's decision per tool (ToolNotes)
+constexpr std::uint32_t kVersion = 19; // phase 33: the Agent's pan
 constexpr int kMaxSlots = 128;
 constexpr int kNameLength = 48;
 constexpr int kBands = 40;            // ERB bands, as SpectrumAnalyzer with BandScale::erb
@@ -119,6 +121,18 @@ struct AgentData
     float unmaskReductionDb[kMaxUnmask];   // most each dip took, about the last second
     std::uint64_t duckKey;                 // the duck's key without a cable (the kick's keyId), 0 = cable only
     std::int32_t duckKeyFound;             // that Agent runs and the duck listens to it (no cable signal)
+    // Phase 32: dynamic bands and the rider, the Learn probes (DynamicProbe order, band minus the whole
+    // part while it plays, dB) and the meters (about the last second).
+    DynamicEqSettings dynamicEq;
+    std::int32_t probesValid;
+    float probeP50[kDynamicBands];
+    float probeP95[kDynamicBands];
+    float dynamicReductionDb[kDynamicBands];
+    float riderGainDb;
+    // Phase 33: the Agent's pan, and how its input leans (left minus right above 150 Hz, dB).
+    PanSettings pan;
+    std::int32_t balanceValid;
+    float inputBalanceDb;
 };
 
 // Phase 23: the tools of an Agent, for AgentData::brainTools / changedTools.
@@ -134,7 +148,9 @@ enum ToolBit : std::int32_t
     toolDuck = 1 << 7,
     toolHarmonics = 1 << 8,
     toolTransients = 1 << 9,
-    toolUnmask = 1 << 10 // phase 30
+    toolUnmask = 1 << 10, // phase 30
+    toolDynamicEq = 1 << 11, // phase 32: dynamic bands and the rider
+    toolPan = 1 << 12        // phase 33
 };
 
 // Note lengths for a tempo-synced duck release, indexed by AgentData::duckSync.
@@ -179,6 +195,8 @@ struct Command
     UnmaskSettings unmask[kMaxUnmask];
     std::uint64_t unmaskKey[kMaxUnmask];
     std::uint64_t duckKey; // the duck listens to this Agent when no cable brings a sidechain
+    DynamicEqSettings dynamicEq; // phase 32
+    PanSettings pan;             // phase 33
 };
 
 // Phase 30: an Agent's output envelope per octave band, written from its audio thread every block
@@ -196,7 +214,7 @@ struct KeyFeed
 // analysis, so the Agent can say "the Brain looked at this and left it off, because ..." instead of
 // leaving the user to guess whether it was considered at all. Written by the Brain under its own
 // sequence lock, read by the Agent's timer; the text is the reason, UTF-8, the Agent adds the verdict.
-constexpr int kToolCount = 11;
+constexpr int kToolCount = 13;
 constexpr int kNoteLength = 384;
 enum class ToolDecision : std::int32_t
 {

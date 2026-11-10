@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ChannelChain.h"
+#include "DynamicEq.h"
 #include "SpectrumAnalyzer.h"
 
 #include <array>
@@ -50,6 +51,10 @@ public:
         // Phase 14: the pitch a hit's low tail settles on (150-300 ms after onsets, 30-130 Hz,
         // median in 10-cent steps): a kick's tuning. 0 = no hits with a pitched tail.
         double tailPitchHz = 0.0;
+        // Phase 32: each probe range (DynamicProbe order) against the whole part, 20 ms at a time
+        // while it plays (dB, band minus mid): the usual share and the moments it sticks out.
+        std::array<double, kDynamicBands> probeP50 {}, probeP95 {};
+        bool probesValid = false;
         bool valid = false;
     };
     Summary summary() const;
@@ -81,6 +86,13 @@ private:
     long long noteHops = 0;
     std::array<long long, 253> tailHistogram {}; // hops per tail pitch, 10 cents from 30 Hz (to ~130 Hz)
     long long tailHops = 0;
+    // Phase 32: probe ranges for the dynamic EQ.
+    std::array<Biquad, kDynamicBands> probeFilters {};
+    std::array<double, kDynamicBands> hopProbe {};
+    std::array<std::array<double, 4>, kDynamicBands> lastProbe {};
+    std::array<double, 4> lastMid {};
+    std::array<std::array<long long, 160>, kDynamicBands> probeHistogram {}; // 0.5 dB steps from -60 dB
+    long long probeHops = 0;
 };
 
 struct RoleGuess

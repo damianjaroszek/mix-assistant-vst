@@ -23,6 +23,11 @@ constexpr double kMaxTonalNotchDb = 4.0; // ... a tonal part loses its character
 constexpr double kMaxTonalResonanceQ = 8.0;
 constexpr double kBuriedResonanceDb = -15.0; // this far under the rest in its band, nobody hears it ring
 constexpr double kThinMarginDb = 3.0;         // overtones this far under the role's target ask for saturation
+constexpr double kMinDynamicSpikeDb = 6.0;    // phase 32: a probe this far over its usual share at moments
+constexpr double kMinSibilanceSpikeDb = 8.0;  // esses stick out a lot by nature; a dull voice's s does not need a de-esser
+constexpr double kMinProbeShareDb = -20.0;    // ... and loud enough against the whole part to be heard
+constexpr double kMinRiderSpreadDb = 4.0;     // a vocal whose middle phrases sit this far over its quiet ones
+constexpr double kMaxRiderRangeDb = 4.0;
 constexpr double kMaxOvertonesDb = -6.0;      // the saturator adds no more than this: past it, it is audible distortion
 constexpr double kMaskingStep = 0.05;         // a rise in masking of a more important channel this big counts ...
 constexpr double kMaskingFloor = 0.2;
@@ -732,6 +737,81 @@ std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& input, const 
         plan.glue = true;
         plan.glueReductionDb = compressorReductionDb(comp, c.levelP95);
         plan.spreadAfterDb = c.levelP95 - plan.glueReductionDb - (c.levelP10 - compressorReductionDb(comp, c.levelP10));
+    }
+
+    // 6. Phase 32: problems that come and go. A probe range that sticks out of the part at moments
+    // (P95 well over P50) gets a dynamic band that cuts only then, where the mix hears that range;
+    // deeper where it covers a more important channel. A static cut would dull every other moment.
+    for (size_t i = 0; i < count; ++i)
+    {
+        const auto& c = channels[i];
+        auto& plan = plans[i];
+        if (!c.valid || c.intentionalDrive || !c.hasStats || !c.probesValid)
+            continue;
+        const bool vocal = c.role == Role::vocal;
+        const bool tonal = vocal || c.role == Role::lead || c.role == Role::pad || c.role == Role::other;
+        if (!tonal)
+            continue;
+        plan.dynamicConsidered = true;
+        for (int p = 0; p < kDynamicBands; ++p)
+        {
+            const auto probe = static_cast<DynamicProbe>(p);
+            // Sibilance and proximity boom are a voice's; harshness any tonal part's.
+            if (probe != DynamicProbe::harsh && !vocal)
+                continue;
+            const auto at = static_cast<size_t>(p);
+            const double spike = c.probeP95[at] - c.probeP50[at];
+            plan.probeSpikeDb[at] = spike;
+            const double minSpike = probe == DynamicProbe::sibilance ? kMinSibilanceSpikeDb : kMinDynamicSpikeDb;
+            if (spike < minSpike || c.probeP95[at] < kMinProbeShareDb)
+                continue;
+            const double hz = dynamicProbeHz(p);
+            int band = 0;
+            for (int b = 1; b < kBands; ++b)
+                if (std::abs(std::log2(centre(b) / hz)) < std::abs(std::log2(centre(band) / hz)))
+                    band = b;
+            const auto bandAt = static_cast<size_t>(band);
+            const double own = c.bandsDb[bandAt] + cleanupResponseDb(plan.cleanup, hz);
+            double others = 0.0;
+            bool coversImportant = false;
+            for (size_t j = 0; j < count; ++j)
+            {
+                if (j == i || !channels[j].valid)
+                    continue;
+                const double level = channels[j].bandsDb[bandAt] + cleanupResponseDb(plans[j].cleanup, hz);
+                others += power(level);
+                if (channels[j].priority < c.priority && level > -100.0 && own >= level - 6.0)
+                    coversImportant = true;
+            }
+            // The moments it sticks out are spike dB over its usual level there.
+            if (own + spike - toDb(others) < kBuriedResonanceDb)
+            {
+                plan.probeBuried[at] = true;
+                continue;
+            }
+            plan.probeCoversImportant[at] = coversImportant;
+            auto& d = plan.dynamicEq.bands[at];
+            d = dynamicProbeBand(p);
+            d.on = 1.0f;
+            d.thresholdDb = static_cast<float>(std::round(std::max(c.probeP50[at] + 3.0, c.probeP95[at] - 5.0) * 2.0) / 2.0);
+            const double maxRange = probe == DynamicProbe::sibilance ? 6.0 : 4.0;
+            d.rangeDb = static_cast<float>(std::round(std::min(maxRange, spike / 2.0 + (coversImportant ? 1.5 : 0.0)) * 2.0) / 2.0);
+        }
+        // The rider: a vocal whose phrases sit at different levels is evened before the compressor,
+        // which then only holds the syllables. Quiet bars on purpose (P50 - P10 beyond 12 dB) are
+        // the arrangement's, not the rider's: it only takes the first few dB.
+        if (vocal && c.levelP50 > -100.0 && c.levelP10 > -100.0)
+        {
+            plan.riderSpreadDb = c.levelP50 - c.levelP10;
+            if (plan.riderSpreadDb >= kMinRiderSpreadDb)
+            {
+                auto& r = plan.dynamicEq.rider;
+                r.on = 1.0f;
+                r.targetDb = static_cast<float>(std::round(c.levelP50 * 2.0) / 2.0);
+                r.rangeDb = static_cast<float>(std::round(std::min(kMaxRiderRangeDb, plan.riderSpreadDb / 2.0) * 2.0) / 2.0);
+                r.speedMs = 250.0f;
+            }
+        }
     }
     return plans;
 }

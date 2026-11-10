@@ -93,6 +93,9 @@ public:
         bool statsValid = false;
         double levelP10 = -200.0, levelP50 = -200.0, levelP95 = -200.0, lowNoteHz = 0.0, tailPitchHz = 0.0;
         ma::Resonances resonances {}; // narrow peaks that stood out through the passage
+        // Phase 32: the probe ranges against the whole part (ma::DynamicProbe order, dB).
+        bool probesValid = false;
+        std::array<double, ma::kDynamicBands> probeP50 {}, probeP95 {};
     };
     LearnResult lastResult() const;
     static constexpr double kLearnFloorDb = -60.0;       // a passage measured under this is too quiet to set a trim from
@@ -216,6 +219,22 @@ public:
     static constexpr const char* evenAmountId = "evenAmount";
     static constexpr const char* evenRefId = "evenRef";
     // Phase 30: giving way to other channels without a cable, set by "Analizuj" in the Brain.
+    // Phase 32: dynamic bands (boom, harshness, sibilance: their width, attack and release follow the slot)
+    // and the vocal rider.
+    static constexpr const char* dynamicIds[ma::kDynamicBands][4] { { "dyn1On", "dyn1Freq", "dyn1Threshold", "dyn1Range" },
+                                                                    { "dyn2On", "dyn2Freq", "dyn2Threshold", "dyn2Range" },
+                                                                    { "dyn3On", "dyn3Freq", "dyn3Threshold", "dyn3Range" } };
+    static constexpr const char* riderOnId = "riderOn";
+    static constexpr const char* riderTargetId = "riderTarget";
+    static constexpr const char* riderRangeId = "riderRange";
+    // Phase 33: the channel's place between the speakers (percent, -100 left .. 100 right) and the
+    // frequency under which it stays in the centre (0 = the whole signal moves).
+    static constexpr const char* panId = "pan";
+    static constexpr const char* panMonoBelowId = "panMonoBelow";
+    double inputBalanceDb() const { return inputBalance.load(); }
+    bool inputBalanceKnown() const { return balanceSeen.load(); }
+    double dynamicReductionDb(int band) const { return dynamicShown[static_cast<size_t>(band)].load(); }
+    double riderGainDb() const { return riderGain.load(); }
     static constexpr const char* unmaskIds[ma::kMaxUnmask][5] { { "unmask1On", "unmask1Freq", "unmask1Q", "unmask1Depth", "unmask1Bands" },
                                                                 { "unmask2On", "unmask2Freq", "unmask2Q", "unmask2Depth", "unmask2Bands" } };
     struct UnmaskStatus
@@ -254,6 +273,8 @@ public:
         std::array<ma::UnmaskSettings, ma::kMaxUnmask> unmask {};
         std::array<std::uint64_t, ma::kMaxUnmask> unmaskKey {};
         std::uint64_t duckKey = 0; // phase 30: the duck's key without a cable
+        ma::DynamicEqSettings dynamicEq {}; // phase 32: dynamic bands and the rider
+        ma::PanSettings pan {};             // phase 33
     };
     DynamicState currentDynamics() const;
     // Phase 23: tools the Brain set that are still as it left them, and tools changed by hand since
@@ -326,11 +347,16 @@ private:
     ma::HarmonicEnhancer harmonics;
     ma::TransientEnhancer transients;
     ma::Saturator saturator;
+    ma::DynamicEq dynamicEq;
     ma::CleanupFilter cleanup;
     ma::Compressor compressor;
     ma::Clipper clipper;
     ma::BassEvener evener;
     ma::StereoShaper stereoShaper;
+    ma::Panner panner;             // phase 33: the last stage
+    ma::BalanceMeter balanceMeter; // the input's lean
+    std::atomic<float> inputBalance { 0.0f };
+    std::atomic<bool> balanceSeen { false };
     ma::StereoAnalyzer liveStereo; // on the input, while the Brain or the editor looks
     std::array<std::atomic<float>, kBands> liveMid, liveSide;
     std::atomic<bool> stereoSeen { false };
@@ -343,8 +369,12 @@ private:
     int widthTick = 0;
     float widthPlannedFor = -1.0f, widthFromPlannedFor = -1.0f;
     std::atomic<float> compHold { 0.0f }, clipHold { 0.0f }; // dB, max since the timer last read them
+    std::array<std::atomic<float>, ma::kDynamicBands> dynamicHold {};  // phase 32: the same per dynamic band
+    std::array<std::atomic<double>, ma::kDynamicBands> dynamicShown {}; // ... the deepest over about the last second
+    std::atomic<double> riderGain { 0.0 };
     std::atomic<double> evenerGain { 0.0 }, evenerNote { 0.0 };
     std::array<float, 10> compHistory {}, clipHistory {};    // message thread: last second of maxima
+    std::array<std::array<float, 10>, ma::kDynamicBands> dynamicHistory {};
     double compShownDb = 0.0, clipShownDb = 0.0;
     ma::InstrumentFeatures learnFeatures; // audio thread while learning, read once it has finished
     ma::SpectrumAnalyzer outputSpectrum;
@@ -422,7 +452,7 @@ private:
     std::array<std::array<std::atomic<float>, 3>, ma::kEqBands> backupEqAudio {};
     // DuckSettings (8), sync, polarity, harmonics (3), transients (3), cleanup (5), compressor (7), clipper (3), evener (3)
     // stereo (12 + the widener's 3, phase 25), saturation (4), unmask (2 x 5, phase 30)
-    static constexpr int kDynamicValues = 72;
+    static constexpr int kDynamicValues = 99; // phase 32: the dynamic EQ after the dips (25), phase 33: the pan (2)
     std::array<std::atomic<float>, kDynamicValues> backupDynamicsAudio {};
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(AgentProcessor)

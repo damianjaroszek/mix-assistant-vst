@@ -6,6 +6,8 @@
 #include "ma/TonalBalance.h"
 #include "ma/Decibels.h"
 #include "ma/Ducker.h"
+#include "ma/DynamicEq.h"
+#include "ma/Pan.h"
 #include "ma/Harmonics.h"
 #include "ma/Translation.h"
 #include "ma/Transient.h"
@@ -3537,6 +3539,270 @@ void testLoudMasterClip()
     check(quiet[0].loudMasterClipDb < plans[0].loudMasterClipDb, "a relaxed limiter gives the clipping back");
 }
 
+// Phase 32: the dynamic bands cut only while their range sticks out of the part, whatever its level;
+// the rider evens phrases; the Learn probes see sibilance that comes and goes.
+void testDynamicEq()
+{
+    const double sr = 48000.0;
+    // A 500 Hz "voice" at -18 dB with 120 ms bursts of 7 kHz "s" every 600 ms (-22 dB).
+    const auto voice = [&](double gainDb, bool esses) {
+        std::vector<float> l(static_cast<size_t>(sr * 4.0));
+        const double g = std::pow(10.0, gainDb / 20.0);
+        for (size_t i = 0; i < l.size(); ++i)
+        {
+            const double t = static_cast<double>(i) / sr;
+            double x = std::pow(10.0, -18.0 / 20.0) * std::sqrt(2.0) * std::sin(2.0 * kPi * 500.0 * t);
+            if (esses && std::fmod(t, 0.6) < 0.12)
+                x += std::pow(10.0, -22.0 / 20.0) * std::sqrt(2.0) * std::sin(2.0 * kPi * 7000.0 * t);
+            l[i] = static_cast<float>(g * x);
+        }
+        return l;
+    };
+    ma::DynamicEqSettings s;
+    auto& deEss = s.bands[static_cast<size_t>(ma::DynamicProbe::sibilance)];
+    deEss.on = 1.0f;
+    deEss.hz = 7000.0f;
+    deEss.q = 1.2f;
+    deEss.thresholdDb = -20.0f;
+    deEss.rangeDb = 6.0f;
+    deEss.attackMs = 1.0f;
+    deEss.releaseMs = 50.0f;
+    const auto deepest = [&](std::vector<float> l) {
+        auto r = l;
+        ma::DynamicEq eq;
+        eq.prepare(sr);
+        eq.setSettings(s);
+        double most = 0.0;
+        for (size_t start = 0; start < l.size(); start += 512)
+        {
+            float* ch[] = { l.data() + start, r.data() + start };
+            eq.process(ch, 2, static_cast<int>(std::min<size_t>(512, l.size() - start)));
+            if (start > static_cast<size_t>(sr))
+                most = std::max(most, eq.reductionDb(static_cast<int>(ma::DynamicProbe::sibilance)));
+        }
+        return most;
+    };
+    const double withEsses = deepest(voice(0.0, true));
+    check(withEsses > 2.0, "the de-esser cuts the esses");
+    check(withEsses <= 6.05, "the de-esser stays within its range");
+    check(deepest(voice(0.0, false)) < 0.3, "without esses it leaves the voice alone");
+    check(deepest(voice(-12.0, false)) < 0.3 && deepest(voice(12.0, false)) < 0.3, "the level alone does not trigger it");
+    checkNear(deepest(voice(-10.0, true)), withEsses, 0.5, "quieter phrases are de-essed alike");
+
+    // The rider: phrases alternating -12 / -24 dB RMS every second, target -18 dB, range 6 dB.
+    {
+        std::vector<float> l(static_cast<size_t>(sr * 8.0));
+        for (size_t i = 0; i < l.size(); ++i)
+        {
+            const bool loud = (i / static_cast<size_t>(sr)) % 2 == 0;
+            l[i] = static_cast<float>(std::pow(10.0, (loud ? -12.0 : -24.0) / 20.0) * std::sqrt(2.0)
+                                      * std::sin(2.0 * kPi * 300.0 * static_cast<double>(i) / sr));
+        }
+        auto r = l;
+        ma::DynamicEqSettings rs;
+        rs.rider.on = 1.0f;
+        rs.rider.targetDb = -18.0f;
+        rs.rider.rangeDb = 6.0f;
+        rs.rider.speedMs = 150.0f;
+        ma::DynamicEq eq;
+        eq.prepare(sr);
+        eq.setSettings(rs);
+        for (size_t start = 0; start < l.size(); start += 512)
+        {
+            float* ch[] = { l.data() + start, r.data() + start };
+            eq.process(ch, 2, static_cast<int>(std::min<size_t>(512, l.size() - start)));
+        }
+        const auto rmsDb = [&](double from, double to) {
+            double sum = 0.0;
+            const auto a = static_cast<size_t>(from * sr), b = static_cast<size_t>(to * sr);
+            for (size_t i = a; i < b; ++i)
+                sum += static_cast<double>(l[i]) * l[i];
+            return 10.0 * std::log10(sum / static_cast<double>(b - a));
+        };
+        const double spread = rmsDb(6.5, 7.0) - rmsDb(7.5, 8.0);
+        check(spread < 4.0, "the rider evens the phrases (12 dB apart before)");
+        check(spread > -1.0, "the rider does not flip them");
+    }
+
+    // The Learn probes: esses that come and go stand out at P95, not at P50.
+    {
+        auto l = voice(0.0, true);
+        ma::InstrumentFeatures f;
+        f.prepare(sr);
+        const float* ch[] = { l.data(), l.data() };
+        f.process(ch, 2, static_cast<int>(l.size()));
+        const auto summary = f.summary();
+        const auto at = static_cast<size_t>(ma::DynamicProbe::sibilance);
+        check(summary.probesValid, "the probes measured the part");
+        check(summary.probeP95[at] - summary.probeP50[at] > 10.0, "the esses stick out at P95");
+        checkNear(summary.probeP95[at], -4.5, 2.5, "P95 reads the ess against the voice");
+    }
+
+    // The planner: a vocal whose esses spike gets a de-esser where the mix hears them, and a rider
+    // for phrases at different levels; the same esses under a loud cymbal-like part are left alone.
+    {
+        const auto vocalChannel = [](double sibilanceSpike) {
+            ma::ChainChannel c;
+            c.role = ma::Role::vocal;
+            c.priority = 2;
+            c.valid = c.hasStats = c.probesValid = true;
+            c.bandsDb.fill(-30.0);
+            c.levelP10 = -30.0;
+            c.levelP50 = -22.0;
+            c.levelP95 = -18.0;
+            c.truePeakDb = -8.0;
+            for (int p = 0; p < ma::kDynamicBands; ++p)
+            {
+                c.probeP50[static_cast<size_t>(p)] = -16.0;
+                c.probeP95[static_cast<size_t>(p)] = -14.0;
+            }
+            c.probeP95[static_cast<size_t>(ma::DynamicProbe::sibilance)] = -16.0 + sibilanceSpike;
+            return c;
+        };
+        auto plans = ma::planChains({ vocalChannel(12.0) });
+        const auto& deEss = plans[0].dynamicEq.bands[static_cast<size_t>(ma::DynamicProbe::sibilance)];
+        check(ma::dynamicBandOn(deEss), "spiky esses get a de-esser");
+        check(deEss.thresholdDb > -16.0f && deEss.thresholdDb < -4.0f, "the de-esser starts between the usual and the spikes");
+        check(!ma::dynamicBandOn(plans[0].dynamicEq.bands[static_cast<size_t>(ma::DynamicProbe::harsh)]), "steady upper mids are left alone");
+        check(ma::riderOn(plans[0].dynamicEq.rider), "phrases 8 dB apart get the rider");
+        check(!ma::dynamicBandOn(ma::planChains({ vocalChannel(4.0) })[0].dynamicEq.bands[static_cast<size_t>(ma::DynamicProbe::sibilance)]),
+              "gentle esses need no de-esser");
+        auto loud = vocalChannel(12.0);
+        loud.role = ma::Role::percussion;
+        loud.priority = 6;
+        loud.bandsDb.fill(-30.0);
+        for (int b = 0; b < ma::bus::kBands; ++b)
+            if (ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b) > 4000.0)
+                loud.bandsDb[static_cast<size_t>(b)] = 5.0;
+        plans = ma::planChains({ vocalChannel(12.0), loud });
+        check(!ma::dynamicBandOn(plans[0].dynamicEq.bands[static_cast<size_t>(ma::DynamicProbe::sibilance)]) && plans[0].probeBuried[2],
+              "esses buried under a much louder top end are left alone");
+        auto lead = vocalChannel(12.0);
+        lead.role = ma::Role::lead;
+        check(!ma::dynamicBandOn(ma::planChains({ lead })[0].dynamicEq.bands[2]) && !ma::riderOn(ma::planChains({ lead })[0].dynamicEq.rider),
+              "a lead gets no de-esser or rider");
+    }
+}
+
+void testPan()
+{
+    // The law: unity in the centre, constant power, silent on the far side.
+    double l = 0.0, r = 0.0;
+    ma::panGains(0.0, l, r);
+    check(std::abs(l - 1.0) < 1e-9 && std::abs(r - 1.0) < 1e-9, "pan 1");
+    ma::panGains(0.5, l, r);
+    check(std::abs(l * l + r * r - 2.0) < 1e-9 && r > l, "pan 2");
+    ma::panGains(-1.0, l, r);
+    check(std::abs(r) < 1e-9, "pan 3");
+    check(ma::panMonoLossDb(0.5) < -0.5 && ma::panMonoLossDb(0.5) > -1.0, "pan 4");
+
+    // The panner: the highs move, the low end stays in the centre, the centre is untouched.
+    const double sr = 48000.0;
+    const auto rmsRatioDb = [&](double hz, float position) {
+        std::vector<float> left(static_cast<size_t>(sr)), right(left.size());
+        for (size_t i = 0; i < left.size(); ++i)
+            left[i] = right[i] = static_cast<float>(0.25 * std::sin(2.0 * kPi * hz * static_cast<double>(i) / sr));
+        ma::Panner pan;
+        pan.prepare(sr);
+        pan.setSettings({ position, 150.0f });
+        float* ch[] = { left.data(), right.data() };
+        pan.process(ch, 2, static_cast<int>(left.size()));
+        double pl = 0.0, pr = 0.0;
+        for (size_t i = left.size() / 2; i < left.size(); ++i)
+        {
+            pl += left[i] * left[i];
+            pr += right[i] * right[i];
+        }
+        return 10.0 * std::log10(pr / pl);
+    };
+    ma::panGains(0.5, l, r);
+    check(std::abs(rmsRatioDb(2000.0, 0.5f) - 20.0 * std::log10(r / l)) < 0.3, "pan 5");
+    check(std::abs(rmsRatioDb(50.0, 0.5f)) < 0.5, "pan 6");
+    {
+        std::vector<float> left(4800), right(4800);
+        for (size_t i = 0; i < left.size(); ++i)
+            left[i] = right[i] = static_cast<float>(std::sin(0.01 * static_cast<double>(i)));
+        const auto copy = left;
+        ma::Panner pan;
+        pan.prepare(sr);
+        float* ch[] = { left.data(), right.data() };
+        pan.process(ch, 2, static_cast<int>(left.size()));
+        check(left == copy && right == copy, "pan 7");
+    }
+    // A split at 150 Hz sums flat: a centred signal through the filters keeps its level.
+    check(std::abs(rmsRatioDb(150.0, 0.0001f)) < 0.1, "pan 8");
+
+    // The input's lean.
+    {
+        std::vector<float> left(static_cast<size_t>(sr * 3)), right(left.size());
+        for (size_t i = 0; i < left.size(); ++i)
+        {
+            right[i] = static_cast<float>(0.2 * std::sin(2.0 * kPi * 1000.0 * static_cast<double>(i) / sr));
+            left[i] = 2.0f * right[i];
+        }
+        ma::BalanceMeter meter;
+        meter.prepare(sr);
+        meter.process(left.data(), right.data(), static_cast<int>(left.size()));
+        check(meter.valid() && std::abs(meter.balanceDb() - 6.02) < 0.3, "pan 9");
+    }
+
+    // Planning.
+    const auto part = [](ma::Role role, double lowHz, double highHz, double db, double sideBelowDb = 20.0) {
+        ma::PanChannel c;
+        c.role = role;
+        c.priority = ma::defaultPriority(role);
+        c.valid = true;
+        c.balanceKnown = true;
+        for (int b = 0; b < ma::bus::kBands; ++b)
+        {
+            const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+            const bool in = hz >= lowHz && hz <= highHz;
+            c.midDb[static_cast<size_t>(b)] = in ? db : -200.0;
+            c.sideDb[static_cast<size_t>(b)] = in ? db - sideBelowDb : -200.0;
+        }
+        return c;
+    };
+    std::vector<ma::PanChannel> mix { part(ma::Role::kick, 40.0, 300.0, -10.0), part(ma::Role::bass, 40.0, 400.0, -12.0),
+                                      part(ma::Role::vocal, 300.0, 5000.0, -14.0), part(ma::Role::percussion, 6000.0, 16000.0, -24.0),
+                                      part(ma::Role::percussion, 5500.0, 16000.0, -25.0) };
+    auto planned = ma::planPan(mix);
+    for (int c = 0; c < 3; ++c)
+        check(planned.plans[static_cast<size_t>(c)].considered && !ma::panOn(planned.plans[static_cast<size_t>(c)].settings), "pan 10");
+    const auto& hat1 = planned.plans[3];
+    const auto& hat2 = planned.plans[4];
+    check(hat1.reason == ma::PanPlan::Reason::paired && hat2.reason == ma::PanPlan::Reason::paired && hat1.partner == 4, "pan 11");
+    check(hat1.settings.position * hat2.settings.position < 0.0f, "pan 12");
+    check(std::abs(hat1.settings.position) >= 0.3f && std::abs(hat2.settings.position) >= 0.3f, "pan 13");
+    check(std::abs(planned.balancePlannedDb) <= ma::kMaxMixBalanceDb + 0.05, "pan 14");
+    check(std::abs(planned.worstRegionPlannedDb) <= ma::kMaxRegionBalanceDb + 0.1, "pan 15");
+    // Again with the Brain's pans in place: the same places.
+    auto again = mix;
+    again[3].current = hat1.settings;
+    again[4].current = hat2.settings;
+    const auto replanned = ma::planPan(again);
+    check(replanned.plans[3].settings.position == hat1.settings.position && replanned.plans[4].settings.position == hat2.settings.position, "pan 16");
+    check(std::abs(replanned.balanceNowDb - planned.balancePlannedDb) < 0.01, "pan 17");
+
+    // One loud pad and nothing to balance it: it stays in the centre.
+    std::vector<ma::PanChannel> lonely { part(ma::Role::kick, 40.0, 300.0, -10.0), part(ma::Role::pad, 300.0, 8000.0, -14.0) };
+    const auto alone = ma::planPan(lonely);
+    check(!ma::panOn(alone.plans[1].settings) && alone.plans[1].reason == ma::PanPlan::Reason::alone, "pan 18");
+    check(std::abs(alone.balancePlannedDb) <= ma::kMaxMixBalanceDb + 0.05, "pan 19");
+
+    // The user's pan stays, a part that arrives panned is left alone, a wide pad is not moved.
+    auto own = mix;
+    own[3].userPan = true;
+    own[3].current.position = -0.8f;
+    own[4].inputBalanceDb = -6.0;
+    own.push_back(part(ma::Role::pad, 400.0, 8000.0, -20.0, 1.0));
+    const auto kept = ma::planPan(own);
+    check(kept.plans[3].reason == ma::PanPlan::Reason::user && kept.plans[3].settings.position == -0.8f, "pan 20");
+    check(kept.plans[4].reason == ma::PanPlan::Reason::prePanned && !ma::panOn(kept.plans[4].settings), "pan 21");
+    check(kept.plans[5].reason == ma::PanPlan::Reason::wide, "pan 22");
+    std::printf("pan: hats %.2f / %.2f, balance %.2f dB (region %.2f)\n", hat1.settings.position, hat2.settings.position,
+                planned.balancePlannedDb, planned.worstRegionPlannedDb);
+}
+
 int main()
 {
     testLoudness();
@@ -3547,6 +3813,8 @@ int main()
     testEqualLoudness();
     testTrimPlan();
     testPercussionLevel();
+    testDynamicEq();
+    testPan();
     testChannelAnalyzerSpeed();
     testMixBus();
     testMasking();
