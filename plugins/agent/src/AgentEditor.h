@@ -109,6 +109,9 @@ private:
     juce::Slider widthSlider, widthFromSlider;
     // Phase 33: the pan.
     juce::Label panLabel, panMonoLabel, panStatus;
+    // Phase 34: a send's high cut.
+    juce::Label highCutLabel;
+    juce::Slider highCutSlider;
     juce::Slider panSlider, panMonoSlider;
     ma::ui::CoherenceView stereoView;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> compOnAttachment, clipOnAttachment, evenOnAttachment;

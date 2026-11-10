@@ -502,6 +502,7 @@ std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& input, const 
     {
         masking[j].valid = channels[j].valid;
         masking[j].priority = channels[j].priority;
+        masking[j].background = channels[j].role == Role::send;
         for (int b = 0; b < kBands; ++b)
             masking[j].rawDb[static_cast<size_t>(b)] = channels[j].bandsDb[static_cast<size_t>(b)] + cleanupResponseDb(plans[j].cleanup, centre(b));
     }
@@ -813,6 +814,39 @@ std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& input, const 
             }
         }
     }
+    // 7. Phase 34: depth. A send (reverb, delay) brighter than the mix less kDarkerThanMixDb gets a high
+    // cut: the dry parts keep the top, the room moves behind them.
+    for (size_t i = 0; i < count; ++i)
+    {
+        const auto& c = channels[i];
+        if (!c.valid || c.role != Role::send)
+            continue;
+        SpectrumAnalyzer::Bands send {}, rest {};
+        std::array<double, kBands> restPower {};
+        for (size_t j = 0; j < count; ++j)
+        {
+            if (j == i || !channels[j].valid || channels[j].role == Role::bus)
+                continue;
+            for (int b = 0; b < kBands; ++b)
+                restPower[static_cast<size_t>(b)] += power(channels[j].bandsDb[static_cast<size_t>(b)] + cleanupResponseDb(plans[j].cleanup, centre(b)));
+        }
+        bool restPlays = false;
+        for (int b = 0; b < kBands; ++b)
+        {
+            send[static_cast<size_t>(b)] = c.bandsDb[static_cast<size_t>(b)] + cleanupResponseDb(plans[i].cleanup, centre(b));
+            rest[static_cast<size_t>(b)] = toDb(restPower[static_cast<size_t>(b)]);
+            restPlays = restPlays || restPower[static_cast<size_t>(b)] > 0.0;
+        }
+        if (!restPlays)
+            continue;
+        auto& plan = plans[i];
+        plan.depthConsidered = true;
+        plan.sendTiltDb = topTiltDb(send);
+        plan.mixTiltDb = topTiltDb(rest);
+        if (plan.sendTiltDb > plan.mixTiltDb - kDarkerThanMixDb)
+            plan.depth.highCutHz = static_cast<float>(kSendHighCutHz);
+    }
+
     return plans;
 }
 

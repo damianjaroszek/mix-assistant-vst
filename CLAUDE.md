@@ -252,6 +252,14 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   opposite, then singles where they balance the mix; then the loudest leaning part steps back 0.05 until the mix is within 0.5 dB and
   each region (150-2k, 2-9k, 9-16k) within 1.5 dB. Part of `Command`, the A/B backup and `brainSet` (packed dynamics 99 floats, 97 =
   before phase 33), `ToolBit::toolPan`, `kToolCount` 13, `bus::kVersion` 19; Agent "Stereo" tab, Brain `ChainTool::pan`, notes, verdict.
+- Phase 34 depth (`ma/Depth.h`): `DepthSettings::highCutHz` (12 dB/oct `HighCut`, right after the cleanup; `depthResponseDb` is the
+  digital response at 48 kHz and goes into `applyCleanup`, so `bandsDb` carries it). `planChains` step 7: a `send` whose `topTiltDb`
+  (8-16 kHz minus 1-4 kHz) is above the rest of the mix's minus `kDarkerThanMixDb` 3 gets `kSendHighCutHz` 9 kHz. The Brain
+  (`proposeWholeMix`) also has every send without a cable duck the whole signal by `kSendDuckDb` 3 dB under `mainVoice()` (loudest
+  vocal, else lead; keyed over the bus, 10 ms, release 1/4 synced) and adds an advisory item with `depthTimes` (pre-delay 1/64, decay
+  half a bar, delay 1/8, dotted 1/8, 1/4); report "Głębia (pogłos, delay)" (sends vs dry 200 Hz-8 kHz, warning over -6 dB). Part of
+  `Command`, the A/B backup and `brainSet` (packed dynamics 100 floats, 99 = before phase 34), `ToolBit::toolDepth`, `kToolCount` 14,
+  `bus::kVersion` 20; Agent param `highCut` (20 kHz = off) on the "Inżynier miksu" tab. mixcheck names reverb/delay/return/send files as sends.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

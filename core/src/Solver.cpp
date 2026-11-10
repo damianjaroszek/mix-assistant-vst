@@ -24,6 +24,7 @@ std::vector<MaskingChannel> withEq(const std::vector<SolverChannel>& channels, c
     {
         out[c].priority = channels[c].priority;
         out[c].valid = channels[c].valid;
+        out[c].background = channels[c].background;
         for (int b = 0; b < numBands; ++b)
         {
             const double hz = SpectrumAnalyzer::bandCentreHz(BandScale::erb, b);

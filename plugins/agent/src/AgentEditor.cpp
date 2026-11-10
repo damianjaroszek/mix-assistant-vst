@@ -327,6 +327,10 @@ AgentEditor::AgentEditor(AgentProcessor& p)
                            "kanały: części grające w tym samym zakresie idą na przeciwne strony, a miks zostaje w równowadze lewo/prawo. "
                            "Stopa, bas, główny wokal i lead zostają w środku. Panoramę w mikserze FL zostaw na środku, "
                            "żeby Mózg wiedział, gdzie kanał gra. Dwuklik: środek."));
+    styleLabel(highCutLabel, pl("Góra do"), colours::quiet, 13.0f);
+    highCutLabel.setTooltip(pl("Cięcie góry (12 dB/okt.). Na wysyłce z pogłosem albo delayem ciemniejszy ogon stoi za suchymi "
+                               "śladami i nie rozmywa ich góry: „Analizuj” ustawia 9 kHz, gdy wysyłka jest tak jasna jak reszta miksu. "
+                               "20 kHz = wyłączone."));
     styleLabel(panMonoLabel, pl("Środek poniżej"), colours::quiet, 13.0f);
     panMonoLabel.setTooltip(pl("Poniżej tej częstotliwości kanał zostaje w środku (dół razem ze stopą i basem). 0 = przesuwa cały sygnał."));
     styleLabel(widthMonoMark, "mono", colours::quiet, 11.0f);
@@ -365,6 +369,7 @@ AgentEditor::AgentEditor(AgentProcessor& p)
         { &widthFromSlider, AgentProcessor::widthFromId },
         { &panSlider, AgentProcessor::panId },
         { &panMonoSlider, AgentProcessor::panMonoBelowId },
+        { &highCutSlider, AgentProcessor::highCutId },
     };
     for (const auto& [slider, id] : chainSliders)
     {
@@ -483,7 +488,7 @@ AgentEditor::AgentEditor(AgentProcessor& p)
          [this](auto area) { layoutTone(area); });
     page(chainPage, pl("Inżynier miksu"),
          { &chainTitle, &origins[1], &origins[2], &origins[3], &origins[4], &cleanLabel, &hpfLabel, &hpfSlider, &monoLabel, &monoSlider, &mudFreqLabel, &mudFreqSlider,
-           &mudGainLabel, &mudGainSlider, &cleanStatus, &compLabel, &compOnButton, &compThresholdLabel, &compThresholdSlider,
+           &mudGainLabel, &mudGainSlider, &highCutLabel, &highCutSlider, &cleanStatus, &compLabel, &compOnButton, &compThresholdLabel, &compThresholdSlider,
            &compRatioLabel, &compRatioSlider, &compAttackLabel, &compAttackSlider, &compReleaseLabel, &compReleaseSlider,
            &compKneeLabel, &compKneeSlider, &compMakeupLabel, &compMakeupSlider, &compStatus, &clipLabel, &clipOnButton,
            &clipCeilingLabel, &clipCeilingSlider, &clipSoftnessLabel, &clipSoftnessSlider, &clipStatus, &evenLabel,
@@ -1103,7 +1108,8 @@ void AgentEditor::layoutChain(juce::Rectangle<int> area)
     // Left: cleanup and clipper, right: compressor and evener (the chain runs cleanup, clipper, compressor, evener).
     header(area, cleanLabel, nullptr, origin(ma::bus::toolCleanup));
     for (auto [label, slider] : { std::pair { &hpfLabel, &hpfSlider }, std::pair { &monoLabel, &monoSlider },
-                                  std::pair { &mudFreqLabel, &mudFreqSlider }, std::pair { &mudGainLabel, &mudGainSlider } })
+                                  std::pair { &mudFreqLabel, &mudFreqSlider }, std::pair { &mudGainLabel, &mudGainSlider },
+                                  std::pair { &highCutLabel, &highCutSlider } })
         sliderRow(area, *label, *slider);
     statusRow(area, cleanStatus);
 

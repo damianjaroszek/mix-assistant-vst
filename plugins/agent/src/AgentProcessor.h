@@ -231,6 +231,8 @@ public:
     // frequency under which it stays in the centre (0 = the whole signal moves).
     static constexpr const char* panId = "pan";
     static constexpr const char* panMonoBelowId = "panMonoBelow";
+    // Phase 34: a send's high cut (Hz, 20000 = off).
+    static constexpr const char* highCutId = "highCut";
     double inputBalanceDb() const { return inputBalance.load(); }
     bool inputBalanceKnown() const { return balanceSeen.load(); }
     double dynamicReductionDb(int band) const { return dynamicShown[static_cast<size_t>(band)].load(); }
@@ -275,6 +277,7 @@ public:
         std::uint64_t duckKey = 0; // phase 30: the duck's key without a cable
         ma::DynamicEqSettings dynamicEq {}; // phase 32: dynamic bands and the rider
         ma::PanSettings pan {};             // phase 33
+        ma::DepthSettings depth {};         // phase 34
     };
     DynamicState currentDynamics() const;
     // Phase 23: tools the Brain set that are still as it left them, and tools changed by hand since
@@ -354,6 +357,7 @@ private:
     ma::BassEvener evener;
     ma::StereoShaper stereoShaper;
     ma::Panner panner;             // phase 33: the last stage
+    ma::HighCut highCut;           // phase 34: after the cleanup
     ma::BalanceMeter balanceMeter; // the input's lean
     std::atomic<float> inputBalance { 0.0f };
     std::atomic<bool> balanceSeen { false };
@@ -452,7 +456,7 @@ private:
     std::array<std::array<std::atomic<float>, 3>, ma::kEqBands> backupEqAudio {};
     // DuckSettings (8), sync, polarity, harmonics (3), transients (3), cleanup (5), compressor (7), clipper (3), evener (3)
     // stereo (12 + the widener's 3, phase 25), saturation (4), unmask (2 x 5, phase 30)
-    static constexpr int kDynamicValues = 99; // phase 32: the dynamic EQ after the dips (25), phase 33: the pan (2)
+    static constexpr int kDynamicValues = 100; // phase 32: the dynamic EQ after the dips (25), phase 33: the pan (2), phase 34: depth (1)
     std::array<std::atomic<float>, kDynamicValues> backupDynamicsAudio {};
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(AgentProcessor)

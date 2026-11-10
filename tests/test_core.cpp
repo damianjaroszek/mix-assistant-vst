@@ -8,6 +8,7 @@
 #include "ma/Ducker.h"
 #include "ma/DynamicEq.h"
 #include "ma/Pan.h"
+#include "ma/Depth.h"
 #include "ma/Harmonics.h"
 #include "ma/Translation.h"
 #include "ma/Transient.h"
@@ -3803,6 +3804,75 @@ void testPan()
                 planned.balancePlannedDb, planned.worstRegionPlannedDb);
 }
 
+void testDepth()
+{
+    // The high cut: as its response says, and off means untouched.
+    const double sr = 48000.0;
+    ma::DepthSettings cut;
+    cut.highCutHz = 9000.0f;
+    check(std::abs(ma::depthResponseDb(cut, 9000.0) + 3.01) < 0.05 && ma::depthResponseDb(cut, 1000.0) > -0.01, "depth: high cut response");
+    const auto throughDb = [&](double hz, const ma::DepthSettings& settings) {
+        std::vector<float> l(static_cast<size_t>(sr / 2)), r(l.size());
+        for (size_t i = 0; i < l.size(); ++i)
+            l[i] = r[i] = static_cast<float>(0.5 * std::sin(2.0 * kPi * hz * static_cast<double>(i) / sr));
+        ma::HighCut filter;
+        filter.prepare(sr);
+        filter.setSettings(settings);
+        float* ch[] = { l.data(), r.data() };
+        filter.process(ch, 2, static_cast<int>(l.size()));
+        double p = 0.0;
+        for (size_t i = l.size() / 2; i < l.size(); ++i)
+            p += l[i] * l[i];
+        return 10.0 * std::log10(p / (l.size() / 2) / 0.125);
+    };
+    check(std::abs(throughDb(14000.0, cut) - ma::depthResponseDb(cut, 14000.0)) < 0.6, "depth: the filter does what the response says");
+    check(std::abs(throughDb(14000.0, {})) < 0.01, "depth: off is untouched");
+
+    const auto times = ma::depthTimes(125.0);
+    check(times.valid && std::abs(times.preDelayMs - 30.0) < 0.01 && std::abs(times.dottedEighthMs - 360.0) < 0.01
+              && std::abs(times.quarterMs - 480.0) < 0.01 && std::abs(times.decaySeconds - 0.96) < 0.001,
+          "depth: times on the groove at 125 BPM");
+
+    // A send as bright as the dry parts gets its top cut; a dark one is left as it is.
+    std::vector<ma::ChainChannel> mix(2);
+    for (size_t i = 0; i < mix.size(); ++i)
+    {
+        mix[i].valid = true;
+        mix[i].priority = 5;
+        for (int b = 0; b < ma::bus::kBands; ++b)
+        {
+            const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+            mix[i].bandsDb[static_cast<size_t>(b)] = -20.0 - 6.0 * std::log2(std::max(1.0, hz / 1000.0)) - (i == 1 ? 15.0 : 0.0);
+        }
+    }
+    mix[0].role = ma::Role::vocal;
+    mix[1].role = ma::Role::send;
+    auto plans = ma::planChains(mix);
+    check(plans[1].depthConsidered && plans[1].depth.highCutHz > 0.0f && !plans[0].depthConsidered, "depth: a bright send gets a high cut");
+    for (int b = 0; b < ma::bus::kBands; ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        if (hz > 4000.0)
+            mix[1].bandsDb[static_cast<size_t>(b)] -= 12.0 * std::log2(hz / 4000.0);
+    }
+    {
+        // A send is never covered: the dry vocal does not give way to its own room.
+        std::vector<ma::MaskingChannel> m(2);
+        for (size_t i = 0; i < 2; ++i)
+        {
+            m[i].valid = true;
+            m[i].priority = 5;
+            m[i].rawDb.fill(i == 0 ? -20.0 : -30.0);
+        }
+        check(!ma::analyseMasking(m).issues.empty(), "depth: a quieter part is covered");
+        m[1].background = true;
+        check(ma::analyseMasking(m).issues.empty(), "depth: a send is never reported as covered");
+    }
+    plans = ma::planChains(mix);
+    check(plans[1].depthConsidered && !ma::depthOn(plans[1].depth), "depth: a dark send stays as it is ("
+                                                                        + std::to_string(plans[1].sendTiltDb - plans[1].mixTiltDb).substr(0, 5) + " dB)");
+}
+
 int main()
 {
     testLoudness();
@@ -3815,6 +3885,7 @@ int main()
     testPercussionLevel();
     testDynamicEq();
     testPan();
+    testDepth();
     testChannelAnalyzerSpeed();
     testMixBus();
     testMasking();

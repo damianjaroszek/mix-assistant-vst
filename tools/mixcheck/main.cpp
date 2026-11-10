@@ -89,6 +89,8 @@ int roleFromName(const String& fileName)
                 return true;
         return false;
     };
+    if (any({ "reverb", "verb", "delay", "echo", "return", "send" })) // before vocals: "VoxReverb" is a return
+        return static_cast<int>(ma::Role::send);
     if (any({ "kick", "bd ", "bassdrum", "bass drum" }))
         return static_cast<int>(ma::Role::kick);
     if (any({ "vox", "vocal", "voc", "lead vox", "acapella", "adlib", "choir" }))

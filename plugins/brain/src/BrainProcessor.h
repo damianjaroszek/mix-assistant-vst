@@ -180,7 +180,8 @@ struct Proposal
             stereo,
             saturation, // phase 13
             dynamicEq, // phase 32: dynamic bands and the vocal rider
-            pan        // phase 33
+            pan,       // phase 33
+            depth      // phase 34: a send's high cut
         };
         ChainTool tool = ChainTool::none; // with Action::solver unused
         ma::CleanupSettings cleanup {};
@@ -189,6 +190,7 @@ struct Proposal
         ma::BassEvenerSettings evener {};
         ma::DynamicEqSettings dynamicEq {}; // phase 32
         ma::PanSettings pan {};             // phase 33
+        ma::DepthSettings depth {};         // phase 34
         ma::StereoSettings stereo {};
         ma::SaturationSettings saturation {};
 
@@ -574,7 +576,9 @@ private:
     void buildToolNotes(bool wholeMix);
     void addToolLinesToVerdicts();
     void publishToolNotes();
-    static void applyCleanup(MixSnapshot::Channel& channel, const ma::CleanupSettings& cleanup);
+    static void applyCleanup(MixSnapshot::Channel& channel, const ma::CleanupSettings& cleanup, const ma::DepthSettings& depth = {});
+    // Phase 34: the channel the sends give way to (the loudest vocal, else the loudest lead), or null.
+    const MixSnapshot::Channel* mainVoice() const;
     Proposal::Verdict judge(size_t channel, const ma::ChainPlan& plan, const ma::StereoPlan& stereoPlan) const;
     void adaptStep(std::uint64_t now);
     // `groupGain`: level moves per stem group planned with this proposal (phase 18), so the EQ

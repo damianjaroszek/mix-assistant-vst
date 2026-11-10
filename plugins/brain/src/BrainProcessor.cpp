@@ -99,6 +99,18 @@ juce::String arrangementHint(double hz)
     return pl("hi-hat, shaker, ride, „powietrze” na wokalu");
 }
 
+// Phase 34: the times for the user's reverb and delay, at the song's tempo.
+juce::String depthTimesText(double bpm)
+{
+    const auto t = ma::depthTimes(bpm);
+    if (!t.valid)
+        return {};
+    return pl("pod tempo ") + juce::String(bpm, 1) + pl(" BPM: pogłos z pre-delay ") + juce::String(juce::roundToInt(t.preDelayMs))
+           + pl(" ms (1/64) i ogonem ok. ") + juce::String(t.decaySeconds, 2) + pl(" s (pół taktu, wygasa przed następną frazą); delay 1/8 = ")
+           + juce::String(juce::roundToInt(t.eighthMs)) + pl(" ms, 1/8 z kropką = ") + juce::String(juce::roundToInt(t.dottedEighthMs))
+           + pl(" ms, 1/4 = ") + juce::String(juce::roundToInt(t.quarterMs)) + " ms";
+}
+
 juce::String joinNames(const juce::StringArray& names)
 {
     const int shown = juce::jmin(names.size(), 4);
@@ -688,6 +700,7 @@ void BrainProcessor::timerCallback()
         const auto& channel = mix.channels[c];
         masking[c].valid = channel.spectrumValid && inMixSums(channel);
         masking[c].priority = channel.data.priority;
+        masking[c].background = channel.data.role == static_cast<int>(ma::Role::send);
         for (int b = 0; b < ma::bus::kBands; ++b)
             masking[c].rawDb[static_cast<size_t>(b)] = channel.heardDb[static_cast<size_t>(b)];
     }
@@ -790,6 +803,7 @@ ma::SolverResult BrainProcessor::solveNow(double headroomGainDb, const ma::StemS
         const auto& channel = mix.channels[c];
         channels[c].valid = channel.spectrumValid && inMixSums(channel);
         channels[c].priority = channel.data.priority;
+        channels[c].background = channel.data.role == static_cast<int>(ma::Role::send);
         for (int b = 0; b < ma::bus::kBands; ++b)
         {
             channels[c].rawDb[static_cast<size_t>(b)] = channel.bandsDb[static_cast<size_t>(b)];
@@ -987,7 +1001,7 @@ void BrainProcessor::collectChannels(ma::bus::Region& region, std::uint64_t now)
                 smoothed = previous->rawDb[static_cast<size_t>(b)]
                            + alpha * (level - previous->rawDb[static_cast<size_t>(b)]);
         }
-        applyCleanup(channel, channel.data.cleanup);
+        applyCleanup(channel, channel.data.cleanup, channel.data.depth);
         channel.measuredDb = channel.heardDb;
 
         // What the Agent actually sends on, smoothed like the rest.
@@ -1027,7 +1041,7 @@ void BrainProcessor::collectChannels(ma::bus::Region& region, std::uint64_t now)
     mix.channels = std::move(next);
 }
 
-void BrainProcessor::applyCleanup(MixSnapshot::Channel& channel, const ma::CleanupSettings& cleanup)
+void BrainProcessor::applyCleanup(MixSnapshot::Channel& channel, const ma::CleanupSettings& cleanup, const ma::DepthSettings& depth)
 {
     ma::EqSettings eq {};
     if (channel.data.eqBypass == 0)
@@ -1037,7 +1051,7 @@ void BrainProcessor::applyCleanup(MixSnapshot::Channel& channel, const ma::Clean
     {
         const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
         const auto band = static_cast<size_t>(b);
-        channel.bandsDb[band] = std::max(-200.0, channel.rawDb[band] + ma::cleanupResponseDb(cleanup, hz));
+        channel.bandsDb[band] = std::max(-200.0, channel.rawDb[band] + ma::cleanupResponseDb(cleanup, hz) + ma::depthResponseDb(depth, hz));
         channel.heardDb[band] = std::max(-200.0, channel.bandsDb[band] + ma::eqResponseDb(eq, hz));
     }
 }
@@ -1673,6 +1687,7 @@ void BrainProcessor::updateSketch()
         const auto& channel = mix.channels[c];
         masking[c].valid = channel.spectrumValid && inMixSums(channel);
         masking[c].priority = channel.data.priority;
+        masking[c].background = channel.data.role == static_cast<int>(ma::Role::send);
         for (int b = 0; b < ma::bus::kBands; ++b)
             masking[c].rawDb[static_cast<size_t>(b)] = channel.heardDb[static_cast<size_t>(b)];
     }
@@ -2274,6 +2289,47 @@ void BrainProcessor::buildReport()
             report.push_back(item);
     }
 
+    // Phase 34: depth. How loud the sends (reverb, delay) are against the dry parts, 200 Hz-8 kHz.
+    {
+        double sends = 0.0, dry = 0.0;
+        juce::StringArray names;
+        for (const auto& channel : mix.channels)
+        {
+            if (!channel.spectrumValid || !inMixSums(channel))
+                continue;
+            const bool send = channel.data.role == static_cast<int>(ma::Role::send);
+            if (send)
+                names.add(quoted(channel.name));
+            for (int b = 0; b < ma::bus::kBands; ++b)
+            {
+                const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+                if (hz >= 200.0 && hz <= 8000.0)
+                    (send ? sends : dry) += std::pow(10.0, channel.heardDb[static_cast<size_t>(b)] / 10.0);
+            }
+        }
+        MixSnapshot::ReportItem item;
+        item.title = pl("Głębia (pogłos, delay)");
+        item.group = MixSnapshot::ReportGroup::arrangement;
+        const auto times = depthTimesText(tempoBpm());
+        if (dry <= 0.0)
+            ;
+        else if (names.isEmpty())
+            item.detail = pl("Żaden kanał nie ma roli „Wysyłka”. Jeśli pogłos i delay grają na osobnych kanałach miksera, ustaw na nich Agenta "
+                             "z tą rolą: Mózg przyciemni ich górę i każe im ustępować głównemu głosowi.");
+        else
+        {
+            const double share = 10.0 * std::log10(std::max(sends, 1e-30) / dry);
+            item.status = share > -6.0 ? Status::warning : Status::good;
+            item.detail = pl("Wysyłki ") + joinNames(names) + pl(" grają ") + juce::String(share, 1) + pl(" dB względem suchych śladów (200 Hz–8 kHz)")
+                          + (share > -6.0 ? pl(": głośno, ogony rozmywają miks; ścisz wysyłki albo skróć pogłos.")
+                                          : pl("."));
+        }
+        if (item.detail.isNotEmpty() && times.isNotEmpty())
+            item.detail += pl(" Czasy ") + times + ".";
+        if (item.detail.isNotEmpty())
+            report.push_back(item);
+    }
+
     // Phase 14: the kick's tuning against the key and the bass.
     if (const auto* kick = kickChannel())
     {
@@ -2741,6 +2797,7 @@ std::vector<ma::MaskingChannel> BrainProcessor::maskingInput(bool afterProposal)
         const auto& channel = mix.channels[c];
         masking[c].valid = channel.spectrumValid && inMixSums(channel);
         masking[c].priority = channel.data.priority;
+        masking[c].background = channel.data.role == static_cast<int>(ma::Role::send);
         masking[c].rawDb = afterProposal ? predictedHeard(channel) : channel.heardDb;
     }
     return masking;
@@ -3268,6 +3325,15 @@ juce::String dynamicEqText(const ma::ChainPlan& plan)
     return parts.isEmpty() ? pl("dynamiczne EQ wyłączone: nic już nie wystaje chwilami") : pl("dynamiczne EQ: ") + parts.joinIntoString("; ");
 }
 
+juce::String depthText(const ma::ChainPlan& plan)
+{
+    if (ma::depthOn(plan.depth))
+        return pl("góra ścięta od ") + juce::String(plan.depth.highCutHz / 1000.0f, 0) + pl(" kHz: wysyłka jest jasna jak reszta miksu (")
+               + juce::String(plan.sendTiltDb - plan.mixTiltDb, 1) + pl(" dB względem niej w 8–16 kHz), ciemniejszy ogon stoi za suchymi śladami");
+    return pl("góra bez cięcia: wysyłka jest już ") + juce::String(plan.mixTiltDb - plan.sendTiltDb, 1)
+           + pl(" dB ciemniejsza od miksu w 8–16 kHz, stoi za suchymi śladami");
+}
+
 // Phase 33: why a channel stays in the centre, and where it goes.
 juce::String panReasonText(ma::PanPlan::Reason reason, double inputBalanceDb)
 {
@@ -3529,7 +3595,7 @@ void BrainProcessor::proposeWholeMix()
     const auto saved = mix;
     for (size_t c = 0; c < mix.channels.size(); ++c)
     {
-        applyCleanup(mix.channels[c], plans[c].cleanup);
+        applyCleanup(mix.channels[c], plans[c].cleanup, plans[c].depth);
         mix.channels[c].data.cleanup = plans[c].cleanup; // the stem references see it too
         // Phase 31: a planned enhancer the Agent does not run yet is heard by the rest of the proposal
         // (collisions, translation, balance), and the translation steps do not add a second one.
@@ -3554,6 +3620,7 @@ void BrainProcessor::proposeWholeMix()
     {
         masking[c].valid = mix.channels[c].spectrumValid && inMixSums(mix.channels[c]);
         masking[c].priority = mix.channels[c].data.priority;
+        masking[c].background = mix.channels[c].data.role == static_cast<int>(ma::Role::send);
         for (int b = 0; b < ma::bus::kBands; ++b)
             masking[c].rawDb[static_cast<size_t>(b)] = mix.channels[c].heardDb[static_cast<size_t>(b)];
     }
@@ -3827,6 +3894,84 @@ void BrainProcessor::proposeWholeMix()
         chainItems.push_back(item);
     }
 
+    // Phase 34: depth. Sends darker than the dry parts, and out of the way while the main voice sings.
+    const auto* voice = mainVoice();
+    bool anySend = false;
+    for (size_t c = 0; c < mix.channels.size(); ++c)
+    {
+        const auto& channel = mix.channels[c];
+        const auto& plan = plans[c];
+        if (!channel.spectrumValid || channel.data.role != static_cast<int>(ma::Role::send))
+            continue;
+        anySend = true;
+        const auto name = quoted(channel.name);
+        const bool brainMade = (channel.data.brainTools & ma::bus::toolDepth) != 0;
+        if (plan.depthConsidered
+            && ((ma::depthOn(plan.depth) && std::abs(plan.depth.highCutHz - channel.data.depth.highCutHz) > 50.0f)
+                || (!ma::depthOn(plan.depth) && ma::depthOn(channel.data.depth) && brainMade)))
+        {
+            Proposal::Item item;
+            item.action = Proposal::Item::Action::chain;
+            item.tool = Proposal::Item::ChainTool::depth;
+            item.owner = channel.owner;
+            item.depth = plan.depth;
+            item.text = name + ": " + depthText(plan);
+            chainItems.push_back(item);
+        }
+
+        // Under the main voice: the room steps back a little while it sings (keyed over the bus).
+        if (voice == nullptr)
+        {
+            noteTool(channel.owner, ma::bus::toolDuck, ma::bus::ToolDecision::notNeeded,
+                     pl("nie ma głównego wokalu ani leadu, któremu pogłos miałby ustępować"));
+            continue;
+        }
+        if (channel.data.sidechainConnected != 0)
+        {
+            noteTool(channel.owner, ma::bus::toolDuck, ma::bus::ToolDecision::yours,
+                     pl("sidechain podłączony kablem: ustępuje temu, co do niego wysłałeś"));
+            continue;
+        }
+        if (voice->data.keyId == 0 || channel.data.keyId == 0)
+            continue;
+        const auto& have = channel.data.duck;
+        if (have.on > 0.5f && have.wholeSignal > 0.5f && channel.data.duckKey == voice->data.keyId)
+        {
+            noteTool(channel.owner, ma::bus::toolDuck, ma::bus::ToolDecision::kept,
+                     pl("już ustępuje ") + quoted(voice->name) + pl(", gdy ten gra"));
+            continue;
+        }
+        Proposal::Item item;
+        item.action = Proposal::Item::Action::duck;
+        item.owner = channel.owner;
+        item.maskedOwner = voice->owner;
+        auto& duck = item.duck;
+        duck.on = 1.0f;
+        duck.wholeSignal = 1.0f;
+        duck.hz = 1000.0f;
+        duck.q = 0.7f;
+        duck.depthDb = ma::kSendDuckDb;
+        duck.thresholdDb = -30.0f;
+        duck.attackMs = 10.0f;
+        constexpr int quarterSync = 4; // 1/4: the room comes back between phrases, not between syllables
+        duck.releaseMs = static_cast<float>(bpm > 0.0 ? ma::syncedReleaseMs(bpm, ma::bus::duckSyncFraction(quarterSync)) : 400.0);
+        item.duckSync = bpm > 0.0 ? quarterSync : 0;
+        item.duckKey = voice->data.keyId;
+        item.text = name + pl(": ustępuje ") + quoted(voice->name) + pl(" o ") + juce::String(duck.depthDb, 1)
+                    + pl(" dB, gdy ten gra (powrót ") + juce::String(juce::roundToInt(duck.releaseMs))
+                    + pl(" ms): głos stoi z przodu, pogłos wraca w przerwach. Bez kabla, przez wspólną pamięć");
+        chainItems.push_back(item);
+    }
+    // The times for the user's own reverb and delay plugins.
+    if ((anySend || voice != nullptr) && bpm > 0.0)
+    {
+        Proposal::Item item;
+        item.advisory = true;
+        item.selected = false;
+        item.text = pl("Pogłos i delay ") + depthTimesText(bpm) + pl(". Ustaw je w swojej wtyczce pogłosu i delayu");
+        chainItems.push_back(item);
+    }
+
     // Phase 9: each stem group's level against the references, with the planned cleanup.
     if (levelsPlanned)
     {
@@ -3888,6 +4033,30 @@ void BrainProcessor::proposeWholeMix()
     for (const auto& channel : mix.channels)
         if (channel.spectrumValid && inMixSums(channel))
             plannedOwners.push_back(channel.owner);
+}
+
+const MixSnapshot::Channel* BrainProcessor::mainVoice() const
+{
+    const auto loudness = [](const MixSnapshot::Channel& c) {
+        double p = 0.0;
+        for (int b = 0; b < ma::bus::kBands; ++b)
+        {
+            const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+            if (hz >= 300.0 && hz <= 5000.0)
+                p += std::pow(10.0, c.heardDb[static_cast<size_t>(b)] / 10.0);
+        }
+        return p;
+    };
+    for (const auto role : { ma::Role::vocal, ma::Role::lead })
+    {
+        const MixSnapshot::Channel* found = nullptr;
+        for (const auto& channel : mix.channels)
+            if (channel.spectrumValid && channel.data.role == static_cast<int>(role) && (found == nullptr || loudness(channel) > loudness(*found)))
+                found = &channel;
+        if (found != nullptr)
+            return found;
+    }
+    return nullptr;
 }
 
 const MixSnapshot::Channel* BrainProcessor::kickChannel() const
@@ -4128,6 +4297,8 @@ Proposal::Verdict BrainProcessor::judge(size_t index, const ma::ChainPlan& plan,
         verdict.reasons.add(pl("Linia basu wokół ") + noteName(plan.evener.referenceHz) + pl(": niskie nuty wyrównane dla ucha."));
     if (ma::dynamicEqOn(plan.dynamicEq))
         verdict.reasons.add(pl("Dynamiczne EQ: ") + dynamicEqText(plan).fromFirstOccurrenceOf(": ", false, false) + ".");
+    if (plan.depthConsidered && ma::depthOn(plan.depth))
+        verdict.reasons.add(pl("Głębia: ") + depthText(plan) + ".");
     if (const auto pan = lastPanPlans.find(channel.owner);
         pan != lastPanPlans.end() && pan->second.plan.considered && ma::panOn(pan->second.plan.settings))
         verdict.reasons.add(pl("Panorama: ") + panText(pan->second.plan, pan->second.partner, pan->second.inputBalanceDb)
@@ -4241,6 +4412,8 @@ Proposal::Verdict BrainProcessor::judge(size_t index, const ma::ChainPlan& plan,
             tool = ma::bus::toolDynamicEq;
         else if (reason.startsWith(pl("Panorama: ")))
             tool = ma::bus::toolPan;
+        else if (reason.startsWith(pl("Głębia: ")))
+            tool = ma::bus::toolDepth;
         verdict.reasonTools.push_back(tool);
     }
     return verdict;
@@ -4409,7 +4582,7 @@ void BrainProcessor::buildToolNotes(bool wholeMix)
         if (!wholeMix || plan == lastPlans.end())
         {
             for (const int bit : { ma::bus::toolCleanup, ma::bus::toolCompressor, ma::bus::toolClipper, ma::bus::toolEvener,
-                                   ma::bus::toolSaturation, ma::bus::toolStereo, ma::bus::toolPan })
+                                   ma::bus::toolSaturation, ma::bus::toolStereo, ma::bus::toolPan, ma::bus::toolDepth })
                 if (!has(bit))
                     set(bit, D::notChecked, notInScope);
         }
@@ -4573,6 +4746,17 @@ void BrainProcessor::buildToolNotes(bool wholeMix)
                 set(ma::bus::toolPan, D::kept, panText(pan->second.plan, pan->second.partner, pan->second.inputBalanceDb));
             else
                 set(ma::bus::toolPan, D::notNeeded, panReasonText(pan->second.plan.reason, pan->second.inputBalanceDb));
+
+            // Phase 34: depth.
+            if (role != ma::Role::send)
+                set(ma::bus::toolDepth, D::notNeeded, pl("cięcie góry jest dla wysyłek z pogłosem i delayem; głębię tego kanału robi "
+                                                         "jego wysyłka (rola „Wysyłka” na kanale z pogłosem)"));
+            else if (const auto* item = chainItem(Tool::depth))
+                set(ma::bus::toolDepth, D::proposed, strip(item->text));
+            else if (!p.depthConsidered)
+                set(ma::bus::toolDepth, D::notChecked, pl("brak widma wysyłki albo reszty miksu"));
+            else
+                set(ma::bus::toolDepth, ma::depthOn(p.depth) ? D::kept : D::notNeeded, depthText(p));
         }
 
         // Duck under the kick.
@@ -4705,6 +4889,7 @@ std::vector<Proposal::Verdict> BrainProcessor::verdictsNow() const
             case ma::bus::toolSaturation: return Tool::saturation;
             case ma::bus::toolDynamicEq: return Tool::dynamicEq;
             case ma::bus::toolPan: return Tool::pan;
+            case ma::bus::toolDepth: return Tool::depth;
             default: return Tool::none;
         }
     };
@@ -5145,8 +5330,9 @@ void BrainProcessor::proposeHarmonics()
                 std::vector<ma::MaskingChannel> was(trial.size()), will(trial.size());
                 for (size_t o = 0; o < trial.size(); ++o)
                 {
-                    was[o] = { trial[o].rawDb, mix.channels[o].data.priority, trial[o].valid };
-                    will[o] = { test[o].rawDb, mix.channels[o].data.priority, test[o].valid };
+                    const bool background = mix.channels[o].data.role == static_cast<int>(ma::Role::send);
+                    was[o] = { trial[o].rawDb, mix.channels[o].data.priority, trial[o].valid, background };
+                    will[o] = { test[o].rawDb, mix.channels[o].data.priority, test[o].valid, background };
                 }
                 const auto maskWas = ma::analyseMasking(was);
                 const auto maskWill = ma::analyseMasking(will);
@@ -5808,6 +5994,7 @@ int BrainProcessor::applySelected(bool refining)
         auto stereoEq = channel.data.stereo;
         auto saturation = channel.data.saturation;
         auto pan = channel.data.pan;
+        auto depth = channel.data.depth;
         // Phase 30: the dips go along as the Agent has them, unless the proposal sets one.
         std::array<ma::UnmaskSettings, ma::kMaxUnmask> unmask {};
         std::array<std::uint64_t, ma::kMaxUnmask> unmaskKey {};
@@ -5852,6 +6039,7 @@ int BrainProcessor::applySelected(bool refining)
                     case Proposal::Item::ChainTool::saturation: saturation = item.saturation; break;
                     case Proposal::Item::ChainTool::dynamicEq: dynamicEq = item.dynamicEq; break;
                     case Proposal::Item::ChainTool::pan: pan = item.pan; break;
+                    case Proposal::Item::ChainTool::depth: depth = item.depth; break;
                     case Proposal::Item::ChainTool::none: break;
                 }
                 dynamicChanges = true;
@@ -5902,6 +6090,7 @@ int BrainProcessor::applySelected(bool refining)
             dynamicEq.rider.targetDb = static_cast<float>(juce::jlimit(-60.0, 0.0, dynamicEq.rider.targetDb + levelGain));
         command.dynamicEq = dynamicEq;
         command.pan = pan;
+        command.depth = depth;
         command.inputShiftDb = inMixSums(channel) ? 0.0f : static_cast<float>(levelGain);
         for (int d = 0; d < ma::kMaxUnmask; ++d)
         {
