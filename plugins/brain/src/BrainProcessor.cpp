@@ -99,16 +99,29 @@ juce::String arrangementHint(double hz)
     return pl("hi-hat, shaker, ride, „powietrze” na wokalu");
 }
 
-// Phase 34: the times for the user's reverb and delay, at the song's tempo.
-juce::String depthTimesText(double bpm)
+// Phase 34: the settings for the user's own reverb and delay plugins, at the song's tempo, named by
+// the knobs most plugins have (ValhallaPlate / Room, Fruity Reeverb 2, Fruity Delay 3 ...).
+juce::String reverbAdviceText(double bpm)
 {
     const auto t = ma::depthTimes(bpm);
     if (!t.valid)
         return {};
-    return pl("pod tempo ") + juce::String(bpm, 1) + pl(" BPM: pogłos z pre-delay ") + juce::String(juce::roundToInt(t.preDelayMs))
-           + pl(" ms (1/64) i ogonem ok. ") + juce::String(t.decaySeconds, 2) + pl(" s (pół taktu, wygasa przed następną frazą); delay 1/8 = ")
-           + juce::String(juce::roundToInt(t.eighthMs)) + pl(" ms, 1/8 z kropką = ") + juce::String(juce::roundToInt(t.dottedEighthMs))
-           + pl(" ms, 1/4 = ") + juce::String(juce::roundToInt(t.quarterMs)) + " ms";
+    return pl("Pogłos (na szynie wysyłki, ") + juce::String(bpm, 1) + pl(" BPM): Mix/Wet 100%, Dry 0%; Pre-delay ")
+           + juce::String(juce::roundToInt(t.preDelayMs)) + pl(" ms (1/64: głos wchodzi pierwszy); Decay ok. ")
+           + juce::String(t.decaySeconds, 1) + pl(" s (pół taktu, wygasa przed następną frazą); EQ pogłosu: dół na minus "
+                                                  "(Low gain -4 do -6 dB poniżej ok. 500 Hz), góra lekko w dół (High gain ok. -3 dB od ok. 4 kHz)");
+}
+
+juce::String delayAdviceText(double bpm)
+{
+    const auto t = ma::depthTimes(bpm);
+    if (!t.valid)
+        return {};
+    return pl("Delay (na szynie wysyłki): Tempo sync włączony, Time 3/16 (1/8 z kropką = ")
+           + juce::String(juce::roundToInt(t.dottedEighthMs)) + pl(" ms), spokojniej 1/4 (") + juce::String(juce::roundToInt(t.quarterMs))
+           + pl(" ms), gęściej 1/8 (") + juce::String(juce::roundToInt(t.eighthMs))
+           + pl(" ms); Feedback 25–35% (2–4 powtórzenia); filtr feedbacku LP ok. 3–5 kHz (każde powtórzenie ciemniejsze); "
+                "Ping pong albo Stereo; Wet 100%, Dry 0%");
 }
 
 // Phase 35: the bass's low end against the kick's in time, from the bass Agent's own measurement
@@ -2482,7 +2495,7 @@ void BrainProcessor::buildReport()
         MixSnapshot::ReportItem item;
         item.title = pl("Głębia (pogłos, delay)");
         item.group = MixSnapshot::ReportGroup::arrangement;
-        const auto times = depthTimesText(tempoBpm());
+        const auto times = reverbAdviceText(tempoBpm());
         if (dry <= 0.0)
             ;
         else if (names.isEmpty())
@@ -2511,7 +2524,7 @@ void BrainProcessor::buildReport()
         if (item.detail.isNotEmpty() && !feeds.isEmpty())
             item.detail += " " + feeds.joinIntoString("; ") + ".";
         if (item.detail.isNotEmpty() && times.isNotEmpty())
-            item.detail += pl(" Czasy ") + times + ".";
+            item.detail += " " + times + ". " + delayAdviceText(tempoBpm()) + ".";
         if (item.detail.isNotEmpty())
             report.push_back(item);
     }
@@ -4354,11 +4367,14 @@ void BrainProcessor::proposeWholeMix()
     // The times for the user's own reverb and delay plugins.
     if ((anySend || voice != nullptr) && bpm > 0.0)
     {
-        Proposal::Item item;
-        item.advisory = true;
-        item.selected = false;
-        item.text = pl("Pogłos i delay ") + depthTimesText(bpm) + pl(". Ustaw je w swojej wtyczce pogłosu i delayu");
-        chainItems.push_back(item);
+        for (const auto& text : { reverbAdviceText(bpm), delayAdviceText(bpm) })
+        {
+            Proposal::Item item;
+            item.advisory = true;
+            item.selected = false;
+            item.text = text + pl(". Ustaw to w swojej wtyczce");
+            chainItems.push_back(item);
+        }
     }
 
     // Phase 35: the bass's low end onto the kick's, in time (measured by the bass Agent with the kick on its sidechain).

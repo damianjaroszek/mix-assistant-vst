@@ -257,7 +257,7 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   (8-16 kHz minus 1-4 kHz) is above the rest of the mix's minus `kDarkerThanMixDb` 3 gets `kSendHighCutHz` 9 kHz. The Brain
   (`proposeWholeMix`) also has every send without a cable duck the whole signal by `kSendDuckDb` 3 dB under `mainVoice()` (loudest
   vocal, else lead; keyed over the bus, 10 ms, release 1/4 synced) and adds an advisory item with `depthTimes` (pre-delay 1/64, decay
-  half a bar, delay 1/8, dotted 1/8, 1/4); report "Głębia (pogłos, delay)" (sends vs dry 200 Hz-8 kHz, warning over -6 dB). Part of
+  half a bar, delay 1/8, dotted 1/8, 1/4; two items `reverbAdviceText` / `delayAdviceText` named by the usual knobs); report "Głębia (pogłos, delay)" (sends vs dry 200 Hz-8 kHz, warning over -6 dB). Part of
   `Command`, the A/B backup and `brainSet` (packed dynamics 100 floats, 99 = before phase 34), `ToolBit::toolDepth`, `kToolCount` 14,
   `bus::kVersion` 20; Agent param `highCut` (20 kHz = off) on the "Inżynier miksu" tab. mixcheck names reverb/delay/return/send files as sends.
 - Phase 35 kick-bass time and the Ozone gate (`ma/Alignment.h`): `LowAlignMeter` (both LP2 150 Hz, decimated ~2 kHz, cross-correlation
