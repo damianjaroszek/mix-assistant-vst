@@ -246,7 +246,7 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   chain loss and level plans ignore a pan; the peak after it): constant power, unity in the centre (sqrt2 cos/sin), below
   `monoBelowHz` (default 150, LR4 split that sums flat) the signal stays put. `BalanceMeter` publishes the input's lean
   (`AgentData::inputBalanceDb`, L minus R above 150 Hz). `planPan` (whole-mix analysis, after `planStereo`, from the same pre-pan
-  mid/side): kick, bass, bus, send and the loudest vocal and lead stay centred; user pans (on but not in `brainTools`) and inputs
+  mid/side): kick, bass, bus, send, the loudest vocal and lead and any part with >= `kCarriesLowShare` 25% of its power below 150 Hz (a loop with a kick in it, `Reason::carriesLow`) stay centred; user pans (on but not in `brainTools`) and inputs
   leaning >= 3 dB are counted where they are; wide (coherence < 0.3) and quiet (< -40 dB of the mix) parts stay; the rest by role
   (perc/fx 0.45, other 0.35, pad/lead 0.3, vocal 0.25, less when partly wide): pairs sharing >= 35% of their 150 Hz-16 kHz spectrum go
   opposite, then singles where they balance the mix; then the loudest leaning part steps back 0.05 until the mix is within 0.5 dB and

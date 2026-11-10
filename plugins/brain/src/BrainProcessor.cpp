@@ -3653,6 +3653,8 @@ juce::String panReasonText(ma::PanPlan::Reason reason, double inputBalanceDb)
     {
         case R::centreRole: return pl("stopa, bas, busy i wysyłki trzymają środek");
         case R::mainPart: return pl("główny wokal albo lead trzyma środek");
+        case R::carriesLow:
+            return pl("dużo grania poniżej 150 Hz (np. pętla ze stopą): przesunięcie zabrałoby stopę ze środka");
         case R::prePanned:
             return pl("wejście już przechyla się w ") + (inputBalanceDb > 0.0 ? pl("lewo") : pl("prawo")) + " o "
                    + juce::String(std::abs(inputBalanceDb), 1) + pl(" dB, to panorama producenta");

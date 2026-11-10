@@ -83,6 +83,7 @@ struct PanPlan
         none,       // not planned (no measurement)
         centreRole, // kick, bass, the main vocal and lead, buses and sends: the centre holds the mix
         mainPart,   // the loudest vocal or lead stays in the centre, the rest of them may move
+        carriesLow, // a large share of its power is below 150 Hz (a loop with a kick in it): it holds the centre
         user,       // the user panned it in the Agent
         prePanned,  // it arrives panned (its input leans by >= kPrePannedDb)
         wide,       // already wide: panning a wide part only tilts it
@@ -111,6 +112,9 @@ constexpr double kPrePannedDb = 3.0;
 constexpr double kMaxMixBalanceDb = 0.5;
 constexpr double kMaxRegionBalanceDb = 1.5;
 constexpr double kPairOverlap = 0.35;
+// A part with at least this share of its power below 150 Hz carries a kick or a low end that holds the
+// centre: panning it would move the kick's body and click out of the middle even with the low end mono.
+constexpr double kCarriesLowShare = 0.25;
 
 // How far each role goes when it moves (before the width and balance scale it down).
 double panAmountForRole(Role role);

@@ -3791,6 +3791,26 @@ void testPan()
     check(!ma::panOn(alone.plans[1].settings) && alone.plans[1].reason == ma::PanPlan::Reason::alone, "pan 18");
     check(std::abs(alone.balancePlannedDb) <= ma::kMaxMixBalanceDb + 0.05, "pan 19");
 
+    // A percussion loop with the kick in it holds the centre; a hat loop beside it still moves.
+    {
+        auto loop = part(ma::Role::percussion, 3000.0, 12000.0, -24.0);
+        for (int b = 0; b < ma::bus::kBands; ++b)
+        {
+            const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+            if (hz >= 40.0 && hz <= 120.0)
+            {
+                loop.midDb[static_cast<size_t>(b)] = -10.0;
+                loop.sideDb[static_cast<size_t>(b)] = -30.0;
+            }
+        }
+        std::vector<ma::PanChannel> drums { part(ma::Role::bass, 40.0, 400.0, -12.0), loop,
+                                            part(ma::Role::percussion, 6000.0, 16000.0, -24.0),
+                                            part(ma::Role::percussion, 5500.0, 16000.0, -25.0) };
+        const auto kick = ma::planPan(drums);
+        check(!ma::panOn(kick.plans[1].settings) && kick.plans[1].reason == ma::PanPlan::Reason::carriesLow, "pan 19b");
+        check(kick.plans[2].reason == ma::PanPlan::Reason::paired && ma::panOn(kick.plans[2].settings), "pan 19c");
+    }
+
     // The user's pan stays, a part that arrives panned is left alone, a wide pad is not moved.
     auto own = mix;
     own[3].userPan = true;
