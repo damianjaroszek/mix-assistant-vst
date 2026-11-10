@@ -30,7 +30,9 @@ inline juce::StringArray toolNames()
 {
     return { pl("Korekcja EQ"), pl("Porządki (HPF, mono, błoto)"), pl("Kompresor"), pl("Clipper"), pl("Wyrównanie nut basu"),
              pl("Stereo (mid/side)"), pl("Saturacja"), pl("Ustępowanie stopie"), pl("Harmoniczne"), pl("Podkreślenie ataku"),
-             pl("Ustępowanie bez kabla"), pl("Dynamiczne EQ i rider"), pl("Panorama") };
+             pl("Ustępowanie bez kabla"), pl("Dynamiczne EQ i rider"), pl("Panorama"),
+             pl("Głębia (ciemniejszy pogłos)"),
+             pl("Stopa i bas w czasie") };
 }
 
 inline juce::StringArray decisionNames()

@@ -252,6 +252,35 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   opposite, then singles where they balance the mix; then the loudest leaning part steps back 0.05 until the mix is within 0.5 dB and
   each region (150-2k, 2-9k, 9-16k) within 1.5 dB. Part of `Command`, the A/B backup and `brainSet` (packed dynamics 99 floats, 97 =
   before phase 33), `ToolBit::toolPan`, `kToolCount` 13, `bus::kVersion` 19; Agent "Stereo" tab, Brain `ChainTool::pan`, notes, verdict.
+- Phase 34 depth (`ma/Depth.h`): `DepthSettings::highCutHz` (12 dB/oct `HighCut`, right after the cleanup; `depthResponseDb` is the
+  digital response at 48 kHz and goes into `applyCleanup`, so `bandsDb` carries it). `planChains` step 7: a `send` whose `topTiltDb`
+  (8-16 kHz minus 1-4 kHz) is above the rest of the mix's minus `kDarkerThanMixDb` 3 gets `kSendHighCutHz` 9 kHz. The Brain
+  (`proposeWholeMix`) also has every send without a cable duck the whole signal by `kSendDuckDb` 3 dB under `mainVoice()` (loudest
+  vocal, else lead; keyed over the bus, 10 ms, release 1/4 synced) and adds an advisory item with `depthTimes` (pre-delay 1/64, decay
+  half a bar, delay 1/8, dotted 1/8, 1/4); report "Głębia (pogłos, delay)" (sends vs dry 200 Hz-8 kHz, warning over -6 dB). Part of
+  `Command`, the A/B backup and `brainSet` (packed dynamics 100 floats, 99 = before phase 34), `ToolBit::toolDepth`, `kToolCount` 14,
+  `bus::kVersion` 20; Agent param `highCut` (20 kHz = off) on the "Inżynier miksu" tab. mixcheck names reverb/delay/return/send files as sends.
+- Phase 35 kick-bass time and the Ozone gate (`ma/Alignment.h`): `LowAlignMeter` (both LP2 150 Hz, decimated ~2 kHz, cross-correlation
+  +-10 ms, ~2 s decay, gated on the key's energy) runs on the main and sidechain mono before the chain; `AlignDelay` (<= 10 ms, before the
+  cleanup, so the lag is measured undelayed and planning again is idempotent). AgentData `align`, `alignValid/LagMs/Best/Zero` (> 0 = main
+  later). Brain `alignAdvice` (bass with a cable only): |lag| >= 0.5 and <= 5 ms, best >= 0.3, best - zero >= 0.1, zero >= -0.2 (else
+  polarity first); an early bass gets the delay (`ChainTool::align`, whole-mix analysis), a late one an advisory item (move it in FL),
+  a Brain-made delay no longer needed goes off; report "Stopa i bas w czasie", notes, verdict "Czas ze stopą: ". Part of `Command`, the
+  A/B backup and `brainSet` (packed dynamics 101 floats, 100 = before phase 35), `ToolBit::toolAlign`, `kToolCount` 15, `bus::kVersion` 21;
+  Agent param `alignDelay` on the "EQ i ustępowanie" tab. `ReportItem::gate` "Gotowe dla Ozone?" is inserted first: red items outside the
+  arrangement group (plus ghosts / playback simulator on) block, amber ones are listed to check; the view always shows it on top and the
+  guide's and HTML's problem counts skip it. mixcheck `--kick-cable` feeds the kick stem into the bass Agents' sidechain, `--shift-bass MS`.
+- Phase 36 ducked reverb: `ma::planSendDuck` (Depth.h) sizes a send's duck under `mainVoice()` from both drop spectra (`dropSpectrumDb`,
+  raw + trim, pre-duck so it is idempotent): a bell (not the whole signal) at the voice's loudest ERB band in 800 Hz-5 kHz, Q 0.8, depth =
+  send minus voice over 1-5 kHz + `kSendUnderVoiceDb` 12, clamped 2-8 dB in 0.5 dB steps (3 dB until the drop is measured). Kept while the
+  Agent's duck is a bell keyed to the voice within 1 dB and 0.3 octave.
+- Phase 37 what a send gives way to: `ma::findSendSources` (Depth.h) fits a send's per-second power in 8 regions (150 Hz-12 kHz,
+  normalised per region) as a non-negative sum of the candidates' (0.7 this second + 0.3 the last, for the tail; coordinate-descent NNLS;
+  >= `kMinSourceSeconds` 12 s within 40 dB of its loudest; valid with uncentred fit >= 0.7). The Brain (`sendSources`, from `songBins`,
+  candidates = channels in the mix sums except sends) picks per send: Agent param `sendDuckTo` (`bus::SendDuckTo` auto / voice / source /
+  none, `AgentData::sendDuckTo`, the user's, `bus::kVersion` 22; "Inżynier miksu" tab, enabled on sends): auto = drums source -> whole-signal
+  duck under it (2 ms, 1/16 synced, depth over 200 Hz-8 kHz, <= `kSendDuckSourceMaxDb` 6), else the main voice (phase 36), else its source
+  (bell 300 Hz-6 kHz, 1/8); "none" turns a Brain-made duck off. `lastSendNotes` feeds the "Głębia" report line (sources, key).
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

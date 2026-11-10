@@ -235,6 +235,7 @@ AgentEditor::AgentEditor(AgentProcessor& p)
         button->setColour(juce::ToggleButton::textColourId, colours::quiet);
     styleCombo(duckModeBox, AgentProcessor::duckModeNames());
     styleCombo(duckSyncBox, AgentProcessor::duckSyncNames());
+    styleCombo(sendDuckBox, AgentProcessor::sendDuckNames());
     duckSyncBox.setTooltip(pl("Czas powrotu dopasowany do tempa utworu."));
     for (auto* slider : { &duckFreqSlider, &duckDepthSlider, &duckThresholdSlider, &duckAttackSlider, &duckReleaseSlider })
     {
@@ -327,6 +328,18 @@ AgentEditor::AgentEditor(AgentProcessor& p)
                            "kanały: części grające w tym samym zakresie idą na przeciwne strony, a miks zostaje w równowadze lewo/prawo. "
                            "Stopa, bas, główny wokal i lead zostają w środku. Panoramę w mikserze FL zostaw na środku, "
                            "żeby Mózg wiedział, gdzie kanał gra. Dwuklik: środek."));
+    styleLabel(highCutLabel, pl("Góra do"), colours::quiet, 13.0f);
+    highCutLabel.setTooltip(pl("Cięcie góry (12 dB/okt.). Na wysyłce z pogłosem albo delayem ciemniejszy ogon stoi za suchymi "
+                               "śladami i nie rozmywa ich góry: „Analizuj” ustawia 9 kHz, gdy wysyłka jest tak jasna jak reszta miksu. "
+                               "20 kHz = wyłączone."));
+    styleLabel(sendDuckLabel, pl("Ustępuje"), colours::quiet, 13.0f);
+    sendDuckLabel.setTooltip(pl("Tylko dla wysyłki (pogłos, delay): komu ogon robi miejsce. Auto: Mózg sam rozpoznaje, co zasila wysyłkę; "
+                                "pogłos wokalu i muzyki ustępuje głównemu głosowi w jego paśmie, pogłos bębnów swoim uderzeniom "
+                                "(cicho przy uderzeniu, ogon rozkwita po nim). „Nic” wyłącza ustępowanie, które ustawił Mózg."));
+    styleLabel(alignLabel, pl("Opóźnienie"), colours::quiet, 13.0f);
+    alignLabel.setTooltip(pl("Opóźnia cały kanał (do 10 ms). Gdy dół basu wchodzi przed uderzeniem stopy, oba się częściowo "
+                             "znoszą: Agent basu z podłączoną stopą jako sidechain mierzy przesunięcie, a „Analizuj” (cały łańcuch) "
+                             "ustawia opóźnienie. Spóźniony bas trzeba przesunąć wcześniej w FL. 0 = wyłączone."));
     styleLabel(panMonoLabel, pl("Środek poniżej"), colours::quiet, 13.0f);
     panMonoLabel.setTooltip(pl("Poniżej tej częstotliwości kanał zostaje w środku (dół razem ze stopą i basem). 0 = przesuwa cały sygnał."));
     styleLabel(widthMonoMark, "mono", colours::quiet, 11.0f);
@@ -365,6 +378,8 @@ AgentEditor::AgentEditor(AgentProcessor& p)
         { &widthFromSlider, AgentProcessor::widthFromId },
         { &panSlider, AgentProcessor::panId },
         { &panMonoSlider, AgentProcessor::panMonoBelowId },
+        { &highCutSlider, AgentProcessor::highCutId },
+        { &alignSlider, AgentProcessor::alignDelayId },
     };
     for (const auto& [slider, id] : chainSliders)
     {
@@ -433,6 +448,7 @@ AgentEditor::AgentEditor(AgentProcessor& p)
         = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(state, AgentProcessor::polarityId, polarityButton);
     duckModeAttachment = std::make_unique<ComboAttachment>(state, AgentProcessor::duckModeId, duckModeBox);
     duckSyncAttachment = std::make_unique<ComboAttachment>(state, AgentProcessor::duckSyncId, duckSyncBox);
+    sendDuckAttachment = std::make_unique<ComboAttachment>(state, AgentProcessor::sendDuckToId, sendDuckBox);
     duckFreqAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::duckFreqId, duckFreqSlider);
     duckDepthAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::duckDepthId, duckDepthSlider);
     duckThresholdAttachment = std::make_unique<SliderAttachment>(state, AgentProcessor::duckThresholdId, duckThresholdSlider);
@@ -473,7 +489,7 @@ AgentEditor::AgentEditor(AgentProcessor& p)
          { &eqLabel, &origins[0], &origins[7], &eqStatus, &eqCurve, &eqBypassButton, &eqClearButton, &duckLabel, &duckOnButton, &duckModeBox,
            &polarityButton, &duckFreqLabel, &duckFreqSlider, &duckDepthLabel, &duckDepthSlider, &duckThresholdLabel,
            &duckThresholdSlider, &duckAttackLabel, &duckAttackSlider, &duckReleaseLabel, &duckReleaseSlider, &duckSyncBox,
-           &duckStatus, &unmaskLabel, &origins[10], &unmaskStatus, &unmaskOffButton },
+           &duckStatus, &alignLabel, &alignSlider, &unmaskLabel, &origins[10], &unmaskStatus, &unmaskOffButton },
          [this](auto area) { layoutEq(area); });
     page(tonePage, pl("Barwa"),
          { &harmonicsLabel, &origins[8], &origins[9], &origins[6], &harmonicsOnButton, &harmonicsFreqLabel, &harmonicsFreqSlider, &harmonicsAmountLabel,
@@ -483,7 +499,7 @@ AgentEditor::AgentEditor(AgentProcessor& p)
          [this](auto area) { layoutTone(area); });
     page(chainPage, pl("Inżynier miksu"),
          { &chainTitle, &origins[1], &origins[2], &origins[3], &origins[4], &cleanLabel, &hpfLabel, &hpfSlider, &monoLabel, &monoSlider, &mudFreqLabel, &mudFreqSlider,
-           &mudGainLabel, &mudGainSlider, &cleanStatus, &compLabel, &compOnButton, &compThresholdLabel, &compThresholdSlider,
+           &mudGainLabel, &mudGainSlider, &highCutLabel, &highCutSlider, &sendDuckLabel, &sendDuckBox, &cleanStatus, &compLabel, &compOnButton, &compThresholdLabel, &compThresholdSlider,
            &compRatioLabel, &compRatioSlider, &compAttackLabel, &compAttackSlider, &compReleaseLabel, &compReleaseSlider,
            &compKneeLabel, &compKneeSlider, &compMakeupLabel, &compMakeupSlider, &compStatus, &clipLabel, &clipOnButton,
            &clipCeilingLabel, &clipCeilingSlider, &clipSoftnessLabel, &clipSoftnessSlider, &clipStatus, &evenLabel,
@@ -599,6 +615,12 @@ void AgentEditor::timerCallback()
     updateOrigins();
     updateDynamicStatus();
     updatePanStatus();
+    {
+        const bool send = static_cast<int>(processor.parameters.getRawParameterValue(AgentProcessor::roleId)->load())
+                          == static_cast<int>(ma::Role::send);
+        sendDuckBox.setEnabled(send);
+        sendDuckLabel.setEnabled(send);
+    }
     const bool connected = processor.isConnectedToBrain();
     connection.setText(connected ? pl("Połączony z Mózgiem") : pl("Brak Mózgu na masterze"), juce::dontSendNotification);
     connection.setColour(juce::Label::textColourId, connected ? colours::good : colours::quiet);
@@ -712,6 +734,17 @@ void AgentEditor::updateDuckStatus()
                 text += pl(" (znoszą się, spróbuj odwrócić polaryzację)");
                 colour = colours::warning;
             }
+        }
+        if (processor.alignmentValid())
+        {
+            const double lag = processor.alignmentLagMs();
+            text += pl(", w czasie: ");
+            if (std::abs(lag) < 0.5)
+                text += pl("razem ze stopą");
+            else if (lag < 0.0)
+                text += pl("dół ") + juce::String(-lag, 1) + pl(" ms przed stopą");
+            else
+                text += pl("dół ") + juce::String(lag, 1) + pl(" ms za stopą");
         }
         if (colour != colours::warning)
             colour = on ? colours::good : colours::quiet;
@@ -965,6 +998,9 @@ void AgentEditor::layoutEq(juce::Rectangle<int> area)
     row = area.removeFromTop(24);
     halfRow(row.removeFromLeft(row.getWidth() / 2).withTrimmedRight(16), duckReleaseLabel, duckReleaseSlider);
     duckSyncBox.setBounds(row.removeFromLeft(110).reduced(0, 1));
+    row.removeFromLeft(16);
+    alignLabel.setBounds(row.removeFromLeft(80));
+    alignSlider.setBounds(row);
     area.removeFromTop(8);
     duckStatus.setBounds(area.removeFromTop(48));
     area.removeFromTop(6);
@@ -1103,8 +1139,15 @@ void AgentEditor::layoutChain(juce::Rectangle<int> area)
     // Left: cleanup and clipper, right: compressor and evener (the chain runs cleanup, clipper, compressor, evener).
     header(area, cleanLabel, nullptr, origin(ma::bus::toolCleanup));
     for (auto [label, slider] : { std::pair { &hpfLabel, &hpfSlider }, std::pair { &monoLabel, &monoSlider },
-                                  std::pair { &mudFreqLabel, &mudFreqSlider }, std::pair { &mudGainLabel, &mudGainSlider } })
+                                  std::pair { &mudFreqLabel, &mudFreqSlider }, std::pair { &mudGainLabel, &mudGainSlider },
+                                  std::pair { &highCutLabel, &highCutSlider } })
         sliderRow(area, *label, *slider);
+    {
+        auto row = area.removeFromTop(24);
+        sendDuckLabel.setBounds(row.removeFromLeft(80));
+        sendDuckBox.setBounds(row.removeFromLeft(180).reduced(0, 1));
+        area.removeFromTop(4);
+    }
     statusRow(area, cleanStatus);
 
     header(area, clipLabel, &clipOnButton, origin(ma::bus::toolClipper));

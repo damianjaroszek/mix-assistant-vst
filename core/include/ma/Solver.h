@@ -33,6 +33,7 @@ struct SolverChannel
     // Phase 17: a part the arrangement does not have yet (sketch mode). It counts in collisions
     // and the tonal balance, so the mix leaves it room, but never gets a change itself.
     bool ghost = false;
+    bool background = false; // phase 34: a send, never protected from masking (MaskingChannel::background)
     // Phase 18: the EQ the channel has now (what the measured master already carries) and a
     // level move planned with this proposal (a stem group's gain). The tonal stage predicts the
     // master from them, so nothing is corrected twice and a second solve gives the same answer.

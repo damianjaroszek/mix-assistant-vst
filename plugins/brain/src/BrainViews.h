@@ -294,12 +294,19 @@ private:
             { MixSnapshot::ReportGroup::arrangement, pl("Aranż i przebieg (poza miksem: dograć, zautomatyzować, podmienić brzmienie)") },
             { MixSnapshot::ReportGroup::setup, pl("Ustawienia wtyczek") },
         } };
-        size_t good = 0;
+        size_t good = 0, gates = 0;
+        // Phase 35: the go / no-go line for mastering always on top, whatever its colour.
+        for (size_t i = 0; i < items.size(); ++i)
+            if (items[i].gate)
+            {
+                rows.push_back(itemRow(i));
+                ++gates;
+            }
         for (const auto& [group, heading] : groups)
         {
             std::vector<size_t> open;
             for (size_t i = 0; i < items.size(); ++i)
-                if (items[i].group == group && items[i].status != MixSnapshot::Status::good)
+                if (!items[i].gate && items[i].group == group && items[i].status != MixSnapshot::Status::good)
                     open.push_back(i);
             std::stable_sort(open.begin(), open.end(), [this](size_t a, size_t b) { return rank(items[a].status) < rank(items[b].status); });
             if (open.empty())
@@ -309,8 +316,8 @@ private:
                 rows.push_back(itemRow(i));
         }
         for (const auto& item : items)
-            good += item.status == MixSnapshot::Status::good ? 1 : 0;
-        if (rows.empty() && !items.empty() && good == items.size())
+            good += !item.gate && item.status == MixSnapshot::Status::good ? 1 : 0;
+        if (rows.size() == gates && items.size() > gates && good == items.size() - gates)
             rows.push_back({ Row::Kind::heading, pl("Wszystko w porządku"), 0, headingHeight });
         if (good > 0)
         {
@@ -321,7 +328,7 @@ private:
                              0, headingHeight });
             if (showGood)
                 for (size_t i = 0; i < items.size(); ++i)
-                    if (items[i].status == MixSnapshot::Status::good)
+                    if (!items[i].gate && items[i].status == MixSnapshot::Status::good)
                         rows.push_back(itemRow(i));
         }
 

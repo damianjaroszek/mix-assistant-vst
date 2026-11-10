@@ -77,7 +77,7 @@ MaskingResult analyseMasking(const std::vector<MaskingChannel>& channels, double
 
         for (int masked = 0; masked < n; ++masked)
         {
-            if (masked == masker || !channels[static_cast<size_t>(masked)].valid)
+            if (masked == masker || !channels[static_cast<size_t>(masked)].valid || channels[static_cast<size_t>(masked)].background)
                 continue;
 
             std::vector<double> perBand(static_cast<size_t>(numBands), 0.0);

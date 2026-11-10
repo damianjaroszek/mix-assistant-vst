@@ -78,6 +78,7 @@ struct MixSnapshot
         ReportGroup group = ReportGroup::mix;
         juce::String title;
         juce::String detail;
+        bool gate = false; // phase 35: the "ready for Ozone?" summary of the others
     };
 
     std::vector<Channel> channels;
@@ -180,7 +181,9 @@ struct Proposal
             stereo,
             saturation, // phase 13
             dynamicEq, // phase 32: dynamic bands and the vocal rider
-            pan        // phase 33
+            pan,       // phase 33
+            depth,     // phase 34: a send's high cut
+            align      // phase 35: the bass delayed onto the kick
         };
         ChainTool tool = ChainTool::none; // with Action::solver unused
         ma::CleanupSettings cleanup {};
@@ -189,6 +192,8 @@ struct Proposal
         ma::BassEvenerSettings evener {};
         ma::DynamicEqSettings dynamicEq {}; // phase 32
         ma::PanSettings pan {};             // phase 33
+        ma::DepthSettings depth {};         // phase 34
+        ma::AlignSettings align {};         // phase 35
         ma::StereoSettings stereo {};
         ma::SaturationSettings saturation {};
 
@@ -574,7 +579,9 @@ private:
     void buildToolNotes(bool wholeMix);
     void addToolLinesToVerdicts();
     void publishToolNotes();
-    static void applyCleanup(MixSnapshot::Channel& channel, const ma::CleanupSettings& cleanup);
+    static void applyCleanup(MixSnapshot::Channel& channel, const ma::CleanupSettings& cleanup, const ma::DepthSettings& depth = {});
+    // Phase 34: the channel the sends give way to (the loudest vocal, else the loudest lead), or null.
+    const MixSnapshot::Channel* mainVoice() const;
     Proposal::Verdict judge(size_t channel, const ma::ChainPlan& plan, const ma::StereoPlan& stereoPlan) const;
     void adaptStep(std::uint64_t now);
     // `groupGain`: level moves per stem group planned with this proposal (phase 18), so the EQ
@@ -607,6 +614,28 @@ private:
     // mixcheck: compressors, ducks and dips took 5-15 dB off parts the group levels were planned
     // without, so after the whole chain everything sat far under the kick. The group levels count it.
     double chainLossDb(std::uint64_t owner) const;
+    // The channel's raw spectrum after its trim, averaged over the drop (-200 where unknown).
+    ma::SpectrumAnalyzer::Bands dropSpectrumDb(std::uint64_t owner) const;
+    // Phase 37: which channels feed a send, from the song's seconds (`songBins`).
+    struct SendSourceInfo
+    {
+        bool valid = false;
+        int seconds = 0;
+        double fit = 0.0;
+        std::vector<std::uint64_t> owners; // candidates, as `share`
+        std::vector<double> share;
+        std::uint64_t dominantOwner = 0;
+    };
+    SendSourceInfo sendSources(std::uint64_t sendOwner) const;
+    struct SendNote
+    {
+        SendSourceInfo sources;
+        int mode = 0;               // ma::bus::SendDuckTo
+        std::uint64_t keyOwner = 0; // what it gives way to (0 = nothing)
+    };
+    std::map<std::uint64_t, SendNote> lastSendNotes; // per send, from the last whole-mix analysis
+    juce::String sendSourcesText(const SendSourceInfo& info) const;
+    const MixSnapshot::Channel* findChannel(std::uint64_t owner) const;
     // mixcheck (real multitracks): Learn brings every part to its role's level, so a quiet piano bed
     // ended as loud as the main lead. The whole-mix analysis gives each part of the music and vocal
     // groups its level in the raw tracks against the others (the group as loud as before), after its chain; the group levels then place the group. Only set while `proposeWholeMix` runs.

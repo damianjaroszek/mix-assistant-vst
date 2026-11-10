@@ -7,6 +7,8 @@
 #include "Ducker.h"
 #include "DynamicEq.h"
 #include "Pan.h"
+#include "Depth.h"
+#include "Alignment.h"
 #include "Harmonics.h"
 #include "Saturator.h"
 #include "Transient.h"
@@ -30,7 +32,7 @@ namespace ma::bus
 {
 
 constexpr std::uint32_t kMagic = 0x4D414255; // "MABU"
-constexpr std::uint32_t kVersion = 19; // phase 33: the Agent's pan
+constexpr std::uint32_t kVersion = 22; // phase 37: what a send gives way to
 constexpr int kMaxSlots = 128;
 constexpr int kNameLength = 48;
 constexpr int kBands = 40;            // ERB bands, as SpectrumAnalyzer with BandScale::erb
@@ -133,6 +135,14 @@ struct AgentData
     PanSettings pan;
     std::int32_t balanceValid;
     float inputBalanceDb;
+    DepthSettings depth; // phase 34
+    // Phase 35: its own delay, and its low end against the sidechain's in time (with a cable).
+    AlignSettings align;
+    std::int32_t alignValid;
+    float alignLagMs;  // > 0: this channel later than the sidechain
+    float alignBest;   // low-band correlation at that lag
+    float alignZero;   // and as it plays now
+    std::int32_t sendDuckTo; // phase 37: a send's choice (SendDuckTo), the user's
 };
 
 // Phase 23: the tools of an Agent, for AgentData::brainTools / changedTools.
@@ -150,7 +160,18 @@ enum ToolBit : std::int32_t
     toolTransients = 1 << 9,
     toolUnmask = 1 << 10, // phase 30
     toolDynamicEq = 1 << 11, // phase 32: dynamic bands and the rider
-    toolPan = 1 << 12        // phase 33
+    toolPan = 1 << 12,       // phase 33
+    toolDepth = 1 << 13,     // phase 34: a send's high cut
+    toolAlign = 1 << 14      // phase 35: the bass's delay against the kick
+};
+
+// Phase 37: what a send (reverb, delay) gives way to, chosen in its Agent.
+enum SendDuckTo : std::int32_t
+{
+    sendDuckAuto = 0,   // the Brain decides from what feeds it
+    sendDuckVoice = 1,  // the main voice (the loudest vocal, else lead)
+    sendDuckSource = 2, // its own source: quiet on the hit, the tail blooms after it
+    sendDuckNone = 3
 };
 
 // Note lengths for a tempo-synced duck release, indexed by AgentData::duckSync.
@@ -197,6 +218,8 @@ struct Command
     std::uint64_t duckKey; // the duck listens to this Agent when no cable brings a sidechain
     DynamicEqSettings dynamicEq; // phase 32
     PanSettings pan;             // phase 33
+    DepthSettings depth;         // phase 34
+    AlignSettings align;         // phase 35
 };
 
 // Phase 30: an Agent's output envelope per octave band, written from its audio thread every block
@@ -214,7 +237,7 @@ struct KeyFeed
 // analysis, so the Agent can say "the Brain looked at this and left it off, because ..." instead of
 // leaving the user to guess whether it was considered at all. Written by the Brain under its own
 // sequence lock, read by the Agent's timer; the text is the reason, UTF-8, the Agent adds the verdict.
-constexpr int kToolCount = 13;
+constexpr int kToolCount = 15;
 constexpr int kNoteLength = 384;
 enum class ToolDecision : std::int32_t
 {

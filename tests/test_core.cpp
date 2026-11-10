@@ -8,6 +8,8 @@
 #include "ma/Ducker.h"
 #include "ma/DynamicEq.h"
 #include "ma/Pan.h"
+#include "ma/Depth.h"
+#include "ma/Alignment.h"
 #include "ma/Harmonics.h"
 #include "ma/Translation.h"
 #include "ma/Transient.h"
@@ -3803,6 +3805,203 @@ void testPan()
                 planned.balancePlannedDb, planned.worstRegionPlannedDb);
 }
 
+void testSendSources()
+{
+    // Three parts with their own spectra and their own pattern of playing over 60 seconds.
+    const int seconds = 60;
+    std::vector<std::vector<ma::SourceFrame>> parts(3, std::vector<ma::SourceFrame>(seconds));
+    const auto shape = [](int part, int r) {
+        if (part == 0) return r >= 3 && r <= 5 ? 1.0 : 0.1;  // a vocal: mids
+        if (part == 1) return r <= 2 ? 1.0 : 0.05;           // a pad: low mids
+        return r >= 6 ? 1.0 : 0.2;                           // hats: top
+    };
+    std::uint32_t seed = 7;
+    const auto random = [&]() { seed = seed * 1664525u + 1013904223u; return (seed >> 8) / 16777216.0; };
+    for (int t = 0; t < seconds; ++t)
+        for (int p = 0; p < 3; ++p)
+        {
+            const bool on = p == 0 ? (t / 6) % 2 == 0 : p == 1 ? (t / 10) % 2 == 1 : random() > 0.3;
+            for (int r = 0; r < ma::kSourceRegions; ++r)
+                parts[static_cast<size_t>(p)][static_cast<size_t>(t)][static_cast<size_t>(r)]
+                    = on ? shape(p, r) * (0.8 + 0.4 * random()) : 1e-6;
+        }
+    // A vocal reverb fed mostly by the vocal, a little by the pad, with its tail.
+    std::vector<ma::SourceFrame> send(seconds);
+    for (int t = 0; t < seconds; ++t)
+        for (int r = 0; r < ma::kSourceRegions; ++r)
+        {
+            const auto at = static_cast<size_t>(r);
+            const auto now = static_cast<size_t>(t), before = static_cast<size_t>(std::max(0, t - 1));
+            send[now][at] = 0.1 * (0.7 * parts[0][now][at] + 0.3 * parts[0][before][at])
+                            + 0.02 * (0.7 * parts[1][now][at] + 0.3 * parts[1][before][at]);
+        }
+    auto found = ma::findSendSources(send, parts);
+    check(found.valid, "send sources: the fit explains the send");
+    check(found.dominant == 0, "send sources: the vocal feeds the vocal reverb");
+    check(found.share[0] > 0.6 && found.share[2] < 0.1, "send sources: shares follow what was sent");
+    // A drum reverb, fed by the hats.
+    for (int t = 0; t < seconds; ++t)
+        for (int r = 0; r < ma::kSourceRegions; ++r)
+            send[static_cast<size_t>(t)][static_cast<size_t>(r)] = 0.05 * parts[2][static_cast<size_t>(t)][static_cast<size_t>(r)];
+    found = ma::findSendSources(send, parts);
+    check(found.valid && found.dominant == 2, "send sources: the hats feed the drum reverb");
+    // Too short a passage says nothing.
+    std::vector<ma::SourceFrame> brief(send.begin(), send.begin() + 6);
+    check(!ma::findSendSources(brief, parts).valid, "send sources: a few seconds are not enough");
+}
+
+void testSendDuck()
+{
+    using Bands = ma::SpectrumAnalyzer::Bands;
+    const int n = ma::SpectrumAnalyzer::numBandsFor(ma::BandScale::erb);
+    Bands voice {}, send {};
+    for (int b = 0; b < n; ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        voice[static_cast<size_t>(b)] = hz > 300.0 && hz < 8000.0 ? (std::abs(hz - 2000.0) < 300.0 ? -14.0 : -20.0) : -80.0;
+        send[static_cast<size_t>(b)] = -30.0;
+    }
+    auto d = ma::planSendDuck(send, voice);
+    check(d.valid, "send duck: valid with both spectra");
+    check(std::abs(d.hz - 2000.0) < 300.0, "send duck: bell over the voice's loudest part");
+    // A loud tail: deep, capped.
+    for (auto& v : send)
+        v = -10.0;
+    d = ma::planSendDuck(send, voice);
+    check(d.depthDb == ma::kSendDuckMaxDb, "send duck: a tail as loud as the voice ducks the most");
+    // A quiet tail: the gentlest.
+    for (auto& v : send)
+        v = -60.0;
+    d = ma::planSendDuck(send, voice);
+    check(d.depthDb == ma::kSendDuckMinDb, "send duck: a tail far under the voice ducks the least");
+    // In between: the tail 12 dB under the voice after the duck.
+    for (auto& v : send)
+        v = -25.0;
+    d = ma::planSendDuck(send, voice);
+    check(std::abs(d.tailVsVoiceDb - d.depthDb + ma::kSendUnderVoiceDb) <= 0.25 + 1e-9, "send duck: tail 12 dB under the voice");
+    Bands silent {};
+    silent.fill(-200.0);
+    check(!ma::planSendDuck(send, silent).valid, "send duck: no voice, no plan");
+}
+
+void testDepth()
+{
+    // The high cut: as its response says, and off means untouched.
+    const double sr = 48000.0;
+    ma::DepthSettings cut;
+    cut.highCutHz = 9000.0f;
+    check(std::abs(ma::depthResponseDb(cut, 9000.0) + 3.01) < 0.05 && ma::depthResponseDb(cut, 1000.0) > -0.01, "depth: high cut response");
+    const auto throughDb = [&](double hz, const ma::DepthSettings& settings) {
+        std::vector<float> l(static_cast<size_t>(sr / 2)), r(l.size());
+        for (size_t i = 0; i < l.size(); ++i)
+            l[i] = r[i] = static_cast<float>(0.5 * std::sin(2.0 * kPi * hz * static_cast<double>(i) / sr));
+        ma::HighCut filter;
+        filter.prepare(sr);
+        filter.setSettings(settings);
+        float* ch[] = { l.data(), r.data() };
+        filter.process(ch, 2, static_cast<int>(l.size()));
+        double p = 0.0;
+        for (size_t i = l.size() / 2; i < l.size(); ++i)
+            p += l[i] * l[i];
+        return 10.0 * std::log10(p / (l.size() / 2) / 0.125);
+    };
+    check(std::abs(throughDb(14000.0, cut) - ma::depthResponseDb(cut, 14000.0)) < 0.6, "depth: the filter does what the response says");
+    check(std::abs(throughDb(14000.0, {})) < 0.01, "depth: off is untouched");
+
+    const auto times = ma::depthTimes(125.0);
+    check(times.valid && std::abs(times.preDelayMs - 30.0) < 0.01 && std::abs(times.dottedEighthMs - 360.0) < 0.01
+              && std::abs(times.quarterMs - 480.0) < 0.01 && std::abs(times.decaySeconds - 0.96) < 0.001,
+          "depth: times on the groove at 125 BPM");
+
+    // A send as bright as the dry parts gets its top cut; a dark one is left as it is.
+    std::vector<ma::ChainChannel> mix(2);
+    for (size_t i = 0; i < mix.size(); ++i)
+    {
+        mix[i].valid = true;
+        mix[i].priority = 5;
+        for (int b = 0; b < ma::bus::kBands; ++b)
+        {
+            const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+            mix[i].bandsDb[static_cast<size_t>(b)] = -20.0 - 6.0 * std::log2(std::max(1.0, hz / 1000.0)) - (i == 1 ? 15.0 : 0.0);
+        }
+    }
+    mix[0].role = ma::Role::vocal;
+    mix[1].role = ma::Role::send;
+    auto plans = ma::planChains(mix);
+    check(plans[1].depthConsidered && plans[1].depth.highCutHz > 0.0f && !plans[0].depthConsidered, "depth: a bright send gets a high cut");
+    for (int b = 0; b < ma::bus::kBands; ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        if (hz > 4000.0)
+            mix[1].bandsDb[static_cast<size_t>(b)] -= 12.0 * std::log2(hz / 4000.0);
+    }
+    {
+        // A send is never covered: the dry vocal does not give way to its own room.
+        std::vector<ma::MaskingChannel> m(2);
+        for (size_t i = 0; i < 2; ++i)
+        {
+            m[i].valid = true;
+            m[i].priority = 5;
+            m[i].rawDb.fill(i == 0 ? -20.0 : -30.0);
+        }
+        check(!ma::analyseMasking(m).issues.empty(), "depth: a quieter part is covered");
+        m[1].background = true;
+        check(ma::analyseMasking(m).issues.empty(), "depth: a send is never reported as covered");
+    }
+    plans = ma::planChains(mix);
+    check(plans[1].depthConsidered && !ma::depthOn(plans[1].depth), "depth: a dark send stays as it is ("
+                                                                        + std::to_string(plans[1].sendTiltDb - plans[1].mixTiltDb).substr(0, 5) + " dB)");
+}
+
+void testAlignment()
+{
+    const double sr = 48000.0;
+    // A 55 Hz kick body every half second, and the same body shifted by `shiftMs` as the "bass".
+    const auto measure = [&](double shiftMs) {
+        const size_t n = static_cast<size_t>(sr * 6.0);
+        std::vector<float> kick(n), bass(n);
+        const auto hit = [&](double t) {
+            const double local = std::fmod(t, 0.5);
+            return local < 0.0 ? 0.0 : 0.5 * std::exp(-local / 0.12) * std::sin(2.0 * kPi * 55.0 * local);
+        };
+        for (size_t i = 0; i < n; ++i)
+        {
+            const double t = static_cast<double>(i) / sr;
+            kick[i] = static_cast<float>(hit(t));
+            bass[i] = static_cast<float>(t - shiftMs / 1000.0 >= 0.0 ? 0.8 * hit(t - shiftMs / 1000.0) : 0.0);
+        }
+        ma::LowAlignMeter meter;
+        meter.prepare(sr);
+        for (size_t start = 0; start < n; start += 512)
+            meter.process(bass.data() + start, kick.data() + start, static_cast<int>(std::min<size_t>(512, n - start)));
+        return std::make_tuple(meter.valid(), meter.bestLagMs(), meter.correlationAtBest(), meter.correlationAtZero());
+    };
+    {
+        const auto [valid, lag, best, zero] = measure(3.0);
+        check(valid && std::abs(lag - 3.0) < 0.4 && best > 0.9 && zero < best - 0.03,
+              "align: a bass 3 ms late reads +3 ms (" + std::to_string(lag).substr(0, 5) + ")");
+    }
+    {
+        const auto [valid, lag, best, zero] = measure(-4.0);
+        check(valid && std::abs(lag + 4.0) < 0.4 && best > 0.9, "align: a bass 4 ms early reads -4 ms (" + std::to_string(lag).substr(0, 5) + ")");
+    }
+    {
+        const auto [valid, lag, best, zero] = measure(0.0);
+        check(valid && std::abs(lag) < 0.3 && std::abs(best - zero) < 0.01, "align: in time reads 0");
+    }
+    // The delay: exactly its samples late.
+    {
+        ma::AlignDelay delay;
+        delay.prepare(sr);
+        delay.setSettings({ 2.0f });
+        std::vector<float> l(1000, 0.0f), r(1000, 0.0f);
+        l[10] = r[10] = 1.0f;
+        float* ch[] = { l.data(), r.data() };
+        delay.process(ch, 2, 1000);
+        check(l[10 + 96] == 1.0f && r[10 + 96] == 1.0f && l[10] == 0.0f, "align: the delay is 96 samples at 2 ms");
+    }
+}
+
 int main()
 {
     testLoudness();
@@ -3815,6 +4014,10 @@ int main()
     testPercussionLevel();
     testDynamicEq();
     testPan();
+    testDepth();
+    testSendDuck();
+    testSendSources();
+    testAlignment();
     testChannelAnalyzerSpeed();
     testMixBus();
     testMasking();

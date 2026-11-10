@@ -20,6 +20,9 @@ struct MaskingChannel
     SpectrumAnalyzer::Bands rawDb {}; // ERB bands, dBFS
     int priority = 5;                 // 1 = most important
     bool valid = false;
+    // Phase 34: meant to sit behind (a reverb or delay return): it masks like any part, but nothing
+    // is reported as covering it, so no dry part gives way to its own room.
+    bool background = false;
 };
 
 struct MaskingIssue

@@ -89,6 +89,8 @@ int roleFromName(const String& fileName)
                 return true;
         return false;
     };
+    if (any({ "reverb", "verb", "delay", "echo", "return", "send" })) // before vocals: "VoxReverb" is a return
+        return static_cast<int>(ma::Role::send);
     if (any({ "kick", "bd ", "bassdrum", "bass drum" }))
         return static_cast<int>(ma::Role::kick);
     if (any({ "vox", "vocal", "voc", "lead vox", "acapella", "adlib", "choir" }))
@@ -290,7 +292,8 @@ String signedDb(double v)
 
 int usage()
 {
-    std::fprintf(stderr, "usage: mixcheck --stems DIR [--reference MIX] [--target-refs A B ...] [--bpm N] [--out DIR] [--name NAME]\n");
+    std::fprintf(stderr, "usage: mixcheck --stems DIR [--reference MIX] [--target-refs A B ...] [--bpm N] [--out DIR] [--name NAME]\n"
+                         "       [--kick-cable] [--shift-bass MS]\n");
     return 2;
 }
 } // namespace
@@ -303,6 +306,8 @@ int main(int argc, char** argv)
     Array<File> targetRefs;
     double bpm = 124.0;
     String name;
+    bool kickCable = false;  // the kick on each bass Agent's sidechain input, as a cable in FL
+    double shiftBassMs = 0.0; // move the bass stems in time (> 0 later), to check the alignment
     for (int i = 1; i < argc; ++i)
     {
         const String arg(argv[i]);
@@ -317,6 +322,10 @@ int main(int argc, char** argv)
             outDir = File(next());
         else if (arg == "--name")
             name = next();
+        else if (arg == "--kick-cable")
+            kickCable = true;
+        else if (arg == "--shift-bass")
+            shiftBassMs = next().getDoubleValue();
         else if (arg == "--target-refs")
             while (i + 1 < argc && !String(argv[i + 1]).startsWith("--"))
                 targetRefs.add(File(String(argv[++i])));
@@ -379,9 +388,28 @@ int main(int argc, char** argv)
                 padded.copyFrom(c, 0, t.audio, c, 0, t.audio.getNumSamples());
             t.audio = std::move(padded);
         }
+        if (shiftBassMs != 0.0 && t.role == static_cast<int>(ma::Role::bass))
+        {
+            const int shift = static_cast<int>(std::lround(shiftBassMs * 0.001 * rate));
+            AudioBuffer<float> moved(2, length);
+            moved.clear();
+            for (int c = 0; c < 2; ++c)
+                for (int i = 0; i < length; ++i)
+                    if (i - shift >= 0 && i - shift < length)
+                        moved.setSample(c, i, t.audio.getSample(c, i - shift));
+            t.audio = std::move(moved);
+            std::printf("shifted %s by %.2f ms\n", t.name.toRawUTF8(), shiftBassMs);
+        }
         for (int c = 0; c < 2; ++c)
             raw.addFrom(c, 0, t.audio, c, 0, length);
     }
+    int kickTrack = -1;
+    for (size_t t = 0; t < tracks.size() && kickCable; ++t)
+        if (tracks[t].role == static_cast<int>(ma::Role::kick))
+        {
+            kickTrack = static_cast<int>(t);
+            break;
+        }
     const auto dropStart = loudestStretch(raw, rate, kDropSeconds);
     const auto dropLength = static_cast<int64>(std::min<double>(kDropSeconds * rate, length - dropStart));
     std::printf("%zu stems at %.0f Hz, %.0f s; drop from %.0f s\n", tracks.size(), rate, length / rate, dropStart / rate);
@@ -425,12 +453,18 @@ int main(int argc, char** argv)
     transport.sampleRate = rate;
     transport.bpm = bpm;
     std::vector<std::unique_ptr<AgentProcessor>> agents;
+    std::vector<bool> cabled;
     for (const auto& t : tracks)
     {
         auto agent = std::make_unique<AgentProcessor>();
         auto layout = agent->getBusesLayout();
+        const bool cable = kickTrack >= 0 && t.role == static_cast<int>(ma::Role::bass);
+        cabled.push_back(cable);
         if (layout.inputBuses.size() > 1)
-            layout.inputBuses.getReference(1) = AudioChannelSet::disabled(); // no cable: what FL users mostly have
+            layout.inputBuses.getReference(1) = cable ? AudioChannelSet::stereo()
+                                                      : AudioChannelSet::disabled(); // no cable: what FL users mostly have
+        if (cable)
+            std::printf("kick cable into %s\n", t.name.toRawUTF8());
         agent->setBusesLayout(layout);
         agent->setPlayHead(&transport);
         agent->setRateAndBufferSizeDetails(rate, kBlock);
@@ -452,7 +486,7 @@ int main(int argc, char** argv)
         brain->selectTarget("mixcheck");
     MessageManager::getInstance()->runDispatchLoopUntil(300);
 
-    AudioBuffer<float> block(2, kBlock), sum(2, kBlock);
+    AudioBuffer<float> block(4, kBlock), sum(2, kBlock);
     MidiBuffer midi;
     // Plays from `from` for `seconds`; inside the drop when `loop`, carrying on where the last loop
     // stopped (short calls each restarting at the drop's first seconds left parts that come in later
@@ -489,9 +523,13 @@ int main(int argc, char** argv)
                         p -= dropLength;
                     if (p < length)
                         for (int c = 0; c < 2; ++c)
+                        {
                             block.setSample(c, i, tracks[t].audio.getSample(c, static_cast<int>(p)));
+                            if (cabled[t])
+                                block.setSample(2 + c, i, tracks[static_cast<size_t>(kickTrack)].audio.getSample(c, static_cast<int>(p)));
+                        }
                 }
-                AudioBuffer<float> view(block.getArrayOfWritePointers(), 2, n);
+                AudioBuffer<float> view(block.getArrayOfWritePointers(), cabled[t] ? 4 : 2, n);
                 agents[t]->processBlock(view, midi);
                 if (measureOut && !loop && position >= dropStart && position + n <= dropStart + dropLength)
                 {
@@ -559,6 +597,12 @@ int main(int argc, char** argv)
         play(dropStart, 4.0, true, nullptr);
         std::printf("  after refining, %d s: peak %.1f dBTP\n", (s + 1) * 4, brain->truePeakDb());
     }
+    for (size_t t = 0; t < tracks.size(); ++t)
+        if (cabled[t])
+            std::printf("  %s against the kick: %s lag %.2f ms, correlation %.2f now, %.2f at best, delay %.2f ms\n",
+                        tracks[t].name.toRawUTF8(), agents[t]->alignmentValid() ? "measured" : "not measured",
+                        agents[t]->alignmentLagMs(), agents[t]->alignmentZero(), agents[t]->alignmentBest(),
+                        static_cast<double>(*agents[t]->parameters.getRawParameterValue(AgentProcessor::alignDelayId)));
     const auto after = brain->snapshot();
 
     // 4. The whole song as the Agents ended up.

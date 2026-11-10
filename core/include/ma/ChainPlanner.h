@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ChannelChain.h"
+#include "Depth.h"
 #include "DynamicEq.h"
 #include "Harmonics.h"
 #include "Instrument.h"
@@ -125,6 +126,12 @@ struct ChainPlan
     std::array<bool, kDynamicBands> probeCoversImportant {};
     bool dynamicConsidered = false;                       // a role that may take them, with probe stats
     double riderSpreadDb = 0.0;                           // P50 - P10 when the rider was considered
+
+    // Phase 34: a reverb or delay return darker than the mix sits behind it; one as bright as the
+    // dry parts stands next to them and blurs them, so its top is cut.
+    DepthSettings depth {};
+    bool depthConsidered = false; // a send with a spectrum
+    double sendTiltDb = 0.0, mixTiltDb = 0.0; // topTiltDb of the send and of the rest of the mix
 
     // Phase 15: glue compression on a bus. A gentle ratio and a slow attack that lets the hits
     // through, the release on the groove, a couple of dB on the loud parts: the sources move as
