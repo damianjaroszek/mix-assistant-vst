@@ -437,6 +437,8 @@ public:
     // Tonal targets built from reference tracks, kept as files in the user's app data folder.
     juce::StringArray targetNames() const;
     const ma::TonalTarget& target() const { return currentTarget; }
+    // Phase 38: the user's target, or the built-in house one while they have none.
+    const ma::TonalTarget& activeTarget() const { return currentTarget.valid() ? currentTarget : builtinTarget; }
     bool selectTarget(const juce::String& name);
     bool createTarget(const juce::String& name);
     bool selectLastTarget();
@@ -499,8 +501,7 @@ public:
     // master spectrum the tonal balance and the solver work on.
     ma::Curve limiterTilt() const;
     ma::Curve tonalMasterSpectrum() const;
-    ma::TonalTarget producerBalanceTarget() const;
-    ma::Curve channelOutputSum() const;
+    juce::String builtinNote() const;
     // The comparison of the mix as it plays, for the thin line when the main one is after the limiter.
     const ma::TonalComparison& tonalBeforeLimiter() const { return tonalPlain; }
     static constexpr double kMaxTiltDb = 2.0;
@@ -762,6 +763,7 @@ private:
                     std::map<int, std::vector<Proposal::Item>>& dips) const;
     double loudnessBefore = -INFINITY, loudnessAfter = -INFINITY;
     ma::TonalTarget currentTarget;
+    ma::TonalTarget builtinTarget = ma::builtinHouseTarget();
     bool capturing = false;
     AdaptiveStatus adaptiveState;
     std::uint64_t lastAdaptMs = 0;

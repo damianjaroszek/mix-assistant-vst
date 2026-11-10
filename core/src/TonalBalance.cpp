@@ -244,4 +244,27 @@ bool parseTarget(const std::string& text, TonalTarget& target)
     return true;
 }
 
+TonalTarget builtinHouseTarget()
+{
+    static const double kCentre[] = { 12.8, 12.9, 12.1, 9.9, 7.4, 5.0, 3.7, 3.0, 3.3, 3.6, 3.2, 1.6, -0.0, -0.9,
+                                      -1.0, -1.0, -1.3, -1.8, -2.6, -3.4, -4.0, -4.2, -4.1, -4.3, -4.6, -5.1, -5.3, -5.1,
+                                      -4.5, -4.3, -4.5, -4.9, -5.4, -6.0, -6.9, -8.6, -10.8, -13.5, -15.6, -17.7 };
+    static_assert(sizeof(kCentre) / sizeof(kCentre[0]) == 40, "one value per ERB band");
+    TonalTarget target;
+    target.name = kBuiltinTargetName;
+    Curve centre {};
+    for (int b = 0; b < numBands() && b < 40; ++b)
+        centre[static_cast<size_t>(b)] = kCentre[b];
+    target.references.push_back(normaliseCurve(centre));
+    target.rebuild();
+    for (int b = 0; b < numBands(); ++b)
+    {
+        const double hz = hzOf(b);
+        const double half = hz < 60.0 || hz > 10000.0 ? 3.5 : 2.5;
+        target.low[static_cast<size_t>(b)] = target.centre[static_cast<size_t>(b)] - half;
+        target.high[static_cast<size_t>(b)] = target.centre[static_cast<size_t>(b)] + half;
+    }
+    return target;
+}
+
 } // namespace ma

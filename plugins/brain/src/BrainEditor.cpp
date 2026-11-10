@@ -488,7 +488,7 @@ void BrainEditor::updateGuide()
                           ? (tonal ? pl("Cel tonalny „") + juce::String::fromUTF8(processor.target().name.c_str()) + pl("” wybrany. ") : juce::String())
                                 + (stems ? pl("Stemy referencji wczytane.") : pl("Stemy referencji (zakładka „Referencje”) dadzą jeszcze proporcje grup i szerokość."))
                           : pl("Raz na gatunek: „Balans tonalny” → „Nowy cel” → nagraj 3–10 utworów (jak Capture w TBC). Bez tego Mózg "
-                               "trzyma się typowych proporcji house'u, a balansu tonalnego nie ocenia.");
+                               "trzyma się typowych proporcji house'u i wbudowanego celu „Typowy house” (szerokiego jak w TBC).");
         setup.steps.push_back(step);
     }
 
@@ -621,10 +621,12 @@ void BrainEditor::timerCallback()
     if (processor.isCapturing())
         tonalStatus = pl("Nagrywam referencję do „") + targetName + pl("”: ") + juce::String(juce::roundToInt(processor.secondsAnalysed()))
                       + pl(" s. Puść cały utwór (albo drop) na masterze i kliknij „Zakończ nagrywanie”.");
-    else if (targetName.isEmpty())
-        tonalStatus = pl("Utwórz cel („Nowy cel”) i nagraj do niego referencje, jak Capture w Tonal Balance.");
     else if (!target.valid())
-        tonalStatus = pl("Cel „") + targetName + pl("” nie ma referencji. Kliknij „Nagraj referencję”.");
+        tonalStatus = (targetName.isEmpty() ? pl("Bez własnego celu: wbudowany „Typowy house” (szeroki jak TBC). Własny: „Nowy cel” i referencje")
+                                            : pl("Cel „") + targetName + pl("” nie ma referencji (do tego czasu wbudowany „Typowy house”). Kliknij „Nagraj referencję”"))
+                      + (mix.tonal.valid ? juce::String()
+                                         : pl(". Słucham miksu: ") + juce::String(juce::roundToInt(processor.secondsAnalysed())) + " / "
+                                               + juce::String(juce::roundToInt(BrainProcessor::kMinimumSeconds)) + " s");
     else if (!mix.tonal.valid)
         tonalStatus = pl("Cel „") + targetName + "\" (" + juce::String(static_cast<int>(target.references.size()))
                       + pl(" ref.). Słucham miksu: ") + juce::String(juce::roundToInt(processor.secondsAnalysed())) + " / "
@@ -639,7 +641,7 @@ void BrainEditor::timerCallback()
         tonalStatus += pl(". Podgląd limitera jeszcze słucha, krzywa bez niego");
     if (mix.sketch.active() && mix.sketch.tonal.valid)
         tonalStatus += pl(". Przerywana: z partiami-duchami, szare: dziury aranżu (nie EQ)");
-    tonalView.setData(target, mix.tonal, tonalStatus, mix.sketch.active() ? mix.sketch.tonal : ma::TonalComparison {},
+    tonalView.setData(processor.activeTarget(), mix.tonal, tonalStatus, mix.sketch.active() ? mix.sketch.tonal : ma::TonalComparison {},
                       mix.sketch.arrangementRegion, afterLimiter ? processor.tonalBeforeLimiter() : ma::TonalComparison {});
     afterLimiterButton.setToggleState(processor.tonalAfterLimiter(), juce::dontSendNotification);
     {

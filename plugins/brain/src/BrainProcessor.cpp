@@ -810,10 +810,10 @@ void BrainProcessor::timerCallback()
     mix.masking = ma::analyseMasking(masking);
     mix.tonal = {};
     tonalPlain = {};
-    if (currentTarget.valid() && !capturing && !comparing && secondsAnalysed() >= kMinimumSeconds)
+    if (activeTarget().valid() && !capturing && !comparing && secondsAnalysed() >= kMinimumSeconds)
     {
-        mix.tonal = ma::compareToTarget(tonalMasterSpectrum(), currentTarget);
-        tonalPlain = ma::compareToTarget(averageSpectrum(), currentTarget);
+        mix.tonal = ma::compareToTarget(tonalMasterSpectrum(), activeTarget());
+        tonalPlain = ma::compareToTarget(averageSpectrum(), activeTarget());
     }
 
     std::vector<ma::TranslationChannel> translation(mix.channels.size());
@@ -944,24 +944,9 @@ ma::SolverResult BrainProcessor::solveNow(double headroomGainDb, const ma::StemS
         options.tonal = &mix.tonal;
     if (mix.tonal.valid)
     {
-        options.tonalTarget = &currentTarget;
+        options.tonalTarget = &activeTarget(); // phase 38: the built-in one until the user has a target
         options.tonalMasterDb = mix.sketch.active() ? ma::addGhosts(tonalMasterSpectrum(), mix.sketch.analysis) : tonalMasterSpectrum();
         options.centreZones = true; // phase 24
-    }
-    // Without a tonal target the producer's own balance is the target: collision cuts, level moves and
-    // cleanup must not tilt the mix (on real songs they lifted the top by about 3 dB).
-    ma::TonalTarget own;
-    if (!currentTarget.valid() && !capturing && !comparing && secondsAnalysed() >= kMinimumSeconds)
-    {
-        own = producerBalanceTarget();
-        if (own.valid())
-        {
-            // Compared in the same measurement: the channels' outputs as the Agents read them (the
-            // master analyser reads the stereo sum differently, wide tops look darker there).
-            options.tonalTarget = &own;
-            options.tonalMasterDb = channelOutputSum();
-            options.centreZones = true;
-        }
     }
     options.stems = stems;
     return ma::solve(channels, options);
@@ -1779,68 +1764,11 @@ constexpr size_t kMaxLostListed = 5;
 constexpr double kMonoFoldLowHz = 150.0, kMonoFoldHighHz = 8000.0;
 constexpr double kMonoFoldAudibleDb = -30.0; // a part this far under the mix does not count
 constexpr double kMonoFoldWarnDb = 3.0, kMonoFoldProblemDb = 6.0;
-constexpr double kOwnBalanceHalfDb = 1.0, kOwnBalanceEdgeHalfDb = 1.5;
-
-// The tracks as the producer balanced them (before trims and the Agents' chains), summed as the Agents
-// measure them: a one-reference target that keeps the mix's own tonal balance.
-ma::Curve BrainProcessor::channelOutputSum() const
+juce::String BrainProcessor::builtinNote() const
 {
-    ma::Curve sum {};
-    sum.fill(0.0);
-    for (const auto& channel : mix.channels)
-    {
-        if (!channel.spectrumValid || !inMixSums(channel))
-            continue;
-        for (int b = 0; b < ma::bus::kBands; ++b)
-        {
-            const auto at = static_cast<size_t>(b);
-            const double db = channel.outputValid ? channel.outputDb[at] : channel.heardDb[at];
-            if (db > -150.0)
-                sum[at] += std::pow(10.0, db / 10.0);
-        }
-    }
-    for (auto& v : sum)
-        v = v > 1e-20 ? 10.0 * std::log10(v) : -200.0;
-    return sum;
-}
-
-ma::TonalTarget BrainProcessor::producerBalanceTarget() const
-{
-    ma::TonalTarget target;
-    ma::Curve sum {};
-    sum.fill(0.0);
-    bool any = false;
-    for (const auto& channel : mix.channels)
-    {
-        if (!channel.spectrumValid || !inMixSums(channel))
-            continue;
-        for (int b = 0; b < ma::bus::kBands; ++b)
-        {
-            const double db = channel.rawDb[static_cast<size_t>(b)] - channel.data.trimDb;
-            if (db > -150.0)
-            {
-                sum[static_cast<size_t>(b)] += std::pow(10.0, db / 10.0);
-                any = true;
-            }
-        }
-    }
-    if (!any)
-        return target;
-    ma::Curve db {};
-    for (size_t b = 0; b < db.size(); ++b)
-        db[b] = sum[b] > 1e-20 ? 10.0 * std::log10(sum[b]) : -200.0;
-    target.name = "own balance";
-    target.references.push_back(ma::normaliseCurve(db));
-    target.rebuild();
-    // A narrow corridor: the producer's balance is a point, not a spread of references.
-    for (int b = 0; b < ma::bus::kBands; ++b)
-    {
-        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
-        const double half = hz < 60.0 || hz > 10000.0 ? kOwnBalanceEdgeHalfDb : kOwnBalanceHalfDb;
-        target.low[static_cast<size_t>(b)] = target.centre[static_cast<size_t>(b)] - half;
-        target.high[static_cast<size_t>(b)] = target.centre[static_cast<size_t>(b)] + half;
-    }
-    return target;
+    return currentTarget.valid() ? juce::String()
+                                 : pl(" To wbudowany cel z dwóch masterów house, szeroki jak korytarz TBC; własny („Nowy cel”, "
+                                      "2-3 referencje) zawsze ma pierwszeństwo.");
 }
 
 ma::Curve BrainProcessor::tonalMasterSpectrum() const
@@ -1945,7 +1873,7 @@ void BrainProcessor::updateSketch()
 
     if (mix.tonal.valid)
     {
-        sketch.tonal = ma::compareToTarget(ma::addGhosts(tonalMasterSpectrum(), sketch.analysis), currentTarget);
+        sketch.tonal = ma::compareToTarget(ma::addGhosts(tonalMasterSpectrum(), sketch.analysis), activeTarget());
         sketch.arrangementRegion = ma::arrangementRegions(mix.tonal, sketch.tonal);
     }
 
@@ -2304,7 +2232,7 @@ void BrainProcessor::buildReport()
                        + (noStats.isEmpty() ? pl(" (projekt sprzed fazy 23, brak szczytu)") : juce::String()))
                   + pl(" → kompresja, clipper, wyrównanie basu, rola, strój stopy"));
         lines.add((currentTarget.valid() ? yes + pl("cel tonalny ") + quoted(juce::String::fromUTF8(currentTarget.name.c_str()))
-                                         : no + pl("cel tonalny"))
+                                         : no + pl("własny cel tonalny (do tego czasu wbudowany „Typowy house”)"))
                   + pl(" → balans tonalny, korekcje barwy"));
         lines.add((currentStems.valid() ? yes + pl("referencje ze stemów ") + quoted(juce::String::fromUTF8(currentStems.name.c_str()))
                                         : no + pl("referencje ze stemów (proporcje grup i szkic: typowy house)"))
@@ -2413,7 +2341,7 @@ void BrainProcessor::buildReport()
     {
         MixSnapshot::ReportItem item;
         item.title = pl("Balans tonalny");
-        if (!currentTarget.valid())
+        if (!activeTarget().valid())
         {
             item.detail = currentTarget.name.empty()
                               ? pl("Raz na zawsze: w widoku „Balans tonalny” kliknij „Nowy cel” i nagraj 2-3 utwory referencyjne puszczone "
@@ -2445,7 +2373,7 @@ void BrainProcessor::buildReport()
                                                                      + pl(". To aranż, nie EQ (widok „Aranż”).");
             // Phase 24: where each of TBC's ranges sits against the corridor's centre, and on what curve.
             const auto& judged = sketch ? mix.sketch.tonal : mix.tonal;
-            const auto zones = ma::zoneOffsets(judged, currentTarget);
+            const auto zones = ma::zoneOffsets(judged, activeTarget());
             juce::StringArray offsets;
             bool offCentre = false;
             for (int z = 0; z < ma::kTonalZones; ++z)
@@ -2468,7 +2396,7 @@ void BrainProcessor::buildReport()
             {
                 item.status = Status::good;
                 item.detail = (sketch ? pl("Z partiami-duchami miks mieści się w korytarzu celu ") : pl("Cały miks mieści się w korytarzu celu "))
-                              + quoted(juce::String::fromUTF8(currentTarget.name.c_str())) + "." + zonesText + curveText + arrangementText;
+                              + quoted(juce::String::fromUTF8(activeTarget().name.c_str())) + "." + zonesText + curveText + arrangementText + builtinNote();
             }
             else
             {
@@ -3684,9 +3612,7 @@ void BrainProcessor::proposeOnce(const std::array<double, ma::kStemGroups>* grou
     {
         Proposal::Item item;
         item.change = change;
-        const auto targetName = currentTarget.valid()
-                                    ? quoted(juce::String::fromUTF8(currentTarget.name.c_str()))
-                                    : pl("„własny balans śladów” (bez nagranego celu Mózg trzyma barwę, z jaką przyszły ślady)");
+        const auto targetName = quoted(juce::String::fromUTF8(activeTarget().name.c_str()));
         const auto range = hzText(change.lowHz) + pl("–") + hzText(change.highHz);
         if (change.kind == ma::SolverChange::Kind::globalGain)
         {
@@ -5266,8 +5192,7 @@ void BrainProcessor::buildToolNotes(bool wholeMix)
                 });
                 auto why = masks ? pl("jego kolizje biorą na siebie inne narzędzia (ustępowanie, poziom grup) albo inne kanały")
                                  : pl("nie zasłania innych kanałów");
-                why += currentTarget.valid() ? pl(", a balans tonalny nie potrzebuje jego pasm")
-                                             : pl("; bez nagranego celu trzymam barwę, z jaką przyszły ślady, a jego pasma jej nie przesuwają");
+                why += pl(", a balans tonalny nie potrzebuje jego pasm");
                 set(ma::bus::toolEq, D::notNeeded, why);
             }
         }
@@ -5729,7 +5654,7 @@ void BrainProcessor::proposeHarmonics()
     // Phase 27: a step may not push the balance further out of the target's corridor than it already
     // is (overtones on the kick and bass used to lift Low past it, and the next round could not undo
     // it). How far outside, summed over the bands, with the steps so far against what plays now.
-    const bool tonalKnown = mix.tonal.valid && currentTarget.valid();
+    const bool tonalKnown = mix.tonal.valid && activeTarget().valid();
     const auto masterAfter = tonalKnown ? tonalMasterSpectrum() : ma::Curve {};
     const auto outside = [&](const std::vector<ma::TranslationChannel>& t) {
         if (!tonalKnown)
@@ -5747,7 +5672,7 @@ void BrainProcessor::proposeHarmonics()
             if (was > 1e-20 && now > 1e-20)
                 master[static_cast<size_t>(b)] += 10.0 * std::log10(now / was);
         }
-        return ma::outsideCorridorDb(ma::compareToTarget(master, currentTarget));
+        return ma::outsideCorridorDb(ma::compareToTarget(master, activeTarget()));
     };
     const auto tonalOk = [&](const std::vector<ma::TranslationChannel>& test) {
         return !tonalKnown || outside(test) <= outside(trial) + kTranslationTonalSlackDb;
@@ -7512,7 +7437,7 @@ juce::String BrainProcessor::masteringReportHtml() const
     const auto& masterTonal = mix.sketch.active() && mix.sketch.tonal.valid ? mix.sketch.tonal : mix.tonal;
     if (masterTonal.valid && !masterTonal.regions.empty())
     {
-        out << "<li>" << pl("EQ na sumie (szeroko, względem celu ") << html(quoted(juce::String::fromUTF8(currentTarget.name.c_str()))) << "): ";
+        out << "<li>" << pl("EQ na sumie (szeroko, względem celu ") << html(quoted(juce::String::fromUTF8(activeTarget().name.c_str()))) << "): ";
         juce::StringArray parts;
         for (const auto& region : masterTonal.regions)
             parts.add((region.hole() ? "+" : pl("−")) + juce::String(std::abs(region.deviationDb), 1) + " dB " + hzText(region.lowHz) + pl("–")
@@ -7521,14 +7446,14 @@ juce::String BrainProcessor::masteringReportHtml() const
     }
     else if (masterTonal.valid)
     {
-        out << "<li>" << pl("EQ na sumie: balans mieści się w korytarzu celu ") << html(quoted(juce::String::fromUTF8(currentTarget.name.c_str())))
+        out << "<li>" << pl("EQ na sumie: balans mieści się w korytarzu celu ") << html(quoted(juce::String::fromUTF8(activeTarget().name.c_str())))
             << pl(", wystarczą drobne korekty do gustu.") << "</li>";
     }
     // Phase 24: what is left of each TBC range's distance from the centre (after "Zastosuj" it is
     // what the channels could not take): a broad move in Ozone's EQ or a Dynamics band's gain.
     if (masterTonal.valid)
     {
-        const auto zones = ma::zoneOffsets(masterTonal, currentTarget);
+        const auto zones = ma::zoneOffsets(masterTonal, activeTarget());
         juce::StringArray moves;
         for (int z = 0; z < ma::kTonalZones; ++z)
         {

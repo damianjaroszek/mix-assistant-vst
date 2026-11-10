@@ -281,10 +281,11 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   none, `AgentData::sendDuckTo`, the user's, `bus::kVersion` 22; "Inżynier miksu" tab, enabled on sends): auto = drums source -> whole-signal
   duck under it (2 ms, 1/16 synced, depth over 200 Hz-8 kHz, <= `kSendDuckSourceMaxDb` 6), else the main voice (phase 36), else its source
   (bell 300 Hz-6 kHz, 1/8); "none" turns a Brain-made duck off. `lastSendNotes` feeds the "Głębia" report line (sources, key).
-- Phase 38 engineer's checks: without a tonal target (`currentTarget` invalid) `solveNow` uses `producerBalanceTarget()` (the channels'
-  raw spectra minus trim summed, one reference, corridor +-1 dB, +-1.5 below 60 Hz / above 10 kHz) against `channelOutputSum()` (the
-  Agents' output spectra, same measurement; the master analyser reads wide tops darker), with `centreZones`: collision cuts and level
-  moves no longer tilt the mix (on both real songs the summed TBC distance to the raw tracks halved, the top had risen 3-5 dB).
+- Phase 38 engineer's checks: without a tonal target of the user's (`currentTarget` invalid) the Brain uses `ma::builtinHouseTarget()`
+  ("Typowy house (wbudowany)": the mean of the Chardonnay remix and Galias masters from `ma-lab --make-target`, smoothed over +-2 ERB
+  bands, corridor +-2.5 dB, +-3.5 below 60 Hz / above 10 kHz) through `activeTarget()` everywhere the analysis compares (report, view,
+  sketch, solver, translation `tonalOk`, HTML); `target()` stays the user's for the target list and capture. Before it, nothing balanced
+  collision cuts and level moves without a target and the top rose 3-5 dB on both real songs.
   Report "Ślady w mono" (per channel 150 Hz-8 kHz mid vs mid + processed side, `processedSidePower`, against the mix's; warning 3 dB,
   problem 6 dB, parts > -30 dB of the mix) and "Słyszalność w czasie" (`ma/Audibility.h` `findLostSpans` on `songBins` plus each
   channel's present heard - raw EQ, refreshed every 2 s: a part playing within 15 dB of its loud level whose share of its own range
