@@ -502,6 +502,7 @@ public:
     ma::Curve limiterTilt() const;
     ma::Curve tonalMasterSpectrum() const;
     juce::String builtinNote() const;
+    juce::StringArray ozoneCurve(const ma::TonalComparison& tonal) const;
     // The comparison of the mix as it plays, for the thin line when the main one is after the limiter.
     const ma::TonalComparison& tonalBeforeLimiter() const { return tonalPlain; }
     static constexpr double kMaxTiltDb = 2.0;

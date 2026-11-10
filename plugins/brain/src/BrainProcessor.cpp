@@ -1764,6 +1764,36 @@ constexpr size_t kMaxLostListed = 5;
 constexpr double kMonoFoldLowHz = 150.0, kMonoFoldHighHz = 8000.0;
 constexpr double kMonoFoldAudibleDb = -30.0; // a part this far under the mix does not count
 constexpr double kMonoFoldWarnDb = 3.0, kMonoFoldProblemDb = 6.0;
+// Phase 39: what is left between the mix and the target as bells for Ozone's EQ on the master: each
+// region outside the corridor (its own width), then each of TBC's ranges still off the centre that no
+// region covers; at most +-4 dB each (more belongs in the mix).
+juce::StringArray BrainProcessor::ozoneCurve(const ma::TonalComparison& tonal) const
+{
+    juce::StringArray bells;
+    if (!tonal.valid)
+        return bells;
+    const auto bell = [&](double lowHz, double highHz, double gainDb) {
+        const double ratio = std::max(1.05, highHz / lowHz);
+        const double q = juce::jlimit(0.3, 4.0, std::sqrt(ratio) / (ratio - 1.0));
+        bells.add(hzText(std::sqrt(lowHz * highHz)) + " " + signedOneDecimal(juce::jlimit(-4.0, 4.0, gainDb)) + " dB, Q "
+                  + juce::String(q, 1));
+    };
+    for (const auto& region : tonal.regions)
+        if (std::abs(region.deviationDb) >= 0.75)
+            bell(region.lowHz, region.highHz, -region.deviationDb);
+    const auto zones = ma::zoneOffsets(tonal, activeTarget());
+    for (int z = 0; z < ma::kTonalZones; ++z)
+    {
+        const auto& zone = zones[static_cast<size_t>(z)];
+        const bool covered = std::any_of(tonal.regions.begin(), tonal.regions.end(), [&](const ma::TonalRegion& region) {
+            return region.lowHz < zone.highHz && region.highHz > zone.lowHz;
+        });
+        if (zone.valid && !covered && std::abs(zone.offsetDb) > 0.75)
+            bell(zone.lowHz, zone.highHz, -zone.offsetDb);
+    }
+    return bells;
+}
+
 juce::String BrainProcessor::builtinNote() const
 {
     return currentTarget.valid() ? juce::String()
@@ -2409,8 +2439,33 @@ void BrainProcessor::buildReport()
                 {
                     if (region.hole() && !carriedByAChannel(mix.channels, region))
                     {
+                        // Phase 39: who could fill it: the part playing an octave under it, through overtones.
                         if (unfixable.size() < 3)
-                            unfixable.add(rangeText(region));
+                        {
+                            juce::String source;
+                            double best = 0.0;
+                            for (const auto& channel : mix.channels)
+                            {
+                                if (!channel.spectrumValid || !inMixSums(channel))
+                                    continue;
+                                double below = 0.0;
+                                for (int b = 0; b < ma::bus::kBands; ++b)
+                                {
+                                    const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+                                    if (hz >= region.lowHz / 2.0 && hz <= region.highHz / 2.0)
+                                        below += std::pow(10.0, channel.heardDb[static_cast<size_t>(b)] / 10.0);
+                                }
+                                if (below > best)
+                                {
+                                    best = below;
+                                    source = channel.name;
+                                }
+                            }
+                            unfixable.add(rangeText(region)
+                                          + (source.isEmpty() ? juce::String()
+                                                              : pl(" (wypełni je saturacja albo harmoniczne na ") + quoted(source)
+                                                                    + pl(", gra oktawę niżej; zakładka „Barwa” w jego Agencie)")));
+                        }
                         continue;
                     }
                     worst = std::max(worst, std::abs(region.deviationDb));
@@ -2422,7 +2477,7 @@ void BrainProcessor::buildReport()
                                         ? juce::String()
                                         : (parts.isEmpty() ? juce::String() : pl(" ")) + pl("Poza zasięgiem EQ: ")
                                               + unfixable.joinIntoString(", ")
-                                              + pl(" (nic tam nie gra: saturacja kanału, który ma tam alikwoty, albo nowa partia; widok „Aranż”).");
+                                              + pl(". Tam żaden kanał nie gra, EQ nie ma czego podbić; jeśli nic nie gra też oktawę niżej, to nowa partia (widok „Aranż”).");
                 if (parts.isEmpty())
                 {
                     item.status = Status::warning;
@@ -2432,6 +2487,9 @@ void BrainProcessor::buildReport()
                 {
                     item.status = worst >= 3.0 ? Status::problem : Status::warning;
                     item.detail = prefix + parts.joinIntoString(", ") + pl(". „Analizuj” podpowie, co zrobić.") + notMix + curveText + arrangementText;
+                    const auto bells = ozoneCurve(judged);
+                    if (!bells.isEmpty())
+                        item.detail += pl(" Czego kanały nie uniosą, zostaje na EQ w Ozone: ") + bells.joinIntoString("; ") + ".";
                 }
             }
         }
@@ -3977,6 +4035,7 @@ void BrainProcessor::proposeWholeMix()
         in.levelP95 = channel.data.levelP95 + channel.data.trimDb;
         in.truePeakDb = channel.data.learnedTruePeakDb + channel.data.trimDb;
         in.lowNoteHz = channel.data.lowNoteHz;
+        in.currentCleanup = channel.data.cleanup;
         in.intentionalDrive = channel.data.intentionalDrive != 0;
         in.contentRole = static_cast<ma::Role>(juce::jlimit(0, static_cast<int>(ma::Role::send), static_cast<int>(channel.data.detectedRole)));
         in.contentConfidence = channel.data.detectedConfidence;
@@ -3991,6 +4050,14 @@ void BrainProcessor::proposeWholeMix()
     }
     ma::ChainContext context;
     context.bpm = tempoBpm();
+    // Phase 39: where the target wants more, cleanup does not take it away.
+    if (mix.tonal.valid && activeTarget().valid())
+    {
+        context.tonalKnown = true;
+        for (int b = 0; b < ma::bus::kBands; ++b)
+            context.mixMinusCentreDb[static_cast<size_t>(b)]
+                = mix.tonal.mixDb[static_cast<size_t>(b)] > -149.0 ? mix.tonal.mixDb[static_cast<size_t>(b)] - activeTarget().centre[static_cast<size_t>(b)] : 0.0;
+    }
     const double peak = truePeakDb();
     context.headroomShortDb = std::isfinite(peak) ? std::max(0.0, peak - peakCeilingDb()) : 0.0;
     loudMasterPlan = {};
@@ -4127,7 +4194,9 @@ void BrainProcessor::proposeWholeMix()
             eqs.push_back(eq);
         }
         std::array<bool, ma::kStemGroups> present {}, ghostOnly {};
-        auto groups = stemGroupDb(true, present, nullptr, &eqs);
+        // Phase 39: before EQ. The tonal stage's bells (applied in earlier rounds or proposed now) shape the
+        // master towards the target; counted here they came back as level (a sub cut lifted with the trim).
+        auto groups = stemGroupDb(false, present, nullptr, &eqs);
         addGhostGroups(groups, present, ghostOnly);
         // Phase 29: without stem references, the typical house balance of the groups.
         if (typicalLevels)
@@ -7453,18 +7522,10 @@ juce::String BrainProcessor::masteringReportHtml() const
     // what the channels could not take): a broad move in Ozone's EQ or a Dynamics band's gain.
     if (masterTonal.valid)
     {
-        const auto zones = ma::zoneOffsets(masterTonal, activeTarget());
-        juce::StringArray moves;
-        for (int z = 0; z < ma::kTonalZones; ++z)
-        {
-            const auto& zone = zones[static_cast<size_t>(z)];
-            if (zone.valid && std::abs(zone.offsetDb) > 0.75 && std::abs(zone.offsetDb) < 4.0)
-                moves.add(zoneName(z) + " (" + hzText(zone.lowHz) + pl("–") + hzText(zone.highHz) + ") "
-                          + signedOneDecimal(-juce::jlimit(-1.5, 1.5, zone.offsetDb)) + " dB");
-        }
+        const auto moves = ozoneCurve(masterTonal);
         if (!moves.isEmpty())
-            out << "<li>" << pl("Do środka korytarza (jak zakresy w Tonal Balance; szeroki bell w EQ albo Band Gain w Dynamics): ")
-                << html(moves.joinIntoString(", "))
+            out << "<li>" << pl("Krzywa EQ do Ozone na resztę (Bell, kolejno): ")
+                << html(moves.joinIntoString("; "))
                 << pl(". Najpierw „Analizuj” i „Zastosuj” w Mózgu: zrobi to na kanałach, tu zostaje tylko reszta.")
                 << (afterLimiterOn && limiterTiltKnown() ? pl(" Liczone jak po limiterze do celu.") : juce::String()) << "</li>";
     }

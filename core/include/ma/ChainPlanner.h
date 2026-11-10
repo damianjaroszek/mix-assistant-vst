@@ -48,6 +48,8 @@ struct ChainChannel
     // plays: the usual share (P50) and the moments it sticks out (P95), dB.
     bool probesValid = false;
     std::array<double, kDynamicBands> probeP50 {}, probeP95 {};
+    // Phase 39: the cleanup the Agent has now (what the measured master already carries).
+    CleanupSettings currentCleanup {};
 };
 
 // Phase 28: a loud master. When the limiter of the master preview works too hard at the target
@@ -64,7 +66,18 @@ struct ChainContext
     // Phase 28: the master preview's limiter on the loud part (dB, 95th percentile), measured with
     // the clippers the Agents have now; negative = not measured.
     double limiterReductionDb = -1.0;
+    // Phase 39: per ERB band, the mix minus the tonal target's corridor centre as the master plays
+    // now (with every Agent's present cleanup); without a target comparison `tonalKnown` is false.
+    // Where the target wants more, the low-mid cut and the "low end owned" high-pass stay off.
+    bool tonalKnown = false;
+    SpectrumAnalyzer::Bands mixMinusCentreDb {};
 };
+
+// Phase 39: the mix may be this far over the target's centre in 200-500 Hz (without any mud cut)
+// before a mud cut is planned; under this far below it in 60-300 Hz (without the cleanup's high-passes)
+// the high-pass stays at the junk under each part instead of handing the low end to the kick and bass.
+constexpr double kMudOverCentreDb = 0.5;
+constexpr double kLowUnderCentreDb = -1.0;
 
 struct ChainPlan
 {

@@ -1454,6 +1454,35 @@ void testChainPlanner()
     const auto crowdPlans = ma::planChains(crowd);
     check(crowdPlans[0].cleanup.mudDb == 0.0f && crowdPlans[1].cleanup.mudDb < 0.0f && crowdPlans[2].cleanup.mudDb < 0.0f,
           "low-mid mud: the most important keeps it, the others give way");
+    // Phase 39: under the target's centre there the mud stays; well over it, it goes. Planned again
+    // with the cuts in place (the master measured with them), the answer is the same.
+    ma::ChainContext thin;
+    thin.tonalKnown = true;
+    thin.mixMinusCentreDb.fill(-2.0);
+    const auto thinPlans = ma::planChains(crowd, thin);
+    check(thinPlans[1].cleanup.mudDb == 0.0f && thinPlans[2].cleanup.mudDb == 0.0f, "phase 39: no mud cut where the target wants more");
+    ma::ChainContext thick = thin;
+    thick.mixMinusCentreDb.fill(3.0);
+    const auto thickPlans = ma::planChains(crowd, thick);
+    check(thickPlans[1].cleanup.mudDb < 0.0f && thickPlans[2].cleanup.mudDb < 0.0f, "phase 39: mud cut where the mix is over the target");
+    auto cut = crowd;
+    for (size_t i = 0; i < cut.size(); ++i)
+        cut[i].currentCleanup = thickPlans[i].cleanup;
+    ma::ChainContext measured = thick;
+    for (int b = 0; b < 40; ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        double was = 0.0, now = 0.0;
+        for (size_t i = 0; i < cut.size(); ++i)
+        {
+            was += std::pow(10.0, cut[i].bandsDb[static_cast<size_t>(b)] / 10.0);
+            now += std::pow(10.0, (cut[i].bandsDb[static_cast<size_t>(b)] + ma::cleanupResponseDb(cut[i].currentCleanup, hz)) / 10.0);
+        }
+        measured.mixMinusCentreDb[static_cast<size_t>(b)] += 10.0 * std::log10(now / was);
+    }
+    const auto again = ma::planChains(cut, measured);
+    check(again[1].cleanup.mudDb == thickPlans[1].cleanup.mudDb && again[2].cleanup.mudDb == thickPlans[2].cleanup.mudDb,
+          "phase 39: planning again with the cuts measured keeps them");
 }
 
 ma::Resonances resonancesOf(const std::function<double(double)>& part)

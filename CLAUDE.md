@@ -290,6 +290,14 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   problem 6 dB, parts > -30 dB of the mix) and "Słyszalność w czasie" (`ma/Audibility.h` `findLostSpans` on `songBins` plus each
   channel's present heard - raw EQ, refreshed every 2 s: a part playing within 15 dB of its loud level whose share of its own range
   falls 6 dB under its typical share and under the rest by 6 dB for >= 4 s; sends never counted; advice: volume automation in FL).
+- Phase 39 fit to the target: `ChainContext::tonalKnown` / `mixMinusCentreDb` (mix minus the active target's centre) let
+  `planChains` skip the lowEndOwned HPF raise where the low end is >= 1 dB under the centre (`kLowUnderCentreDb`) and the crowd mud
+  cut unless 200-500 Hz is >= `kMudOverCentreDb` 0.5 over it without any mud cut (power with the planned vs `ChainChannel::currentCleanup`,
+  so re-planning is idempotent). Solver: predicting stage up to 8 regions, `centreZones` also on ranges outside the corridor, a tonal cut
+  tries the next least important carrier when one's cut is already as deep or at its limit. Group levels (`planLevels`) are measured
+  pre-EQ so tonal cuts do not come back as trim. A hole no channel can fill names the channel playing an octave below (saturation /
+  harmonics); `ozoneCurve` lists what is left (bells, +-4 dB) in the tonal report item and the HTML ("Krzywa EQ do Ozone").
+  mixcheck vs the references (sum of TBC zone distances): Galias 5.6 -> 7.3, Chardonnay 6.3 -> 4.7 (the built-in curve comes from them).
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

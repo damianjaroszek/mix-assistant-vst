@@ -299,12 +299,8 @@ void centreZones(const std::vector<SolverChannel>& channels, const SolverOptions
             const auto& zone = zones[static_cast<size_t>(k)];
             if (done[static_cast<size_t>(k)] || !zone.valid || std::abs(zone.offsetDb) <= options.centreDeadZoneDb)
                 continue;
-            // Still outside the corridor there (the corridor fix is at its limit): not a centring job.
-            const bool outside = std::any_of(before.regions.begin(), before.regions.end(), [&](const TonalRegion& region) {
-                return region.lowHz < zone.highHz && region.highHz > zone.lowHz;
-            });
-            if (outside)
-                continue;
+            // Phase 39: a range still partly outside the corridor (its corridor fix at its limit) is
+            // pulled further too; the steps below still never push anything further out.
             if (z < 0 || std::abs(zone.offsetDb) > std::abs(zones[static_cast<size_t>(z)].offsetDb))
                 z = k;
         }
@@ -733,19 +729,32 @@ SolverResult solve(const std::vector<SolverChannel>& channels, const SolverOptio
                            ? channels[static_cast<size_t>(a)].priority > channels[static_cast<size_t>(b)].priority
                            : power[static_cast<size_t>(a)] > power[static_cast<size_t>(b)];
             });
-            const int c = order.front();
-            auto& eq = result.eq[static_cast<size_t>(c)];
-            const int slot = findSlot(eq, centre, false);
-            if (slot < 0)
+            // Phase 39: the least important carrier whose cut can still go deeper (one already as deep
+            // as this needs, or at the limit, passes the region on to the next carrier).
+            int c = -1, slot = -1;
+            for (const int candidate : order)
+            {
+                const auto& eqOf = result.eq[static_cast<size_t>(candidate)];
+                const int at = findSlot(eqOf, centre, false);
+                if (at < 0)
+                    continue;
+                const double share = power[static_cast<size_t>(candidate)] / total;
+                const double wanted = roundHalf(std::clamp(gainForShare(share, -region.deviationDb), -options.maxCutDb, -1.0));
+                const auto& existing = eqOf[static_cast<size_t>(at)];
+                if (isOn(existing) && existing.gainDb <= wanted + 0.01)
+                    continue;
+                c = candidate;
+                slot = at;
+                break;
+            }
+            if (c < 0)
                 return;
+            auto& eq = result.eq[static_cast<size_t>(c)];
             const double share = power[static_cast<size_t>(c)] / total;
             const double gain = roundHalf(std::clamp(gainForShare(share, -region.deviationDb), -options.maxCutDb, -1.0));
             auto& band = eq[static_cast<size_t>(slot)];
             if (isOn(band))
             {
-                // A cut already there (a collision's or a stem group's) that is deep enough is the same correction.
-                if (band.gainDb <= gain + 0.01)
-                    return;
                 band.gainDb = static_cast<float>(gain);
                 band.q = std::min(band.q, static_cast<float>(q));
             }
@@ -789,7 +798,7 @@ SolverResult solve(const std::vector<SolverChannel>& channels, const SolverOptio
         };
         // Largest region first, measured again after each fix (a bell reaches its neighbours),
         // each range worked on once.
-        constexpr int kMaxRegions = 4;
+        constexpr int kMaxRegions = 8; // phase 39: as many as a mix far from its target needs
         std::vector<std::pair<double, double>> tried;
         for (int handled = 0; handled < kMaxRegions; ++handled)
         {
