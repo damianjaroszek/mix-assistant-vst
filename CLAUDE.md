@@ -254,7 +254,7 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   before phase 33), `ToolBit::toolPan`, `kToolCount` 13, `bus::kVersion` 19; Agent "Stereo" tab, Brain `ChainTool::pan`, notes, verdict.
 - Phase 34 depth (`ma/Depth.h`): `DepthSettings::highCutHz` (12 dB/oct `HighCut`, right after the cleanup; `depthResponseDb` is the
   digital response at 48 kHz and goes into `applyCleanup`, so `bandsDb` carries it). `planChains` step 7: a `send` whose `topTiltDb`
-  (8-16 kHz minus 1-4 kHz) is above the rest of the mix's minus `kDarkerThanMixDb` 3 gets `kSendHighCutHz` 9 kHz. The Brain
+  (8-16 kHz minus 1-4 kHz) is above the rest of the mix's minus `kDarkerThanMixDb` 3 gets `kSendHighCutHz` 9 kHz. Learn never lifts a send's trim (`LearnResult::sendKept`: a return is set by the source channels' send knobs; it only lowers one louder than its role level). The Brain
   (`proposeWholeMix`) also has every send without a cable duck the whole signal by `kSendDuckDb` 3 dB under `mainVoice()` (loudest
   vocal, else lead; keyed over the bus, 10 ms, release 1/4 synced) and adds an advisory item with `depthTimes` (pre-delay 1/64, decay
   half a bar, delay 1/8, dotted 1/8, 1/4; two items `reverbAdviceText` / `delayAdviceText` named by the usual knobs); report "Głębia (pogłos, delay)" (sends vs dry 200 Hz-8 kHz, warning over -6 dB). Part of

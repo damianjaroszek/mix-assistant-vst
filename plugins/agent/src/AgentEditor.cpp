@@ -579,6 +579,9 @@ void AgentEditor::showResult(const AgentProcessor::LearnResult& r)
     if (std::abs(r.roleOffsetDb) > 0.05)
         text += pl(" Cel dla roli: ") + ma::ui::formatDb(r.targetDb, unit.toRawUTF8()) + " (" + signedDb(r.roleOffsetDb)
                 + pl(" względem stopy).");
+    if (r.sendKept)
+        text += pl(" To wysyłka (pogłos, delay): nauka jej nie podgłaśnia, ile ogona w miksie ustalają pokrętła wysyłek na kanałach "
+                   "źródłowych. Ścisza ją tylko, gdy gra głośniej niż ") + signedDb(r.roleOffsetDb) + pl(" względem stopy.");
     if (r.boostCapped)
         text += pl(" Podbicie ograniczone do +12 dB: partia była dużo cichsza niż typowo dla roli, pewnie celowo.");
     if (r.limitedByPeak)
