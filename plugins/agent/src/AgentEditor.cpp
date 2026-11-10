@@ -331,6 +331,10 @@ AgentEditor::AgentEditor(AgentProcessor& p)
     highCutLabel.setTooltip(pl("Cięcie góry (12 dB/okt.). Na wysyłce z pogłosem albo delayem ciemniejszy ogon stoi za suchymi "
                                "śladami i nie rozmywa ich góry: „Analizuj” ustawia 9 kHz, gdy wysyłka jest tak jasna jak reszta miksu. "
                                "20 kHz = wyłączone."));
+    styleLabel(alignLabel, pl("Opóźnienie"), colours::quiet, 13.0f);
+    alignLabel.setTooltip(pl("Opóźnia cały kanał (do 10 ms). Gdy dół basu wchodzi przed uderzeniem stopy, oba się częściowo "
+                             "znoszą: Agent basu z podłączoną stopą jako sidechain mierzy przesunięcie, a „Analizuj” (cały łańcuch) "
+                             "ustawia opóźnienie. Spóźniony bas trzeba przesunąć wcześniej w FL. 0 = wyłączone."));
     styleLabel(panMonoLabel, pl("Środek poniżej"), colours::quiet, 13.0f);
     panMonoLabel.setTooltip(pl("Poniżej tej częstotliwości kanał zostaje w środku (dół razem ze stopą i basem). 0 = przesuwa cały sygnał."));
     styleLabel(widthMonoMark, "mono", colours::quiet, 11.0f);
@@ -370,6 +374,7 @@ AgentEditor::AgentEditor(AgentProcessor& p)
         { &panSlider, AgentProcessor::panId },
         { &panMonoSlider, AgentProcessor::panMonoBelowId },
         { &highCutSlider, AgentProcessor::highCutId },
+        { &alignSlider, AgentProcessor::alignDelayId },
     };
     for (const auto& [slider, id] : chainSliders)
     {
@@ -478,7 +483,7 @@ AgentEditor::AgentEditor(AgentProcessor& p)
          { &eqLabel, &origins[0], &origins[7], &eqStatus, &eqCurve, &eqBypassButton, &eqClearButton, &duckLabel, &duckOnButton, &duckModeBox,
            &polarityButton, &duckFreqLabel, &duckFreqSlider, &duckDepthLabel, &duckDepthSlider, &duckThresholdLabel,
            &duckThresholdSlider, &duckAttackLabel, &duckAttackSlider, &duckReleaseLabel, &duckReleaseSlider, &duckSyncBox,
-           &duckStatus, &unmaskLabel, &origins[10], &unmaskStatus, &unmaskOffButton },
+           &duckStatus, &alignLabel, &alignSlider, &unmaskLabel, &origins[10], &unmaskStatus, &unmaskOffButton },
          [this](auto area) { layoutEq(area); });
     page(tonePage, pl("Barwa"),
          { &harmonicsLabel, &origins[8], &origins[9], &origins[6], &harmonicsOnButton, &harmonicsFreqLabel, &harmonicsFreqSlider, &harmonicsAmountLabel,
@@ -717,6 +722,17 @@ void AgentEditor::updateDuckStatus()
                 text += pl(" (znoszą się, spróbuj odwrócić polaryzację)");
                 colour = colours::warning;
             }
+        }
+        if (processor.alignmentValid())
+        {
+            const double lag = processor.alignmentLagMs();
+            text += pl(", w czasie: ");
+            if (std::abs(lag) < 0.5)
+                text += pl("razem ze stopą");
+            else if (lag < 0.0)
+                text += pl("dół ") + juce::String(-lag, 1) + pl(" ms przed stopą");
+            else
+                text += pl("dół ") + juce::String(lag, 1) + pl(" ms za stopą");
         }
         if (colour != colours::warning)
             colour = on ? colours::good : colours::quiet;
@@ -970,6 +986,9 @@ void AgentEditor::layoutEq(juce::Rectangle<int> area)
     row = area.removeFromTop(24);
     halfRow(row.removeFromLeft(row.getWidth() / 2).withTrimmedRight(16), duckReleaseLabel, duckReleaseSlider);
     duckSyncBox.setBounds(row.removeFromLeft(110).reduced(0, 1));
+    row.removeFromLeft(16);
+    alignLabel.setBounds(row.removeFromLeft(80));
+    alignSlider.setBounds(row);
     area.removeFromTop(8);
     duckStatus.setBounds(area.removeFromTop(48));
     area.removeFromTop(6);

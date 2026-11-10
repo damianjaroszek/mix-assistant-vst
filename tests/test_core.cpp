@@ -9,6 +9,7 @@
 #include "ma/DynamicEq.h"
 #include "ma/Pan.h"
 #include "ma/Depth.h"
+#include "ma/Alignment.h"
 #include "ma/Harmonics.h"
 #include "ma/Translation.h"
 #include "ma/Transient.h"
@@ -3873,6 +3874,55 @@ void testDepth()
                                                                         + std::to_string(plans[1].sendTiltDb - plans[1].mixTiltDb).substr(0, 5) + " dB)");
 }
 
+void testAlignment()
+{
+    const double sr = 48000.0;
+    // A 55 Hz kick body every half second, and the same body shifted by `shiftMs` as the "bass".
+    const auto measure = [&](double shiftMs) {
+        const size_t n = static_cast<size_t>(sr * 6.0);
+        std::vector<float> kick(n), bass(n);
+        const auto hit = [&](double t) {
+            const double local = std::fmod(t, 0.5);
+            return local < 0.0 ? 0.0 : 0.5 * std::exp(-local / 0.12) * std::sin(2.0 * kPi * 55.0 * local);
+        };
+        for (size_t i = 0; i < n; ++i)
+        {
+            const double t = static_cast<double>(i) / sr;
+            kick[i] = static_cast<float>(hit(t));
+            bass[i] = static_cast<float>(t - shiftMs / 1000.0 >= 0.0 ? 0.8 * hit(t - shiftMs / 1000.0) : 0.0);
+        }
+        ma::LowAlignMeter meter;
+        meter.prepare(sr);
+        for (size_t start = 0; start < n; start += 512)
+            meter.process(bass.data() + start, kick.data() + start, static_cast<int>(std::min<size_t>(512, n - start)));
+        return std::make_tuple(meter.valid(), meter.bestLagMs(), meter.correlationAtBest(), meter.correlationAtZero());
+    };
+    {
+        const auto [valid, lag, best, zero] = measure(3.0);
+        check(valid && std::abs(lag - 3.0) < 0.4 && best > 0.9 && zero < best - 0.03,
+              "align: a bass 3 ms late reads +3 ms (" + std::to_string(lag).substr(0, 5) + ")");
+    }
+    {
+        const auto [valid, lag, best, zero] = measure(-4.0);
+        check(valid && std::abs(lag + 4.0) < 0.4 && best > 0.9, "align: a bass 4 ms early reads -4 ms (" + std::to_string(lag).substr(0, 5) + ")");
+    }
+    {
+        const auto [valid, lag, best, zero] = measure(0.0);
+        check(valid && std::abs(lag) < 0.3 && std::abs(best - zero) < 0.01, "align: in time reads 0");
+    }
+    // The delay: exactly its samples late.
+    {
+        ma::AlignDelay delay;
+        delay.prepare(sr);
+        delay.setSettings({ 2.0f });
+        std::vector<float> l(1000, 0.0f), r(1000, 0.0f);
+        l[10] = r[10] = 1.0f;
+        float* ch[] = { l.data(), r.data() };
+        delay.process(ch, 2, 1000);
+        check(l[10 + 96] == 1.0f && r[10 + 96] == 1.0f && l[10] == 0.0f, "align: the delay is 96 samples at 2 ms");
+    }
+}
+
 int main()
 {
     testLoudness();
@@ -3886,6 +3936,7 @@ int main()
     testDynamicEq();
     testPan();
     testDepth();
+    testAlignment();
     testChannelAnalyzerSpeed();
     testMixBus();
     testMasking();

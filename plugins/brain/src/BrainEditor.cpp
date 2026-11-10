@@ -504,7 +504,7 @@ void BrainEditor::updateGuide()
     const bool autoRefine = processor.autoRefineOn();
     int problems = 0;
     for (const auto& item : mix.report)
-        problems += item.status == MixSnapshot::Status::problem ? 1 : 0;
+        problems += !item.gate && item.status == MixSnapshot::Status::problem ? 1 : 0;
     // 0 drop, 1 analyse, 2 apply, 3 listen again / refine, 4 report
     int current = 4;
     if (refining || measuringEffect)

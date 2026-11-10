@@ -55,8 +55,9 @@ void take(const float*& in, Settings& settings)
 
 // Phase 25: 62 since the stereo settings carry the widener (3 floats after the side bells).
 // Phase 30: 72 with the two dips at the end. Phase 32: 97 with the dynamic EQ after them.
-// Phase 33: 99 with the pan. Phase 34: 100 with the depth last.
-constexpr size_t kPackedDynamics = 100;
+// Phase 33: 99 with the pan. Phase 34: 100 with the depth. Phase 35: 101 with the delay last.
+constexpr size_t kPackedDynamics = 101;
+constexpr size_t kPackedBeforeAlign = 100;
 constexpr size_t kPackedBeforeDepth = 99;
 constexpr size_t kPackedBeforePan = 97;
 constexpr size_t kPackedBeforeDynamicEq = 72;
@@ -82,6 +83,7 @@ std::array<float, kPackedDynamics> packDynamics(const AgentProcessor::DynamicSta
     put(out, s.dynamicEq);
     put(out, s.pan);
     put(out, s.depth);
+    put(out, s.align);
     jassert(out == v.data() + v.size());
     return v;
 }
@@ -105,6 +107,7 @@ AgentProcessor::DynamicState unpackDynamics(const std::array<float, kPackedDynam
     take(in, s.dynamicEq);
     take(in, s.pan);
     take(in, s.depth);
+    take(in, s.align);
     return s;
 }
 
@@ -154,6 +157,11 @@ bool anyOn(const ma::DepthSettings& d)
     return ma::depthOn(d);
 }
 
+bool anyOn(const ma::AlignSettings& a)
+{
+    return ma::alignOn(a);
+}
+
 bool anyOn(const std::array<ma::UnmaskSettings, ma::kMaxUnmask>& u)
 {
     return std::any_of(u.begin(), u.end(), [](const auto& d) { return ma::unmaskOn(d); });
@@ -197,6 +205,7 @@ void toolBits(const ma::EqSettings& eq, const AgentProcessor::DynamicState& d, b
     compareTool(d.dynamicEq, setDynamics.dynamicEq, setValid, ma::bus::toolDynamicEq, same, changed, manual);
     compareTool(d.pan, setDynamics.pan, setValid, ma::bus::toolPan, same, changed, manual);
     compareTool(d.depth, setDynamics.depth, setValid, ma::bus::toolDepth, same, changed, manual);
+    compareTool(d.align, setDynamics.align, setValid, ma::bus::toolAlign, same, changed, manual);
 }
 
 // Phase 32: the probes appended to the saved stats ("1 p50 p95 ..." or "0 ...").
@@ -506,6 +515,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout AgentProcessor::createLayout
         layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { highCutId, 16 }, "High cut", range, 20000.0f,
                                                                juce::AudioParameterFloatAttributes().withLabel("Hz")));
     }
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { alignDelayId, 17 }, "Delay",
+                                                           Range { 0.0f, ma::kMaxAlignDelayMs, 0.05f }, 0.0f,
+                                                           juce::AudioParameterFloatAttributes().withLabel("ms")));
     for (int d = 0; d < ma::kMaxUnmask; ++d)
     {
         const auto name = "Give way " + juce::String(d + 1);
@@ -564,6 +576,8 @@ void AgentProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     stereoShaper.prepare(sampleRate);
     panner.prepare(sampleRate);
     highCut.prepare(sampleRate);
+    alignMeter.prepare(sampleRate);
+    alignDelay.prepare(sampleRate, std::max(2, getTotalNumInputChannels()));
     balanceMeter.prepare(sampleRate);
     liveStereo.prepare(sampleRate);
     learnFeatures.prepare(sampleRate);
@@ -738,9 +752,18 @@ void AgentProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
                 sideMono[static_cast<size_t>(i)] = sc;
             }
             sidechainCorrelation.process(mainMono.data(), sideMono.data(), n);
+            alignMeter.process(mainMono.data(), sideMono.data(), n);
         }
         lowCorrelation.store(sidechainCorrelation.lowBand());
+        alignValid.store(alignMeter.valid());
+        alignLag.store(static_cast<float>(alignMeter.bestLagMs()));
+        alignBest.store(static_cast<float>(alignMeter.correlationAtBest()));
+        alignZero.store(static_cast<float>(alignMeter.correlationAtZero()));
     }
+
+    // Phase 35: the channel's own delay, after the measurement above (so a second plan reads the same).
+    alignDelay.setSettings(dynamics.align);
+    alignDelay.process(mainBuffer.getArrayOfWritePointers(), numChannels, numSamples);
 
     cleanup.setSettings(dynamics.cleanup);
     cleanup.process(mainBuffer.getArrayOfWritePointers(), numChannels, numSamples);
@@ -1138,6 +1161,11 @@ void AgentProcessor::publishToBrain()
     data.riderGainDb = static_cast<float>(riderGain.load());
     data.pan = dynamics.pan;
     data.depth = dynamics.depth;
+    data.align = dynamics.align;
+    data.alignValid = alignValid.load() ? 1 : 0;
+    data.alignLagMs = alignLag.load();
+    data.alignBest = alignBest.load();
+    data.alignZero = alignZero.load();
     data.balanceValid = balanceSeen.load() ? 1 : 0;
     data.inputBalanceDb = inputBalance.load();
     for (int r = 0; r < ma::kMaxResonances; ++r)
@@ -1230,6 +1258,7 @@ void AgentProcessor::handleBrainCommand(ma::bus::Region& region)
         next2.dynamicEq = command.dynamicEq;
         next2.pan = command.pan;
         next2.depth = command.depth;
+        next2.align = command.align;
         for (int d = 0; d < ma::kMaxUnmask; ++d)
         {
             next2.unmask[static_cast<size_t>(d)] = command.unmask[d];
@@ -1462,6 +1491,7 @@ void AgentProcessor::setDynamics(const DynamicState& state)
     setParam(panId, state.pan.position * 100.0f);
     setParam(panMonoBelowId, state.pan.monoBelowHz);
     setParam(highCutId, ma::depthOn(state.depth) ? state.depth.highCutHz : 20000.0f);
+    setParam(alignDelayId, ma::alignOn(state.align) ? state.align.delayMs : 0.0f);
 }
 
 AgentProcessor::DynamicState AgentProcessor::currentDynamics() const
@@ -1546,6 +1576,7 @@ AgentProcessor::DynamicState AgentProcessor::currentDynamics() const
     state.pan.position = value(panId) / 100.0f;
     state.pan.monoBelowHz = value(panMonoBelowId);
     state.depth.highCutHz = value(highCutId) >= 19990.0f ? 0.0f : value(highCutId);
+    state.align.delayMs = value(alignDelayId);
     return state;
 }
 
@@ -1848,7 +1879,8 @@ void AgentProcessor::setStateInformation(const void* data, int sizeInBytes)
     brainSet = {};
     brainSetBackup = {};
     const int dynamicCount = setValues.size() - 3 * ma::kEqBands;
-    if (dynamicCount == static_cast<int>(kPackedDynamics) || dynamicCount == static_cast<int>(kPackedBeforeDepth)
+    if (dynamicCount == static_cast<int>(kPackedDynamics) || dynamicCount == static_cast<int>(kPackedBeforeAlign)
+        || dynamicCount == static_cast<int>(kPackedBeforeDepth)
         || dynamicCount == static_cast<int>(kPackedBeforePan)
         || dynamicCount == static_cast<int>(kPackedBeforeDynamicEq)
         || dynamicCount == static_cast<int>(kPackedBeforeUnmask)
@@ -1863,7 +1895,8 @@ void AgentProcessor::setStateInformation(const void* data, int sizeInBytes)
             const ma::StereoSettings::Widener off {};
             floats.insert(floats.end() - 4, { off.amountDb, off.lowHz, off.delayMs });
         }
-        if (dynamicCount != static_cast<int>(kPackedDynamics) && dynamicCount != static_cast<int>(kPackedBeforeDepth)
+        if (dynamicCount != static_cast<int>(kPackedDynamics) && dynamicCount != static_cast<int>(kPackedBeforeAlign)
+            && dynamicCount != static_cast<int>(kPackedBeforeDepth)
             && dynamicCount != static_cast<int>(kPackedBeforePan) && dynamicCount != static_cast<int>(kPackedBeforeDynamicEq))
         {
             // Saved before phase 30: no dips.
@@ -1871,7 +1904,8 @@ void AgentProcessor::setStateInformation(const void* data, int sizeInBytes)
             for (int d = 0; d < ma::kMaxUnmask; ++d)
                 floats.insert(floats.end(), { off.on, off.hz, off.q, off.depthDb, off.keyBands });
         }
-        if (dynamicCount != static_cast<int>(kPackedDynamics) && dynamicCount != static_cast<int>(kPackedBeforeDepth)
+        if (dynamicCount != static_cast<int>(kPackedDynamics) && dynamicCount != static_cast<int>(kPackedBeforeAlign)
+            && dynamicCount != static_cast<int>(kPackedBeforeDepth)
             && dynamicCount != static_cast<int>(kPackedBeforePan))
         {
             // Saved before phase 32: no dynamic EQ.
@@ -1879,14 +1913,17 @@ void AgentProcessor::setStateInformation(const void* data, int sizeInBytes)
             const auto* f = reinterpret_cast<const float*>(&off);
             floats.insert(floats.end(), f, f + sizeof(off) / sizeof(float));
         }
-        if (dynamicCount != static_cast<int>(kPackedDynamics) && dynamicCount != static_cast<int>(kPackedBeforeDepth))
+        if (dynamicCount != static_cast<int>(kPackedDynamics) && dynamicCount != static_cast<int>(kPackedBeforeAlign)
+            && dynamicCount != static_cast<int>(kPackedBeforeDepth))
         {
             // Saved before phase 33: in the centre.
             const ma::PanSettings centre {};
             floats.insert(floats.end(), { centre.position, centre.monoBelowHz });
         }
-        if (dynamicCount != static_cast<int>(kPackedDynamics))
+        if (dynamicCount != static_cast<int>(kPackedDynamics) && dynamicCount != static_cast<int>(kPackedBeforeAlign))
             floats.push_back(0.0f); // saved before phase 34: no high cut
+        if (dynamicCount != static_cast<int>(kPackedDynamics))
+            floats.push_back(0.0f); // saved before phase 35: no delay
         std::array<float, kPackedDynamics> packed {};
         std::copy(floats.begin(), floats.end(), packed.begin());
         brainSet.dynamics = unpackDynamics(packed);

@@ -233,6 +233,8 @@ public:
     static constexpr const char* panMonoBelowId = "panMonoBelow";
     // Phase 34: a send's high cut (Hz, 20000 = off).
     static constexpr const char* highCutId = "highCut";
+    // Phase 35: the channel's own delay (ms), to line its low end up with the kick.
+    static constexpr const char* alignDelayId = "alignDelay";
     double inputBalanceDb() const { return inputBalance.load(); }
     bool inputBalanceKnown() const { return balanceSeen.load(); }
     double dynamicReductionDb(int band) const { return dynamicShown[static_cast<size_t>(band)].load(); }
@@ -278,6 +280,7 @@ public:
         ma::DynamicEqSettings dynamicEq {}; // phase 32: dynamic bands and the rider
         ma::PanSettings pan {};             // phase 33
         ma::DepthSettings depth {};         // phase 34
+        ma::AlignSettings align {};         // phase 35
     };
     DynamicState currentDynamics() const;
     // Phase 23: tools the Brain set that are still as it left them, and tools changed by hand since
@@ -303,6 +306,11 @@ public:
     double hostTempo() const { return hostBpm.load(); }
     double sidechainLowCorrelation() const { return lowCorrelation.load(); }
     bool correlationValid() const { return sidechainSeen && std::isfinite(inputRms.load()) && inputRms.load() > -60.0; }
+    // Phase 35: the low end against the sidechain (kick) in time.
+    bool alignmentValid() const { return alignValid.load(); }
+    double alignmentLagMs() const { return alignLag.load(); }
+    double alignmentBest() const { return alignBest.load(); }
+    double alignmentZero() const { return alignZero.load(); }
 
 private:
     enum class LearnState { idle, resetRequested, learning, finished };
@@ -358,6 +366,10 @@ private:
     ma::StereoShaper stereoShaper;
     ma::Panner panner;             // phase 33: the last stage
     ma::HighCut highCut;           // phase 34: after the cleanup
+    ma::LowAlignMeter alignMeter;  // phase 35: against the sidechain, before the delay
+    ma::AlignDelay alignDelay;
+    std::atomic<bool> alignValid { false };
+    std::atomic<float> alignLag { 0.0f }, alignBest { 0.0f }, alignZero { 0.0f };
     ma::BalanceMeter balanceMeter; // the input's lean
     std::atomic<float> inputBalance { 0.0f };
     std::atomic<bool> balanceSeen { false };
@@ -456,7 +468,7 @@ private:
     std::array<std::array<std::atomic<float>, 3>, ma::kEqBands> backupEqAudio {};
     // DuckSettings (8), sync, polarity, harmonics (3), transients (3), cleanup (5), compressor (7), clipper (3), evener (3)
     // stereo (12 + the widener's 3, phase 25), saturation (4), unmask (2 x 5, phase 30)
-    static constexpr int kDynamicValues = 100; // phase 32: the dynamic EQ after the dips (25), phase 33: the pan (2), phase 34: depth (1)
+    static constexpr int kDynamicValues = 101; // phase 32: the dynamic EQ after the dips (25), phase 33: the pan (2), phase 34: depth (1), phase 35: delay (1)
     std::array<std::atomic<float>, kDynamicValues> backupDynamicsAudio {};
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(AgentProcessor)

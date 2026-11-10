@@ -260,6 +260,16 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   half a bar, delay 1/8, dotted 1/8, 1/4); report "Głębia (pogłos, delay)" (sends vs dry 200 Hz-8 kHz, warning over -6 dB). Part of
   `Command`, the A/B backup and `brainSet` (packed dynamics 100 floats, 99 = before phase 34), `ToolBit::toolDepth`, `kToolCount` 14,
   `bus::kVersion` 20; Agent param `highCut` (20 kHz = off) on the "Inżynier miksu" tab. mixcheck names reverb/delay/return/send files as sends.
+- Phase 35 kick-bass time and the Ozone gate (`ma/Alignment.h`): `LowAlignMeter` (both LP2 150 Hz, decimated ~2 kHz, cross-correlation
+  +-10 ms, ~2 s decay, gated on the key's energy) runs on the main and sidechain mono before the chain; `AlignDelay` (<= 10 ms, before the
+  cleanup, so the lag is measured undelayed and planning again is idempotent). AgentData `align`, `alignValid/LagMs/Best/Zero` (> 0 = main
+  later). Brain `alignAdvice` (bass with a cable only): |lag| >= 0.5 and <= 5 ms, best >= 0.3, best - zero >= 0.1, zero >= -0.2 (else
+  polarity first); an early bass gets the delay (`ChainTool::align`, whole-mix analysis), a late one an advisory item (move it in FL),
+  a Brain-made delay no longer needed goes off; report "Stopa i bas w czasie", notes, verdict "Czas ze stopą: ". Part of `Command`, the
+  A/B backup and `brainSet` (packed dynamics 101 floats, 100 = before phase 35), `ToolBit::toolAlign`, `kToolCount` 15, `bus::kVersion` 21;
+  Agent param `alignDelay` on the "EQ i ustępowanie" tab. `ReportItem::gate` "Gotowe dla Ozone?" is inserted first: red items outside the
+  arrangement group (plus ghosts / playback simulator on) block, amber ones are listed to check; the view always shows it on top and the
+  guide's and HTML's problem counts skip it. mixcheck `--kick-cable` feeds the kick stem into the bass Agents' sidechain, `--shift-bass MS`.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

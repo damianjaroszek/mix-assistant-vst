@@ -78,6 +78,7 @@ struct MixSnapshot
         ReportGroup group = ReportGroup::mix;
         juce::String title;
         juce::String detail;
+        bool gate = false; // phase 35: the "ready for Ozone?" summary of the others
     };
 
     std::vector<Channel> channels;
@@ -181,7 +182,8 @@ struct Proposal
             saturation, // phase 13
             dynamicEq, // phase 32: dynamic bands and the vocal rider
             pan,       // phase 33
-            depth      // phase 34: a send's high cut
+            depth,     // phase 34: a send's high cut
+            align      // phase 35: the bass delayed onto the kick
         };
         ChainTool tool = ChainTool::none; // with Action::solver unused
         ma::CleanupSettings cleanup {};
@@ -191,6 +193,7 @@ struct Proposal
         ma::DynamicEqSettings dynamicEq {}; // phase 32
         ma::PanSettings pan {};             // phase 33
         ma::DepthSettings depth {};         // phase 34
+        ma::AlignSettings align {};         // phase 35
         ma::StereoSettings stereo {};
         ma::SaturationSettings saturation {};
 

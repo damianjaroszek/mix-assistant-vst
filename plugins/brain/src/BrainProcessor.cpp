@@ -111,6 +111,95 @@ juce::String depthTimesText(double bpm)
            + pl(" ms, 1/4 = ") + juce::String(juce::roundToInt(t.quarterMs)) + " ms";
 }
 
+// Phase 35: the bass's low end against the kick's in time, from the bass Agent's own measurement
+// (it needs the kick on its sidechain input). The lag is measured before the Agent's delay, so
+// planning again gives the same delay.
+struct AlignAdvice
+{
+    enum class Kind
+    {
+        notBass,     // only the bass is lined up with the kick
+        noCable,     // no kick on its sidechain: nothing to measure against
+        notMeasured, // cable in, but too little of both playing together yet
+        inTime,      // within half a millisecond, or lining up would hardly gain anything
+        polarity,    // they cancel as they are: the polarity first
+        unclear,     // little in common below 150 Hz, or the best lag too far to be a timing slip
+        early,       // the bass comes first: its Agent delays it
+        late         // the bass comes later: only moving it earlier in FL helps
+    };
+    Kind kind = Kind::notBass;
+    double lagMs = 0.0, best = 0.0, zero = 0.0;
+    float delayMs = 0.0f;
+};
+
+constexpr double kAlignMinLagMs = 0.5;
+constexpr double kAlignMaxLagMs = 5.0;
+
+AlignAdvice alignAdvice(const ma::bus::AgentData& data)
+{
+    AlignAdvice a;
+    if (data.role != static_cast<int>(ma::Role::bass))
+        return a;
+    a.lagMs = data.alignLagMs;
+    a.best = data.alignBest;
+    a.zero = data.alignZero;
+    using K = AlignAdvice::Kind;
+    if (data.sidechainConnected == 0)
+        a.kind = K::noCable;
+    else if (data.alignValid == 0)
+        a.kind = K::notMeasured;
+    else if (std::abs(a.lagMs) < kAlignMinLagMs)
+        a.kind = K::inTime;
+    else if (a.zero < -0.3 && a.best >= 0.4)
+        a.kind = K::polarity;
+    else if (a.best < 0.3 || std::abs(a.lagMs) > kAlignMaxLagMs)
+        a.kind = K::unclear;
+    else if (a.best - a.zero < 0.1)
+        a.kind = K::inTime;
+    else if (a.lagMs < 0.0)
+    {
+        a.kind = K::early;
+        a.delayMs = static_cast<float>(std::round(-a.lagMs * 10.0) / 10.0);
+    }
+    else
+        a.kind = K::late;
+    return a;
+}
+
+juce::String alignText(const AlignAdvice& a)
+{
+    using K = AlignAdvice::Kind;
+    const auto ms = [](double v) { return juce::String(std::abs(v), 1) + " ms"; };
+    const auto gain = pl(" (zgodność dołu ze stopą ") + juce::String(a.zero, 2) + pl(" teraz, ") + juce::String(a.best, 2) + pl(" po wyrównaniu)");
+    switch (a.kind)
+    {
+        case K::notBass: return pl("wyrównanie w czasie jest dla basu względem stopy");
+        case K::noCable:
+            return pl("nie mam z czym porównać: w FL wyślij stopę jako sidechain do kanału basu (prawy klik na strzałce wysyłki, "
+                      "„Sidechain to this track”) i ustaw wejście sidechain w tym Agencie");
+        case K::notMeasured: return pl("stopa i dół basu jeszcze za krótko grały razem, żeby zmierzyć przesunięcie");
+        case K::inTime:
+            return pl("dół basu idzie razem ze stopą (") + juce::String(a.lagMs, 1) + pl(" ms, przesunięcie niewiele by dało)");
+        case K::polarity:
+            return pl("stopa i bas znoszą się w dole (zgodność ") + juce::String(a.zero, 2)
+                   + pl("): najpierw odwróć polaryzację basu, potem zmierzę czas jeszcze raz");
+        case K::unclear:
+            return a.best < 0.3
+                       ? pl("stopa i bas mało grają razem w dole (zgodność ") + juce::String(a.best, 2)
+                             + pl("): bas już ustępuje stopie albo grają na zmianę, nie ma czego wyrównywać")
+                       : pl("najlepsze przesunięcie ") + ms(a.lagMs)
+                             + pl(" to już pół okresu nuty, nie poślizg w czasie, więc nie przesuwam");
+        case K::early:
+            return pl("dół basu wchodzi ") + ms(a.lagMs) + pl(" przed stopą: opóźnienie ") + juce::String(a.delayMs, 1)
+                   + pl(" ms, żeby dół stopy i basu się nie znosił") + gain;
+        case K::late:
+            return pl("dół basu wchodzi ") + ms(a.lagMs) + pl(" za stopą: przesuń bas o tyle wcześniej w FL (w Playliście albo "
+                                                             "„Time offset” kanału w samplerze); wtyczka może tylko opóźniać")
+                   + gain;
+    }
+    return {};
+}
+
 juce::String joinNames(const juce::StringArray& names)
 {
     const int shown = juce::jmin(names.size(), 4);
@@ -2330,6 +2419,66 @@ void BrainProcessor::buildReport()
             report.push_back(item);
     }
 
+    // Phase 35: the bass's low end against the kick's, in time.
+    {
+        juce::StringArray early, late, cancel, noCable, inTime, apart;
+        for (const auto& channel : mix.channels)
+        {
+            const auto advice = alignAdvice(channel.data);
+            using K = AlignAdvice::Kind;
+            const auto name = quoted(channel.name);
+            switch (advice.kind)
+            {
+                case K::notBass: break;
+                case K::noCable: noCable.add(name); break;
+                case K::notMeasured: break;
+                case K::inTime: inTime.add(name); break;
+                case K::unclear: apart.add(name); break;
+                case K::polarity: cancel.add(name); break;
+                case K::early:
+                    if (std::abs(channel.data.align.delayMs - advice.delayMs) >= kAlignMinLagMs)
+                        early.add(name + " (" + juce::String(-advice.lagMs, 1) + pl(" ms przed stopą)"));
+                    else
+                        inTime.add(name);
+                    break;
+                case K::late: late.add(name + " (" + juce::String(advice.lagMs, 1) + pl(" ms za stopą)")); break;
+            }
+        }
+        MixSnapshot::ReportItem item;
+        item.title = pl("Stopa i bas: wyrównanie w czasie");
+        if (!late.isEmpty() || !cancel.isEmpty())
+        {
+            item.status = Status::warning;
+            juce::StringArray parts;
+            if (!late.isEmpty())
+                parts.add(pl("dół spóźniony: ") + joinNames(late) + pl(", przesuń bas o tyle wcześniej w FL"));
+            if (!cancel.isEmpty())
+                parts.add(pl("znosi się ze stopą: ") + joinNames(cancel) + pl(", odwróć polaryzację w Agencie basu"));
+            item.detail = parts.joinIntoString("; ") + ".";
+        }
+        else if (!early.isEmpty())
+        {
+            item.status = Status::warning;
+            item.detail = pl("Dół basu przed stopą: ") + joinNames(early) + pl(". „Analizuj” (cały łańcuch) opóźni bas.");
+        }
+        else if (!inTime.isEmpty() || !apart.isEmpty())
+        {
+            item.status = Status::good;
+            juce::StringArray parts;
+            if (!inTime.isEmpty())
+                parts.add(pl("dół basu idzie razem ze stopą: ") + joinNames(inTime));
+            if (!apart.isEmpty())
+                parts.add(pl("nie grają razem w dole (bas ustępuje stopie albo gra między uderzeniami), nie ma czego wyrównywać: ")
+                          + joinNames(apart));
+            item.detail = parts.joinIntoString("; ") + ".";
+            item.detail = item.detail.substring(0, 1).toUpperCase() + item.detail.substring(1);
+        }
+        else if (!noCable.isEmpty())
+            item.detail = pl("Żeby to zmierzyć, wyślij stopę jako sidechain do kanału basu: ") + joinNames(noCable) + ".";
+        if (item.detail.isNotEmpty())
+            report.push_back(item);
+    }
+
     // Phase 14: the kick's tuning against the key and the bass.
     if (const auto* kick = kickChannel())
     {
@@ -2579,6 +2728,58 @@ void BrainProcessor::buildReport()
             item.detail = parts.joinIntoString(", ") + pl(". Szczegóły w liście poniżej mapy.");
         }
         report.push_back(item);
+    }
+
+    // Phase 35: one go / no-go line before mastering. Red in the mix or the setup blocks the export,
+    // amber is worth a look, the arrangement is the song's and does not stop the mix going to Ozone.
+    {
+        MixSnapshot::ReportItem gate;
+        gate.gate = true;
+        gate.group = MixSnapshot::ReportGroup::setup;
+        gate.title = pl("Gotowe dla Ozone?");
+        juce::StringArray blockers, checks, waiting;
+        if (listenGhosts())
+            blockers.add(pl("wyłącz partie-duchy w odsłuchu (zakładka „Aranż”)"));
+        if (previewSystemIndex() != 0)
+            blockers.add(pl("przełącz odsłuch na „Pełne pasmo”"));
+        for (const auto& item : report)
+        {
+            if (item.group == MixSnapshot::ReportGroup::arrangement)
+                continue;
+            if (item.status == Status::problem)
+                blockers.add(item.title);
+            else if (item.status == Status::warning)
+                checks.add(item.title);
+            else if (item.status == Status::unknown && item.group == MixSnapshot::ReportGroup::mix)
+                waiting.add(item.title);
+        }
+        if (!std::isfinite(truePeakDb()))
+        {
+            gate.detail = pl("Puść utwór od początku do końca: sprawdzę szczyt, drop i resztę raportu.");
+        }
+        else if (!blockers.isEmpty())
+        {
+            gate.status = Status::problem;
+            gate.detail = pl("Jeszcze nie. Najpierw: ") + blockers.joinIntoString(", ") + "."
+                          + (checks.isEmpty() ? juce::String() : pl(" Do sprawdzenia: ") + checks.joinIntoString(", ") + ".");
+        }
+        else if (!checks.isEmpty())
+        {
+            gate.status = Status::warning;
+            gate.detail = pl("Prawie. Nic nie blokuje eksportu, ale sprawdź: ") + checks.joinIntoString(", ") + "."
+                          + (waiting.isEmpty() ? juce::String() : pl(" Jeszcze bez pomiaru: ") + waiting.joinIntoString(", ") + ".");
+        }
+        else if (mix.dropSeconds < kMinimumDropSeconds)
+        {
+            gate.detail = pl("Puść drop do końca: bez niego nie ocenię proporcji i barwy.");
+        }
+        else
+        {
+            gate.status = Status::good;
+            gate.detail = pl("Tak. Wyeksportuj miks (24 lub 32 bit, bez limitera na sumie) i zabierz „Raport dla Ozone”.")
+                          + (waiting.isEmpty() ? juce::String() : pl(" Bez pomiaru zostało: ") + waiting.joinIntoString(", ") + ".");
+        }
+        report.insert(report.begin(), gate);
     }
 }
 
@@ -3972,6 +4173,49 @@ void BrainProcessor::proposeWholeMix()
         chainItems.push_back(item);
     }
 
+    // Phase 35: the bass's low end onto the kick's, in time (measured by the bass Agent with the kick on its sidechain).
+    for (const auto& channel : mix.channels)
+    {
+        if (channel.data.role != static_cast<int>(ma::Role::bass))
+            continue;
+        const auto advice = alignAdvice(channel.data);
+        const bool brainMade = (channel.data.brainTools & ma::bus::toolAlign) != 0;
+        const auto& have = channel.data.align;
+        ma::AlignSettings want = have;
+        bool change = false;
+        if (advice.kind == AlignAdvice::Kind::early)
+        {
+            want.delayMs = advice.delayMs;
+            change = std::abs(want.delayMs - have.delayMs) >= kAlignMinLagMs; // within half a millisecond it stays
+        }
+        else if ((advice.kind == AlignAdvice::Kind::inTime || advice.kind == AlignAdvice::Kind::late)
+                 && ma::alignOn(have) && brainMade)
+        {
+            want.delayMs = 0.0f;
+            change = true;
+        }
+        if (change)
+        {
+            Proposal::Item item;
+            item.action = Proposal::Item::Action::chain;
+            item.tool = Proposal::Item::ChainTool::align;
+            item.owner = channel.owner;
+            item.align = want;
+            item.text = quoted(channel.name) + ": "
+                        + (ma::alignOn(want) ? alignText(advice) : pl("opóźnienie wyłączone, ") + alignText(advice));
+            chainItems.push_back(item);
+        }
+        if (advice.kind == AlignAdvice::Kind::late)
+        {
+            Proposal::Item item;
+            item.advisory = true;
+            item.selected = false;
+            item.owner = channel.owner;
+            item.text = quoted(channel.name) + ": " + alignText(advice);
+            chainItems.push_back(item);
+        }
+    }
+
     // Phase 9: each stem group's level against the references, with the planned cleanup.
     if (levelsPlanned)
     {
@@ -4299,6 +4543,12 @@ Proposal::Verdict BrainProcessor::judge(size_t index, const ma::ChainPlan& plan,
         verdict.reasons.add(pl("Dynamiczne EQ: ") + dynamicEqText(plan).fromFirstOccurrenceOf(": ", false, false) + ".");
     if (plan.depthConsidered && ma::depthOn(plan.depth))
         verdict.reasons.add(pl("Głębia: ") + depthText(plan) + ".");
+    if (const auto advice = alignAdvice(channel.data); advice.kind != AlignAdvice::Kind::notBass)
+    {
+        verdict.reasons.add(pl("Czas ze stopą: ") + alignText(advice) + ".");
+        if (advice.kind == AlignAdvice::Kind::late)
+            attention.add(pl("dół spóźniony względem stopy"));
+    }
     if (const auto pan = lastPanPlans.find(channel.owner);
         pan != lastPanPlans.end() && pan->second.plan.considered && ma::panOn(pan->second.plan.settings))
         verdict.reasons.add(pl("Panorama: ") + panText(pan->second.plan, pan->second.partner, pan->second.inputBalanceDb)
@@ -4414,6 +4664,8 @@ Proposal::Verdict BrainProcessor::judge(size_t index, const ma::ChainPlan& plan,
             tool = ma::bus::toolPan;
         else if (reason.startsWith(pl("Głębia: ")))
             tool = ma::bus::toolDepth;
+        else if (reason.startsWith(pl("Czas ze stopą: ")))
+            tool = ma::bus::toolAlign;
         verdict.reasonTools.push_back(tool);
     }
     return verdict;
@@ -4582,7 +4834,8 @@ void BrainProcessor::buildToolNotes(bool wholeMix)
         if (!wholeMix || plan == lastPlans.end())
         {
             for (const int bit : { ma::bus::toolCleanup, ma::bus::toolCompressor, ma::bus::toolClipper, ma::bus::toolEvener,
-                                   ma::bus::toolSaturation, ma::bus::toolStereo, ma::bus::toolPan, ma::bus::toolDepth })
+                                   ma::bus::toolSaturation, ma::bus::toolStereo, ma::bus::toolPan, ma::bus::toolDepth,
+                                   ma::bus::toolAlign })
                 if (!has(bit))
                     set(bit, D::notChecked, notInScope);
         }
@@ -4757,6 +5010,23 @@ void BrainProcessor::buildToolNotes(bool wholeMix)
                 set(ma::bus::toolDepth, D::notChecked, pl("brak widma wysyłki albo reszty miksu"));
             else
                 set(ma::bus::toolDepth, ma::depthOn(p.depth) ? D::kept : D::notNeeded, depthText(p));
+
+            // Phase 35: the bass against the kick in time.
+            const auto advice = alignAdvice(channel.data);
+            using K = AlignAdvice::Kind;
+            if (const auto* item = chainItem(Tool::align))
+                set(ma::bus::toolAlign, D::proposed, strip(item->text));
+            else if (advice.kind == K::notBass)
+                set(ma::bus::toolAlign, D::notNeeded, alignText(advice));
+            else if (ma::alignOn(channel.data.align) && (channel.data.brainTools & ma::bus::toolAlign) == 0)
+                set(ma::bus::toolAlign, D::yours, pl("opóźnienie ustawione ręcznie (") + juce::String(channel.data.align.delayMs, 1)
+                                                      + pl(" ms); ") + alignText(advice));
+            else if (advice.kind == K::noCable || advice.kind == K::notMeasured)
+                set(ma::bus::toolAlign, D::notChecked, alignText(advice));
+            else if (advice.kind == K::early)
+                set(ma::bus::toolAlign, D::kept, alignText(advice));
+            else
+                set(ma::bus::toolAlign, D::notNeeded, alignText(advice));
         }
 
         // Duck under the kick.
@@ -4890,6 +5160,7 @@ std::vector<Proposal::Verdict> BrainProcessor::verdictsNow() const
             case ma::bus::toolDynamicEq: return Tool::dynamicEq;
             case ma::bus::toolPan: return Tool::pan;
             case ma::bus::toolDepth: return Tool::depth;
+            case ma::bus::toolAlign: return Tool::align;
             default: return Tool::none;
         }
     };
@@ -5995,6 +6266,7 @@ int BrainProcessor::applySelected(bool refining)
         auto saturation = channel.data.saturation;
         auto pan = channel.data.pan;
         auto depth = channel.data.depth;
+        auto align = channel.data.align;
         // Phase 30: the dips go along as the Agent has them, unless the proposal sets one.
         std::array<ma::UnmaskSettings, ma::kMaxUnmask> unmask {};
         std::array<std::uint64_t, ma::kMaxUnmask> unmaskKey {};
@@ -6040,6 +6312,7 @@ int BrainProcessor::applySelected(bool refining)
                     case Proposal::Item::ChainTool::dynamicEq: dynamicEq = item.dynamicEq; break;
                     case Proposal::Item::ChainTool::pan: pan = item.pan; break;
                     case Proposal::Item::ChainTool::depth: depth = item.depth; break;
+                    case Proposal::Item::ChainTool::align: align = item.align; break;
                     case Proposal::Item::ChainTool::none: break;
                 }
                 dynamicChanges = true;
@@ -6091,6 +6364,7 @@ int BrainProcessor::applySelected(bool refining)
         command.dynamicEq = dynamicEq;
         command.pan = pan;
         command.depth = depth;
+        command.align = align;
         command.inputShiftDb = inMixSums(channel) ? 0.0f : static_cast<float>(levelGain);
         for (int d = 0; d < ma::kMaxUnmask; ++d)
         {
@@ -6777,7 +7051,7 @@ juce::String BrainProcessor::masteringReportHtml() const
     // Red items are the mix's to fix, not the master's.
     juce::StringArray first;
     for (const auto& item : mix.report)
-        if (item.status == MixSnapshot::Status::problem)
+        if (!item.gate && item.status == MixSnapshot::Status::problem)
             first.add(item.title);
     if (!first.isEmpty())
         out << "<p class=\"problem\"><span class=\"dot\"></span>" << pl("Najpierw popraw w miksie (szczegóły w raporcie niżej): ")
