@@ -32,7 +32,7 @@ namespace ma::bus
 {
 
 constexpr std::uint32_t kMagic = 0x4D414255; // "MABU"
-constexpr std::uint32_t kVersion = 21; // phase 35: kick-bass time alignment
+constexpr std::uint32_t kVersion = 22; // phase 37: what a send gives way to
 constexpr int kMaxSlots = 128;
 constexpr int kNameLength = 48;
 constexpr int kBands = 40;            // ERB bands, as SpectrumAnalyzer with BandScale::erb
@@ -142,6 +142,7 @@ struct AgentData
     float alignLagMs;  // > 0: this channel later than the sidechain
     float alignBest;   // low-band correlation at that lag
     float alignZero;   // and as it plays now
+    std::int32_t sendDuckTo; // phase 37: a send's choice (SendDuckTo), the user's
 };
 
 // Phase 23: the tools of an Agent, for AgentData::brainTools / changedTools.
@@ -162,6 +163,15 @@ enum ToolBit : std::int32_t
     toolPan = 1 << 12,       // phase 33
     toolDepth = 1 << 13,     // phase 34: a send's high cut
     toolAlign = 1 << 14      // phase 35: the bass's delay against the kick
+};
+
+// Phase 37: what a send (reverb, delay) gives way to, chosen in its Agent.
+enum SendDuckTo : std::int32_t
+{
+    sendDuckAuto = 0,   // the Brain decides from what feeds it
+    sendDuckVoice = 1,  // the main voice (the loudest vocal, else lead)
+    sendDuckSource = 2, // its own source: quiet on the hit, the tail blooms after it
+    sendDuckNone = 3
 };
 
 // Note lengths for a tempo-synced duck release, indexed by AgentData::duckSync.

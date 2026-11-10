@@ -235,6 +235,7 @@ public:
     static constexpr const char* highCutId = "highCut";
     // Phase 35: the channel's own delay (ms), to line its low end up with the kick.
     static constexpr const char* alignDelayId = "alignDelay";
+    static constexpr const char* sendDuckToId = "sendDuckTo";
     double inputBalanceDb() const { return inputBalance.load(); }
     bool inputBalanceKnown() const { return balanceSeen.load(); }
     double dynamicReductionDb(int band) const { return dynamicShown[static_cast<size_t>(band)].load(); }
@@ -254,6 +255,7 @@ public:
     double evenerGainDb() const { return evenerGain.load(); }
     double evenerNoteHz() const { return evenerNote.load(); }
     static juce::StringArray duckModeNames();
+    static juce::StringArray sendDuckNames();
     static juce::StringArray duckSyncNames();
     static juce::StringArray saturationModeNames();
     ma::SaturationSettings currentSaturation() const;

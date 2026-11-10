@@ -282,6 +282,11 @@ juce::StringArray AgentProcessor::duckModeNames()
     return { ma::ui::pl("Pasmo"), ma::ui::pl("Cały kanał") };
 }
 
+juce::StringArray AgentProcessor::sendDuckNames()
+{
+    return { ma::ui::pl("Auto (wg źródła)"), ma::ui::pl("Główny głos"), ma::ui::pl("Swoje źródło"), ma::ui::pl("Nic") };
+}
+
 juce::StringArray AgentProcessor::duckSyncNames()
 {
     return { ma::ui::pl("Ręcznie"), "1/32", "1/16", "1/8", "1/4" };
@@ -518,6 +523,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout AgentProcessor::createLayout
     layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { alignDelayId, 17 }, "Delay",
                                                            Range { 0.0f, ma::kMaxAlignDelayMs, 0.05f }, 0.0f,
                                                            juce::AudioParameterFloatAttributes().withLabel("ms")));
+    layout.add(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID { sendDuckToId, 18 }, "Send gives way to", sendDuckNames(), 0));
     for (int d = 0; d < ma::kMaxUnmask; ++d)
     {
         const auto name = "Give way " + juce::String(d + 1);
@@ -1162,6 +1168,7 @@ void AgentProcessor::publishToBrain()
     data.pan = dynamics.pan;
     data.depth = dynamics.depth;
     data.align = dynamics.align;
+    data.sendDuckTo = static_cast<std::int32_t>(parameters.getRawParameterValue(sendDuckToId)->load());
     data.alignValid = alignValid.load() ? 1 : 0;
     data.alignLagMs = alignLag.load();
     data.alignBest = alignBest.load();

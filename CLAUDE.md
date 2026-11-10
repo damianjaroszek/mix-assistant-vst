@@ -274,6 +274,13 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   raw + trim, pre-duck so it is idempotent): a bell (not the whole signal) at the voice's loudest ERB band in 800 Hz-5 kHz, Q 0.8, depth =
   send minus voice over 1-5 kHz + `kSendUnderVoiceDb` 12, clamped 2-8 dB in 0.5 dB steps (3 dB until the drop is measured). Kept while the
   Agent's duck is a bell keyed to the voice within 1 dB and 0.3 octave.
+- Phase 37 what a send gives way to: `ma::findSendSources` (Depth.h) fits a send's per-second power in 8 regions (150 Hz-12 kHz,
+  normalised per region) as a non-negative sum of the candidates' (0.7 this second + 0.3 the last, for the tail; coordinate-descent NNLS;
+  >= `kMinSourceSeconds` 12 s within 40 dB of its loudest; valid with uncentred fit >= 0.7). The Brain (`sendSources`, from `songBins`,
+  candidates = channels in the mix sums except sends) picks per send: Agent param `sendDuckTo` (`bus::SendDuckTo` auto / voice / source /
+  none, `AgentData::sendDuckTo`, the user's, `bus::kVersion` 22; "Inżynier miksu" tab, enabled on sends): auto = drums source -> whole-signal
+  duck under it (2 ms, 1/16 synced, depth over 200 Hz-8 kHz, <= `kSendDuckSourceMaxDb` 6), else the main voice (phase 36), else its source
+  (bell 300 Hz-6 kHz, 1/8); "none" turns a Brain-made duck off. `lastSendNotes` feeds the "Głębia" report line (sources, key).
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

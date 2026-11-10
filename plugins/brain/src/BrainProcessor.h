@@ -616,6 +616,26 @@ private:
     double chainLossDb(std::uint64_t owner) const;
     // The channel's raw spectrum after its trim, averaged over the drop (-200 where unknown).
     ma::SpectrumAnalyzer::Bands dropSpectrumDb(std::uint64_t owner) const;
+    // Phase 37: which channels feed a send, from the song's seconds (`songBins`).
+    struct SendSourceInfo
+    {
+        bool valid = false;
+        int seconds = 0;
+        double fit = 0.0;
+        std::vector<std::uint64_t> owners; // candidates, as `share`
+        std::vector<double> share;
+        std::uint64_t dominantOwner = 0;
+    };
+    SendSourceInfo sendSources(std::uint64_t sendOwner) const;
+    struct SendNote
+    {
+        SendSourceInfo sources;
+        int mode = 0;               // ma::bus::SendDuckTo
+        std::uint64_t keyOwner = 0; // what it gives way to (0 = nothing)
+    };
+    std::map<std::uint64_t, SendNote> lastSendNotes; // per send, from the last whole-mix analysis
+    juce::String sendSourcesText(const SendSourceInfo& info) const;
+    const MixSnapshot::Channel* findChannel(std::uint64_t owner) const;
     // mixcheck (real multitracks): Learn brings every part to its role's level, so a quiet piano bed
     // ended as loud as the main lead. The whole-mix analysis gives each part of the music and vocal
     // groups its level in the raw tracks against the others (the group as loud as before), after its chain; the group levels then place the group. Only set while `proposeWholeMix` runs.

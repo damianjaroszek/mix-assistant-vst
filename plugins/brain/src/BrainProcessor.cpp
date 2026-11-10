@@ -1493,6 +1493,74 @@ BrainProcessor::stemGroupDb(bool withEq, std::array<bool, ma::kStemGroups>& pres
     return out;
 }
 
+const MixSnapshot::Channel* BrainProcessor::findChannel(std::uint64_t owner) const
+{
+    for (const auto& channel : mix.channels)
+        if (channel.owner == owner)
+            return &channel;
+    return nullptr;
+}
+
+BrainProcessor::SendSourceInfo BrainProcessor::sendSources(std::uint64_t sendOwner) const
+{
+    SendSourceInfo info;
+    if (songBins.empty())
+        return info;
+    const int first = songBins.begin()->first, last = songBins.rbegin()->first;
+    const auto frames = static_cast<size_t>(last - first + 1);
+    const auto frameOf = [&](std::uint64_t owner, std::vector<ma::SourceFrame>& out) {
+        out.assign(frames, ma::SourceFrame {});
+        for (const auto& [second, bin] : songBins)
+        {
+            const auto found = bin.sums.find(owner);
+            if (found == bin.sums.end() || bin.updates <= 0)
+                continue;
+            ma::SpectrumAnalyzer::Bands power {};
+            for (int b = 0; b < ma::bus::kBands; ++b)
+                power[static_cast<size_t>(b)] = found->second.power[static_cast<size_t>(b)] / static_cast<double>(bin.updates);
+            out[static_cast<size_t>(second - first)] = ma::sourceFrame(power);
+        }
+    };
+    std::vector<ma::SourceFrame> send;
+    frameOf(sendOwner, send);
+    std::vector<std::vector<ma::SourceFrame>> candidates;
+    for (const auto& channel : mix.channels)
+    {
+        // Sends and buses are not sources (a bus carries its sources, which have Agents of their own).
+        if (channel.owner == sendOwner || !inMixSums(channel) || channel.data.role == static_cast<int>(ma::Role::send))
+            continue;
+        info.owners.push_back(channel.owner);
+        candidates.emplace_back();
+        frameOf(channel.owner, candidates.back());
+    }
+    const auto found = ma::findSendSources(send, candidates);
+    info.valid = found.valid;
+    info.seconds = found.seconds;
+    info.fit = found.fit;
+    info.share = found.share;
+    if (found.dominant >= 0)
+        info.dominantOwner = info.owners[static_cast<size_t>(found.dominant)];
+    return info;
+}
+
+juce::String BrainProcessor::sendSourcesText(const SendSourceInfo& info) const
+{
+    if (!info.valid)
+        return info.seconds < ma::kMinSourceSeconds
+                   ? pl("źródło jeszcze nieznane (") + juce::String(info.seconds) + " / " + juce::String(ma::kMinSourceSeconds) + pl(" s utworu)")
+                   : pl("źródło nierozpoznane");
+    std::vector<std::pair<double, std::uint64_t>> parts;
+    for (size_t k = 0; k < info.owners.size(); ++k)
+        if (info.share[k] >= 0.15)
+            parts.push_back({ info.share[k], info.owners[k] });
+    std::sort(parts.begin(), parts.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+    juce::StringArray names;
+    for (const auto& [share, owner] : parts)
+        if (const auto* c = findChannel(owner))
+            names.add(quoted(c->name) + " " + juce::String(juce::roundToInt(share * 100.0)) + "%");
+    return pl("zasila ją głównie ") + (names.isEmpty() ? pl("kilka kanałów po trochu") : joinNames(names));
+}
+
 ma::SpectrumAnalyzer::Bands BrainProcessor::dropSpectrumDb(std::uint64_t owner) const
 {
     ma::SpectrumAnalyzer::Bands db {};
@@ -2428,6 +2496,20 @@ void BrainProcessor::buildReport()
                           + (share > -6.0 ? pl(": głośno, ogony rozmywają miks; ścisz wysyłki albo skróć pogłos.")
                                           : pl("."));
         }
+        // Phase 37: what feeds each send and what it gives way to (from the last whole-mix analysis).
+        juce::StringArray feeds;
+        for (const auto& channel : mix.channels)
+        {
+            const auto note = lastSendNotes.find(channel.owner);
+            if (note == lastSendNotes.end() || channel.data.role != static_cast<int>(ma::Role::send))
+                continue;
+            auto line = quoted(channel.name) + ": " + sendSourcesText(note->second.sources);
+            if (const auto* key = findChannel(note->second.keyOwner))
+                line += pl(", ustępuje ") + quoted(key->name);
+            feeds.add(line);
+        }
+        if (item.detail.isNotEmpty() && !feeds.isEmpty())
+            item.detail += " " + feeds.joinIntoString("; ") + ".";
         if (item.detail.isNotEmpty() && times.isNotEmpty())
             item.detail += pl(" Czasy ") + times + ".";
         if (item.detail.isNotEmpty())
@@ -4113,6 +4195,7 @@ void BrainProcessor::proposeWholeMix()
     // Phase 34: depth. Sends darker than the dry parts, and out of the way while the main voice sings.
     const auto* voice = mainVoice();
     bool anySend = false;
+    lastSendNotes.clear();
     for (size_t c = 0; c < mix.channels.size(); ++c)
     {
         const auto& channel = mix.channels[c];
@@ -4135,57 +4218,137 @@ void BrainProcessor::proposeWholeMix()
             chainItems.push_back(item);
         }
 
-        // Under the main voice: the room steps back a little while it sings (keyed over the bus).
-        if (voice == nullptr)
-        {
-            noteTool(channel.owner, ma::bus::toolDuck, ma::bus::ToolDecision::notNeeded,
-                     pl("nie ma głównego wokalu ani leadu, któremu pogłos miałby ustępować"));
-            continue;
-        }
+        // Phase 36/37: what the send gives way to, and how.
+        auto& note = lastSendNotes[channel.owner];
+        note = {};
+        note.sources = sendSources(channel.owner);
+        const int mode = channel.data.sendDuckTo;
+        note.mode = mode;
+        const bool brainDuck = (channel.data.brainTools & ma::bus::toolDuck) != 0 && channel.data.duck.on > 0.5f;
+        const auto turnOff = [&](const juce::String& why) {
+            if (!brainDuck)
+            {
+                noteTool(channel.owner, ma::bus::toolDuck, ma::bus::ToolDecision::notNeeded, why);
+                return;
+            }
+            Proposal::Item item;
+            item.action = Proposal::Item::Action::duck;
+            item.owner = channel.owner;
+            item.duck = channel.data.duck;
+            item.duck.on = 0.0f;
+            item.duckSync = channel.data.duckSync;
+            item.text = name + pl(": ustępowanie wyłączone, ") + why;
+            chainItems.push_back(item);
+        };
         if (channel.data.sidechainConnected != 0)
         {
             noteTool(channel.owner, ma::bus::toolDuck, ma::bus::ToolDecision::yours,
                      pl("sidechain podłączony kablem: ustępuje temu, co do niego wysłałeś"));
             continue;
         }
-        if (voice->data.keyId == 0 || channel.data.keyId == 0)
+        if (mode == ma::bus::sendDuckNone)
+        {
+            turnOff(pl("bo w Agencie wysyłki wybrałeś „Nic”"));
             continue;
-        // Phase 36: only in the voice's range, as deep as the tail needs (from the drop's spectra).
-        const auto sendDuck = ma::planSendDuck(dropSpectrumDb(channel.owner), dropSpectrumDb(voice->owner));
+        }
+        // The dominant source, when the fit knows it.
+        const MixSnapshot::Channel* source = nullptr;
+        if (note.sources.valid)
+            for (size_t k = 0; k < note.sources.owners.size(); ++k)
+                if (note.sources.owners[k] == note.sources.dominantOwner)
+                    source = findChannel(note.sources.owners[k]);
+        const bool sourceIsVoice = source != nullptr && voice != nullptr && source->owner == voice->owner;
+        const auto sourceGroup = source != nullptr ? groupOfChannel(*source) : -1;
+        // Who it gives way to: the voice (in its band) or its own source.
+        enum class Target { voice, drums, music, none } target = Target::none;
+        if (mode == ma::bus::sendDuckVoice)
+            target = voice != nullptr ? Target::voice : Target::none;
+        else if (mode == ma::bus::sendDuckSource)
+            target = source == nullptr ? Target::none
+                     : sourceIsVoice ? Target::voice
+                     : sourceGroup == static_cast<int>(ma::StemGroup::drums) ? Target::drums
+                                                                             : Target::music;
+        else if (source != nullptr && sourceGroup == static_cast<int>(ma::StemGroup::drums))
+            target = Target::drums; // a drum room: the hits stay dry, the tail blooms after them
+        else if (voice != nullptr)
+            target = Target::voice; // the vocal's, and the music's while someone sings over it
+        else if (source != nullptr)
+            target = Target::music;
+        if (target == Target::none)
+        {
+            if (mode == ma::bus::sendDuckSource)
+                noteTool(channel.owner, ma::bus::toolDuck, ma::bus::ToolDecision::notChecked,
+                         note.sources.seconds < ma::kMinSourceSeconds
+                             ? pl("jeszcze nie wiem, co zasila tę wysyłkę: puść dłuższy fragment utworu (")
+                                   + juce::String(note.sources.seconds) + " / " + juce::String(ma::kMinSourceSeconds) + " s)"
+                             : pl("nie rozpoznaję, co zasila tę wysyłkę (jej przebieg nie pasuje do żadnego kanału)"));
+            else
+                turnOff(pl("bo nie ma głównego wokalu ani leadu, któremu pogłos miałby ustępować, ani rozpoznanego źródła"));
+            continue;
+        }
+        const auto* key = target == Target::voice ? voice : source;
+        if (key == nullptr || key->data.keyId == 0 || channel.data.keyId == 0)
+            continue;
+        note.keyOwner = key->owner;
+        ma::SendDuck duckPlan;
+        bool whole = false;
+        double attackMs = 10.0;
+        int sync = 4; // 1/4: the room comes back between phrases, not between syllables
+        juce::String how;
+        if (target == Target::voice)
+        {
+            duckPlan = ma::planSendDuck(dropSpectrumDb(channel.owner), dropSpectrumDb(key->owner));
+            how = pl(" (tylko w paśmie głosu, przestrzeń i dół zostają), gdy ten gra")
+                  + (duckPlan.valid ? pl(" (ogon w 1–5 kHz ") + juce::String(duckPlan.tailVsVoiceDb, 1) + pl(" dB względem głosu, po ustąpieniu ")
+                                      + juce::String(duckPlan.tailVsVoiceDb - duckPlan.depthDb, 1) + " dB)"
+                                : pl(" (drop jeszcze niezmierzony, więc łagodnie)"));
+        }
+        else if (target == Target::drums)
+        {
+            // Quiet on the hit, the tail blooms right after it.
+            duckPlan = ma::planSendDuck(dropSpectrumDb(channel.owner), dropSpectrumDb(key->owner), 200.0, 8000.0, 200.0, 8000.0,
+                                    ma::kSendDuckSourceMaxDb);
+            whole = true;
+            attackMs = 2.0;
+            sync = 2; // 1/16
+            how = pl(" na każde uderzenie (cały pogłos, szybki powrót 1/16): uderzenie zostaje suche i krótkie, ogon rozkwita po nim");
+        }
+        else
+        {
+            duckPlan = ma::planSendDuck(dropSpectrumDb(channel.owner), dropSpectrumDb(key->owner), 300.0, 6000.0, 300.0, 6000.0,
+                                    ma::kSendDuckSourceMaxDb);
+            sync = 3; // 1/8
+            how = pl(", gdy ten gra (w jego paśmie): nuty zostają czyste, ogon wypełnia przerwy");
+        }
         const auto& have = channel.data.duck;
-        const auto howDeep = [&]() {
-            return sendDuck.valid ? pl(" (ogon w 1–5 kHz ") + juce::String(sendDuck.tailVsVoiceDb, 1) + pl(" dB względem głosu, po ustąpieniu ")
-                                    + juce::String(sendDuck.tailVsVoiceDb - sendDuck.depthDb, 1) + " dB)"
-                              : pl(" (drop jeszcze niezmierzony, więc łagodnie)");
-        };
-        if (have.on > 0.5f && have.wholeSignal < 0.5f && channel.data.duckKey == voice->data.keyId
-            && std::abs(have.depthDb - sendDuck.depthDb) < 1.0 && std::abs(std::log2(have.hz / sendDuck.hz)) < 0.3)
+        const bool wantWhole = whole;
+        if (have.on > 0.5f && (have.wholeSignal > 0.5f) == wantWhole && channel.data.duckKey == key->data.keyId
+            && std::abs(have.depthDb - duckPlan.depthDb) < 1.0 && (wantWhole || std::abs(std::log2(have.hz / duckPlan.hz)) < 0.3))
         {
             noteTool(channel.owner, ma::bus::toolDuck, ma::bus::ToolDecision::kept,
-                     pl("już ustępuje ") + quoted(voice->name) + pl(" o ") + juce::String(have.depthDb, 1) + pl(" dB wokół ")
-                         + hzText(have.hz) + pl(", gdy ten gra") + howDeep());
+                     pl("już ustępuje ") + quoted(key->name) + pl(" o ") + juce::String(have.depthDb, 1) + " dB" + how + "; "
+                         + sendSourcesText(note.sources));
             continue;
         }
         Proposal::Item item;
         item.action = Proposal::Item::Action::duck;
         item.owner = channel.owner;
-        item.maskedOwner = voice->owner;
+        item.maskedOwner = key->owner;
         auto& duck = item.duck;
         duck.on = 1.0f;
-        duck.wholeSignal = 0.0f;
-        duck.hz = static_cast<float>(sendDuck.hz);
-        duck.q = static_cast<float>(sendDuck.q);
-        duck.depthDb = static_cast<float>(sendDuck.depthDb);
+        duck.wholeSignal = whole ? 1.0f : 0.0f;
+        duck.hz = static_cast<float>(duckPlan.hz);
+        duck.q = static_cast<float>(duckPlan.q);
+        duck.depthDb = static_cast<float>(duckPlan.depthDb);
         duck.thresholdDb = -30.0f;
-        duck.attackMs = 10.0f;
-        constexpr int quarterSync = 4; // 1/4: the room comes back between phrases, not between syllables
-        duck.releaseMs = static_cast<float>(bpm > 0.0 ? ma::syncedReleaseMs(bpm, ma::bus::duckSyncFraction(quarterSync)) : 400.0);
-        item.duckSync = bpm > 0.0 ? quarterSync : 0;
-        item.duckKey = voice->data.keyId;
-        item.text = name + pl(": ustępuje ") + quoted(voice->name) + pl(" o ") + juce::String(duck.depthDb, 1)
-                    + pl(" dB wokół ") + hzText(duck.hz) + pl(" (tylko w paśmie głosu, przestrzeń i dół zostają), gdy ten gra")
-                    + howDeep() + pl("; powrót ") + juce::String(juce::roundToInt(duck.releaseMs))
-                    + pl(" ms, więc pogłos wraca w przerwach. Bez kabla, przez wspólną pamięć");
+        duck.attackMs = static_cast<float>(attackMs);
+        duck.releaseMs = static_cast<float>(bpm > 0.0 ? ma::syncedReleaseMs(bpm, ma::bus::duckSyncFraction(sync)) : 60000.0 / 124.0 * 4.0 * ma::bus::duckSyncFraction(sync));
+        item.duckSync = bpm > 0.0 ? sync : 0;
+        item.duckKey = key->data.keyId;
+        item.text = name + pl(": ustępuje ") + quoted(key->name) + pl(" o ") + juce::String(duck.depthDb, 1) + " dB"
+                    + (whole ? juce::String() : pl(" wokół ") + hzText(duck.hz)) + how + pl("; powrót ")
+                    + juce::String(juce::roundToInt(duck.releaseMs)) + pl(" ms; ") + sendSourcesText(note.sources)
+                    + pl(". Bez kabla, przez wspólną pamięć");
         chainItems.push_back(item);
     }
     // The times for the user's own reverb and delay plugins.

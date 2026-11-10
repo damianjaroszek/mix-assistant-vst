@@ -112,7 +112,8 @@ private:
     // Phase 34: a send's high cut.
     juce::Label highCutLabel;
     juce::Slider highCutSlider;
-    juce::Label alignLabel;
+    juce::Label alignLabel, sendDuckLabel;
+    juce::ComboBox sendDuckBox;
     juce::Slider alignSlider;
     juce::Slider panSlider, panMonoSlider;
     ma::ui::CoherenceView stereoView;
@@ -127,7 +128,7 @@ private:
     using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;
     using ComboAttachment = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
     std::unique_ptr<SliderAttachment> priorityAttachment, targetAttachment, trimAttachment, ceilingAttachment, learnTimeAttachment;
-    std::unique_ptr<ComboAttachment> roleAttachment, measureAttachment, duckModeAttachment, duckSyncAttachment, satModeAttachment;
+    std::unique_ptr<ComboAttachment> roleAttachment, measureAttachment, duckModeAttachment, duckSyncAttachment, satModeAttachment, sendDuckAttachment;
     std::unique_ptr<SliderAttachment> duckFreqAttachment, duckDepthAttachment, duckThresholdAttachment, duckAttackAttachment,
         duckReleaseAttachment, harmonicsFreqAttachment, harmonicsAmountAttachment,
         attackFreqAttachment, attackAmountAttachment, satDriveAttachment, satMixAttachment;
