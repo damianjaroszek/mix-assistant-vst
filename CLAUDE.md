@@ -298,6 +298,24 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   pre-EQ so tonal cuts do not come back as trim. A hole no channel can fill names the channel playing an octave below (saturation /
   harmonics); `ozoneCurve` lists what is left (bells, +-4 dB) in the tonal report item and the HTML ("Krzywa EQ do Ozone").
   mixcheck vs the references (sum of TBC zone distances): Galias 5.6 -> 7.3, Chardonnay 6.3 -> 4.7 (the built-in curve comes from them).
+- Phase 40 engineer's review fixes. `ma::clock` (`plugins/common/Clock.h`): every timeout reads `clock::nowMs()`; mixcheck sets
+  `clock::testMs`, stops the processors' timers (`useTestTicks`) and ticks them by rendered time (`testTick`: Agents 10 Hz, Brain 5 Hz),
+  so a run is repeatable and takes ~2.5 min. `Role::clap` (index 10, "Clap / werbel", `isPercussion()` = percussion or clap; drums
+  group, priority 3, role level -5, HPF cap 150 Hz, centred; not recognised by Learn, picked by hand; mixcheck names snare/clap files).
+  The Agent's priority follows its role (`followRoleWithPriority`: while it is 5 or the last role's default); before, a role picked by
+  hand left every channel at 5 and each collision counted both ways. Planner: kick/bass HPF 30-40 Hz from the body (within
+  `kBodyDb` 12 of the peak), a drum's owned-low-end HPF never reaches its body (toms), `ChainPlan::topPercussion` (>= 60% above 5 kHz)
+  never clipped or a loud-master carrier, a vocal with overtones >= `kFilteredDb` 24 under target gets no saturation
+  (`filteredOnPurpose`). Drums never duck under the kick. Solver: a collision cut is capped by its width (`kBroadCutDb` 3 at Q <= 1,
+  full depth from Q 2) and kept only when it uncovers (`worth`: >= 0.15 and the rest <= 0.6, or >= 0.3); tonal boosts above 8 kHz
+  <= `kMaxAirBoostDb` 2 in all per channel. `compareToTarget` judges mix and corridor smoothed over +-1 ERB band (a note is not a region;
+  `mixDb` stays unsmoothed for the view). Typical drums level -10.5 (the Learn pass keeps hats 12 dB down, so the group is the kick).
+  Bus v23: `Header::brains[kMaxBrains]` (`BrainEntry`: session id saved in the Brain's state, process id, heartbeat, spectra request,
+  compare flag), `AgentData::sessionId` (saved); `chooseSession`: keep an alive one, else the Brain in the same process, else the only
+  one alive, a Brain gone `kRejoinMs` 10 s is replaced; the Brain skips Agents of another session, Agents' width plan too.
+  mixcheck (deterministic) before -> after, distance to the masters over TBC's ranges: Chardonnay 6.9 -> 5.2, Galias 7.3 -> 4.5;
+  collisions 40 -> 22 and 69 -> 33; proposal items 70 -> 47 and 59 -> 48. PLR is unchanged (14-16 dB): not compressors or ducks
+  (switched off in a trial); still open, as is a wireless kick duck predicted from the beat grid (it arrives a block late).
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 
@@ -307,8 +325,8 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
 - Everything: `cmake -S . -B build && cmake --build build --config Release`
 - Offline check on real stems: `-DMA_BUILD_MIXCHECK=ON`, target `MixCheck` (`tools/mixcheck`): the real Agents and Brain
   on a stems folder (learn on the loudest 16 s, Brain window flagged open so Agents send spectra, `analyse(1)`, `applyByUser`,
-  refine), renders `ours.wav` and compares with `--reference` at matched loudness (TBC zones, LUFS, PLR, width). Runs at
-  about real time (Brain timers use the wall clock); run it with HOME pointed at a scratch folder.
+  refine), renders `ours.wav` and compares with `--reference` at matched loudness (TBC zones, LUFS, PLR, width). Runs on a test
+  clock (repeatable, ~2.5 min a song); run it with HOME and TMPDIR pointed at scratch folders.
 - CI (`.github/workflows/build.yml`) builds the Windows VST3s and uploads them as an artifact.
 
 ## Design reference
