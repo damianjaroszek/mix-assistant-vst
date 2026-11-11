@@ -26,6 +26,7 @@ constexpr double kMaxNotchDb = 6.0;      // drums, effects: a ringing shell can 
 constexpr double kMaxTonalNotchDb = 4.0; // ... a tonal part loses its character sooner
 constexpr double kMaxTonalResonanceQ = 8.0;
 constexpr double kBuriedResonanceDb = -15.0; // this far under the rest in its band, nobody hears it ring
+constexpr double kFilteredDb = 24.0;           // overtones this far under the target: filtered on purpose, left alone
 constexpr double kThinMarginDb = 3.0;         // overtones this far under the role's target ask for saturation
 constexpr double kMinDynamicSpikeDb = 6.0;    // phase 32: a probe this far over its usual share at moments
 constexpr double kMinSibilanceSpikeDb = 8.0;  // esses stick out a lot by nature; a dull voice's s does not need a de-esser
@@ -621,6 +622,14 @@ std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& input, const 
         plan.overtonesTargetDb = profile.targetDb;
         if (plan.overtonesDb >= profile.targetDb - kThinMarginDb)
             continue;
+        // A natural voice always has overtones: one this bare is a filtered chop, made that way, and
+        // saturation would build the top the producer took out (a real mix: +35 dB above 2 kHz).
+        // A dull synth may just be dull, and a bass's overtones are what small speakers play.
+        if (c.role == Role::vocal && plan.overtonesDb < profile.targetDb - kFilteredDb)
+        {
+            plan.filteredOnPurpose = true;
+            continue;
+        }
 
         // Phase 31: the harmonic enhancer, sized like the saturation: the gentlest amount that reaches
         // the target, stepped down while its overtones would cover a more important channel.

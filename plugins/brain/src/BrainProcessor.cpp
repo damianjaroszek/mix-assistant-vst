@@ -4839,6 +4839,9 @@ juce::String BrainProcessor::saturationText(const ma::ChainPlan& plan) const
                            : juce::String();
     if (sat.on < 0.5f && plan.harmonics.on > 0.5f)
         return pl("saturacja wyłączona: sub to prawie czysty sinus, alikwoty daje enhancer harmonicznych, a sub zostaje czysty");
+    if (sat.on < 0.5f && plan.filteredOnPurpose)
+        return pl("saturacja wyłączona: partia prawie nie ma alikwotów (") + juce::String(plan.overtonesDb, 1)
+               + pl(" dB pod podstawą), czyli jest filtrowana celowo; nie dorabiam góry, którą producent wyciął");
     if (sat.on < 0.5f)
         return cover.isNotEmpty() ? pl("saturacja wyłączona: jej alikwoty zasłoniłyby ") + cover
                                   : pl("saturacja wyłączona: alikwotów dość (") + juce::String(plan.overtonesDb, 1)

@@ -14,6 +14,8 @@ namespace
 constexpr int kMaxVisitsPerPair = 3;
 constexpr double kDeepenStepDb = 1.5;
 constexpr double kMinimumCutDb = 1.5;
+constexpr double kAirHz = 8000.0;
+constexpr double kMaxAirBoostDb = 2.0;
 constexpr double kBroadCutDb = 3.0;      // deepest collision cut with a bell of Q 1 or wider
 constexpr double kWorthGainDb = 0.15;    // a collision cut has to uncover at least this much of the masked part ...
 constexpr double kWorthLeftDb = 0.6;     // ... and leave it mostly audible,
@@ -393,6 +395,19 @@ void centreZones(const std::vector<SolverChannel>& channels, const SolverOptions
                 break;
             if (std::abs(next - original) > options.maxCentreBellDb + 0.01)
                 break;
+            // Air stays a small lift in all: with what the channel's other bands already add up there.
+            if (!cut && band.hz >= kAirHz)
+            {
+                double air = next;
+                for (int b = 0; b < kEqBands; ++b)
+                {
+                    const auto& other = result.eq[static_cast<size_t>(channel)][static_cast<size_t>(b)];
+                    if (b != slot && other.hz >= kAirHz && other.gainDb > 0.0f)
+                        air += other.gainDb;
+                }
+                if (air > kMaxAirBoostDb + 0.01)
+                    break;
+            }
             band.gainDb = static_cast<float>(next);
             const auto now = predict();
             const double offset = zoneOffsets(now, target)[static_cast<size_t>(z)].offsetDb;
@@ -677,7 +692,8 @@ SolverResult solve(const std::vector<SolverChannel>& channels, const SolverOptio
                 if (slot < 0)
                     continue;
                 const double share = power[static_cast<size_t>(c)] / total;
-                double gain = roundHalf(std::clamp(gainForShare(share, -region.deviationDb), 1.0, options.maxBoostDb));
+                // Air is cheap to add and tiring to hear: above 8 kHz a hole gets a small lift only.
+                double gain = roundHalf(std::clamp(gainForShare(share, -region.deviationDb), 1.0, centre >= kAirHz ? std::min(options.maxBoostDb, kMaxAirBoostDb) : options.maxBoostDb));
                 const auto saved = eq[static_cast<size_t>(slot)];
 
                 for (int attempt = 0; attempt < 2 && !filled; ++attempt, gain = roundHalf(gain / 2.0))

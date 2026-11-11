@@ -116,6 +116,7 @@ struct ChainPlan
     // overtones would cover a more important channel.
     SaturationSettings saturation {}; // off unless planned
     bool saturationConsidered = false; // a role that may take it, with a measurable fundamental
+    bool filteredOnPurpose = false;    // a voice with overtones far under the target: no saturation
     double fundamentalHz = 0.0;
     bool overtonesAboveSub = false;    // bass: what it has above 150 Hz against its sub, not harmonics of one note
     double overtonesDb = -200.0;       // 2nd-8th harmonic region against the fundamental, now

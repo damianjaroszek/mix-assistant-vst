@@ -116,7 +116,30 @@ TonalComparison compareToTarget(const Curve& mixLevelsDb, const TonalTarget& tar
         const auto i = static_cast<size_t>(b);
         const double v = mix[i] > kFloorDb + 1.0 ? mix[i] + offset : kFloorDb;
         result.mixDb[i] = v;
-        result.deviationDb[i] = v < target.low[i] ? v - target.low[i] : v > target.high[i] ? v - target.high[i] : 0.0;
+    }
+    // Judged smoothed over a band each side (about a third of an octave), mix and corridor alike,
+    // the way Tonal Balance Control draws them: one note of the bass line or a chord standing out
+    // of a single band is the music, not the tone, and must not get a cut of its own.
+    const auto smoothed = [&](const Curve& curve, int b) {
+        double sum = 2.0 * curve[static_cast<size_t>(b)], weight = 2.0;
+        for (int n : { b - 1, b + 1 })
+            if (n >= 0 && n < numBands() && result.mixDb[static_cast<size_t>(n)] > kFloorDb)
+            {
+                sum += curve[static_cast<size_t>(n)];
+                weight += 1.0;
+            }
+        return sum / weight;
+    };
+    for (int b = 0; b < numBands(); ++b)
+    {
+        const auto i = static_cast<size_t>(b);
+        if (result.mixDb[i] <= kFloorDb)
+        {
+            result.deviationDb[i] = result.mixDb[i] - target.low[i];
+            continue;
+        }
+        const double v = smoothed(result.mixDb, b), low = smoothed(target.low, b), high = smoothed(target.high, b);
+        result.deviationDb[i] = v < low ? v - low : v > high ? v - high : 0.0;
     }
 
     // Contiguous runs outside the corridor on the same side.

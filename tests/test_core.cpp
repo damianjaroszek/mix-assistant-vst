@@ -4089,6 +4089,39 @@ void testAlignment()
     }
 }
 
+// Engineer's review: a note is not a tonal problem, a tom keeps its body, the clap its place.
+void testReviewFixes()
+{
+    // One band 6 dB over the corridor's edge (a bass note) is not flagged; three bands are.
+    const auto target = ma::builtinHouseTarget();
+    const int bands = ma::SpectrumAnalyzer::numBandsFor(ma::BandScale::erb);
+    int at = 0;
+    while (ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, at) < 400.0)
+        ++at;
+    auto note = target.centre;
+    note[static_cast<size_t>(at)] = target.high[static_cast<size_t>(at)] + 3.0;
+    check(ma::compareToTarget(note, target).regions.empty(), "a single band standing out (a note) is not a tonal region");
+    auto bump = target.centre;
+    for (int b = at - 1; b <= at + 1; ++b)
+        bump[static_cast<size_t>(b)] = target.high[static_cast<size_t>(b)] + 4.0;
+    check(!ma::compareToTarget(bump, target).regions.empty(), "a bump three bands wide still is");
+
+    // A tom under a loud kick and bass keeps its body; the clap role keeps the centre and its level.
+    constexpr double sr = 48000.0;
+    std::vector<ma::ChainChannel> mix = { measuredChannel(ma::Role::kick, 1, 0.0, sr), measuredChannel(ma::Role::bass, 2, 0.0, sr),
+                                          measuredChannel(ma::Role::percussion, 4, -12.0, sr) };
+    for (int b = 0; b < bands; ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        mix[2].bandsDb[static_cast<size_t>(b)] = -40.0 - 12.0 * std::abs(std::log2(hz / 150.0)); // body at 150 Hz
+    }
+    const auto tom = ma::planChains(mix)[2];
+    check(tom.cleanup.hpfHz <= 100.0f, "a tom keeps its body under the kick and bass (" + std::to_string(static_cast<int>(tom.cleanup.hpfHz)) + " Hz)");
+    check(ma::stemGroupForRole(ma::Role::clap) == static_cast<int>(ma::StemGroup::drums) && ma::defaultPriority(ma::Role::clap) < ma::defaultPriority(ma::Role::percussion)
+              && ma::roleLevelOffsetDb(ma::Role::clap, nullptr) > ma::roleLevelOffsetDb(ma::Role::percussion, nullptr),
+          "the clap is a drum, ahead of the other percussion and louder");
+}
+
 int main()
 {
     testLoudness();
@@ -4140,6 +4173,7 @@ int main()
     testWidthSlider();
     testStereoHysteresis();
     testLoudMasterClip();
+    testReviewFixes();
     testSectionAutomation();
     testEnergyMap();
     testGhostNoise();
