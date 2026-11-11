@@ -21,9 +21,13 @@ enum class Role
     pad,
     effects,
     bus,
-    send
+    send,
+    clap // the backbeat (clap, snare): added last, so saved role indices keep their meaning
 };
-constexpr int kRoles = 10;
+constexpr int kRoles = 11;
+
+// A drum hit other than the kick: hats, shakers, toms (percussion) and the backbeat.
+constexpr bool isPercussion(Role role) { return role == Role::percussion || role == Role::clap; }
 
 // What the role recogniser listens for besides the spectrum: how the level moves in time.
 // Fed while the Agent learns a passage; cheap, allocation free after prepare().

@@ -419,6 +419,8 @@ double roleLevelOffsetDb(Role role, const SpectrumAnalyzer::Bands* rawBandsDb)
         // mixcheck: hats at the clap's -6 ended ~4 dB under the kick in the drop (house mixes
         // keep them ~10-12 dB under). Measured in LUFS, K-weighting adds ~4 dB up there too.
         return rawBandsDb != nullptr && powerShareAbove(*rawBandsDb, kTopPercussionHz) >= kTopPercussionShare ? kTopPercussionOffsetDb : -6.0;
+    // The backbeat sits a few dB under the kick's level (it is short, so it reads lower than it sounds).
+    case Role::clap: return -5.0;
     case Role::pad: return -8.0;
     case Role::effects: return -10.0;
     case Role::send: return -10.0;
@@ -437,6 +439,7 @@ int defaultPriority(Role role)
     case Role::vocal: return 2;
     case Role::lead: return 3;
     case Role::percussion: return 4;
+    case Role::clap: return 3; // the backbeat: right behind the kick, bass and voice
     case Role::pad: return 6;
     case Role::effects: return 8;
     case Role::send: return 9;

@@ -294,7 +294,7 @@ bool carriedByAChannel(const std::vector<MixSnapshot::Channel>& channels, const 
 
 int groupOfChannel(const MixSnapshot::Channel& channel)
 {
-    return ma::stemGroupForRole(static_cast<ma::Role>(juce::jlimit(0, static_cast<int>(ma::Role::send), static_cast<int>(channel.data.role))));
+    return ma::stemGroupForRole(static_cast<ma::Role>(juce::jlimit(0, ma::kRoles - 1, static_cast<int>(channel.data.role))));
 }
 
 // Phase 19: runs of the song's seconds (gaps up to 2 s bridged, runs under 2 s left out), as
@@ -3370,7 +3370,7 @@ void BrainProcessor::planUnmask(const std::vector<ma::MaskingChannel>& masking, 
     const auto maskerRole = static_cast<ma::Role>(juce::jlimit(0, ma::kRoles - 1, static_cast<int>(masker.data.role)));
     // Agents from before phase 30 neither publish a key nor dip; a kick or percussion dipping
     // under a sustained part would lose its hit.
-    if (masked.data.keyId == 0 || masker.data.keyId == 0 || maskerRole == ma::Role::kick || maskerRole == ma::Role::percussion
+    if (masked.data.keyId == 0 || masker.data.keyId == 0 || maskerRole == ma::Role::kick || ma::isPercussion(maskerRole)
         || !inMixSums(masker) || !inMixSums(masked))
         return;
 
@@ -3569,7 +3569,7 @@ juce::String BrainProcessor::settledAdvice(const ma::MaskingIssue& issue) const
     if (role == ma::Role::kick && issue.lowHz >= 1000.0)
         return pl("W śladzie ") + quoted(masker.name) + pl(" gra też coś wysokiego (werbel, clap?): rozdziel to na osobny kanał z własnym Agentem.");
     // Hits cover only for a moment; moving them an octave says nothing about a drum.
-    if (role == ma::Role::kick || role == ma::Role::percussion)
+    if (role == ma::Role::kick || ma::isPercussion(role))
         return pl("Uderzenia zasłaniają tylko na chwilę: zostaw albo wybierz próbkę ") + quoted(masker.name) + pl(" o innym brzmieniu.");
     return pl("To ten sam rejestr: przenieś ") + quoted(masker.name) + pl(" oktawę wyżej, zmień brzmienie albo zostaw (lekkie nakładanie jest normalne).");
 }
@@ -4012,7 +4012,7 @@ void BrainProcessor::markMasterPeakCarriers(std::vector<ma::ChainChannel>& chain
             loudMasterPlan.loudest = mix.channels[c].name;
     for (size_t c = 0; c < mix.channels.size() && c < chain.size(); ++c)
         if (unclipped[c] > -200.0 && unclipped[c] >= highest - kPeakCarrierRangeDb
-            && (chain[c].role == ma::Role::kick || chain[c].role == ma::Role::percussion))
+            && (chain[c].role == ma::Role::kick || ma::isPercussion(chain[c].role)))
             chain[c].carriesMasterPeaks = true;
 }
 
@@ -4023,7 +4023,7 @@ void BrainProcessor::proposeWholeMix()
     {
         const auto& channel = mix.channels[c];
         auto& in = chain[c];
-        in.role = static_cast<ma::Role>(juce::jlimit(0, static_cast<int>(ma::Role::send), static_cast<int>(channel.data.role)));
+        in.role = static_cast<ma::Role>(juce::jlimit(0, ma::kRoles - 1, static_cast<int>(channel.data.role)));
         in.priority = channel.data.priority;
         in.valid = channel.spectrumValid;
         for (int b = 0; b < ma::bus::kBands; ++b)
@@ -4037,7 +4037,7 @@ void BrainProcessor::proposeWholeMix()
         in.lowNoteHz = channel.data.lowNoteHz;
         in.currentCleanup = channel.data.cleanup;
         in.intentionalDrive = channel.data.intentionalDrive != 0;
-        in.contentRole = static_cast<ma::Role>(juce::jlimit(0, static_cast<int>(ma::Role::send), static_cast<int>(channel.data.detectedRole)));
+        in.contentRole = static_cast<ma::Role>(juce::jlimit(0, ma::kRoles - 1, static_cast<int>(channel.data.detectedRole)));
         in.contentConfidence = channel.data.detectedConfidence;
         for (int r = 0; r < ma::kMaxResonances; ++r)
             in.resonances[static_cast<size_t>(r)] = channel.data.resonances[r];
@@ -5207,9 +5207,9 @@ void BrainProcessor::buildToolNotes(bool wholeMix)
         const auto chainItem = [&](Tool tool) {
             return itemFor([&](const auto& i) { return i.action == Action::chain && i.tool == tool; });
         };
-        const auto role = static_cast<ma::Role>(juce::jlimit(0, static_cast<int>(ma::Role::send), static_cast<int>(channel.data.role)));
+        const auto role = static_cast<ma::Role>(juce::jlimit(0, ma::kRoles - 1, static_cast<int>(channel.data.role)));
         const bool bus = !inMixSums(channel);
-        const bool percussive = role == ma::Role::kick || role == ma::Role::percussion;
+        const bool percussive = role == ma::Role::kick || ma::isPercussion(role);
         const bool intentional = channel.data.intentionalDrive != 0;
         // A tool switched on: by the Brain (kept unless the analysis changes it) or by hand (left alone).
         const auto runningNote = [&](int bit, bool on, const juce::String& what) {
@@ -5883,7 +5883,7 @@ void BrainProcessor::proposeHarmonics()
         }
 
         // 2. The channel's own step, by the kind of sound.
-        const bool percussive = channel.data.role == 1 || channel.data.role == 3;
+        const bool percussive = channel.data.role == 1 || channel.data.role == 3 || channel.data.role == static_cast<int>(ma::Role::clap);
         int peak = 0;
         for (int b = 1; b < ma::bus::kBands; ++b)
             if (own[static_cast<size_t>(b)] > own[static_cast<size_t>(peak)])
@@ -6222,7 +6222,8 @@ void BrainProcessor::proposeDynamics()
         const bool kickMasked = masked.data.role == 1 && masker.data.role != 1;
         if (issue.score < 0.3 || (issue.highHz > kDuckMaxHz && !kickMasked))
             continue;
-        if (masker.data.role != 1 && (masked.data.role == 1 || masker.data.role == 2))
+        // Drums never give way to the kick: hats play between its hits and the backbeat with it on purpose.
+        if (masker.data.role != 1 && !ma::isPercussion(static_cast<ma::Role>(masker.data.role)) && (masked.data.role == 1 || masker.data.role == 2))
             candidates.push_back({ issue.masker, issue.masked, issue.lowHz, issue.highHz, issue.score });
     }
     for (size_t k = 0; k < mix.channels.size(); ++k)
@@ -6671,7 +6672,7 @@ int BrainProcessor::applySelected(bool refining)
         double levelGain = gain;
         if (!inMixSums(channel))
         {
-            const int sources = ma::stemGroupForRole(static_cast<ma::Role>(juce::jlimit(0, static_cast<int>(ma::Role::send), static_cast<int>(channel.data.detectedRole))));
+            const int sources = ma::stemGroupForRole(static_cast<ma::Role>(juce::jlimit(0, ma::kRoles - 1, static_cast<int>(channel.data.detectedRole))));
             levelGain = globalGain + (sources >= 0 ? groupGain[static_cast<size_t>(sources)] : 0.0);
             gain = 0.0;
         }

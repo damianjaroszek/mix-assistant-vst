@@ -1380,7 +1380,7 @@ void testChainPlanner()
     std::printf("      pad hpf %.0f Hz, bass comp %.1f dB %.1f:1 makeup %.1f (spread %.1f -> %.1f), evener %.0f Hz\n",
                 pad.cleanup.hpfHz, bass.compressor.thresholdDb, bass.compressor.ratio, bass.compressor.makeupDb, bass.spreadDb,
                 bass.spreadAfterDb, bass.evener.referenceHz);
-    check(kick.cleanup.hpfHz <= 30.0f && bass.cleanup.hpfHz <= 30.0f, "kick and bass only lose rumble");
+    check(kick.cleanup.hpfHz >= 30.0f && kick.cleanup.hpfHz <= 40.0f && bass.cleanup.hpfHz >= 30.0f && bass.cleanup.hpfHz <= 40.0f, "kick and bass only lose what a club system cannot play");
     check(pad.highPassReason != ma::ChainPlan::HighPass::none && pad.cleanup.hpfHz >= 60.0f && pad.cleanup.hpfHz <= 250.0f,
           "the pad loses what is under its notes");
     // A lead with real content down low, where the kick and bass are far louder: it gives way.
@@ -1431,9 +1431,14 @@ void testChainPlanner()
           "an unknown peak does not read as over-compressed");
     check(unknownPlans[4].clipper.on < 0.5f, "and plans no clipper");
 
-    // Spiky percussion: the clipper shaves only the excess.
+    // Spiky percussion: the clipper shaves only the excess. Hats (most of their power above
+    // 5 kHz) are left alone: their peaks cost the master nothing.
     auto spiky = mix;
     spiky[4].truePeakDb = spiky[4].levelP95 + 16.0;
+    check(ma::planChains(spiky)[4].clipper.on < 0.5f && ma::planChains(spiky)[4].topPercussion, "hats are never clipped");
+    for (int b = 0; b < ma::SpectrumAnalyzer::numBandsFor(ma::BandScale::erb); ++b) // a clap or tom: body under the top
+        if (ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b) > 5000.0)
+            spiky[4].bandsDb[static_cast<size_t>(b)] -= 25.0;
     const auto spikyPlan = ma::planChains(spiky)[4];
     check(spikyPlan.clipper.on > 0.5f && spikyPlan.clipDb >= 1.0 && spikyPlan.clipDb <= 4.0,
           "spiky percussion gets a clipper (" + std::to_string(spikyPlan.clipDb).substr(0, 4) + " dB)");
@@ -3537,6 +3542,9 @@ void testLoudMasterClip()
     };
     mix[0].carriesMasterPeaks = mix[2].carriesMasterPeaks = true;
     mix[1].carriesMasterPeaks = true; // not percussion: never clipped for it
+    for (int b = 0; b < ma::SpectrumAnalyzer::numBandsFor(ma::BandScale::erb); ++b) // a clap, not a hat (hats are never clipped)
+        if (ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b) > 5000.0)
+            mix[2].bandsDb[static_cast<size_t>(b)] -= 25.0;
     ma::ChainContext context { 124.0, 0.0 };
     const auto base = ma::planChains(mix, context);
     check(base[0].loudMasterClipDb == 0.0, "no preview, no extra clipping");

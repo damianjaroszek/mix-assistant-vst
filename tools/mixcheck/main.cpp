@@ -97,7 +97,9 @@ int roleFromName(const String& fileName)
         return static_cast<int>(ma::Role::kick);
     if (any({ "vox", "vocal", "voc", "lead vox", "acapella", "adlib", "choir" }))
         return static_cast<int>(ma::Role::vocal);
-    if (any({ "snare", "clap", "hat", "hh", "perc", "shaker", "ride", "cymbal", "crash", "toms", "conga", "bongo", "top", "loop", "drum" }))
+    if (any({ "snare", "clap" })) // "KickSnare" is caught as a kick above
+        return static_cast<int>(ma::Role::clap);
+    if (any({ "hat", "hh", "perc", "shaker", "ride", "cymbal", "crash", "toms", "conga", "bongo", "top", "loop", "drum" }))
         return static_cast<int>(ma::Role::percussion);
     if (any({ "fx", "riser", "sweep", "impact", "noise", "uplifter", "downlifter", "atmos", "reverse" })) // before bass: "BassFX"
         return static_cast<int>(ma::Role::effects);

@@ -100,6 +100,7 @@ struct ChainPlan
     double arrangementDb = 0.0;     // spread left on purpose (quiet bars, breakdowns): volume automation, not compression
     bool lostInQuietParts = false;  // its quiet parts sink under the rest of the mix
     bool percussive = false;        // compression left to the clipper: hits are kept
+    bool topPercussion = false;     // hats, shakers: never clipped (their peaks cost the master nothing)
     bool overCompressed = false;    // already squashed before the Agent: nothing more
     double crestDb = 0.0;           // true peak over the loud parts' RMS
     bool peakKnown = false;         // phase 23: the learn pass's true peak is there; without it crest and clipping are unknown
