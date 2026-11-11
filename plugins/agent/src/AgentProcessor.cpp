@@ -915,8 +915,23 @@ void AgentProcessor::timerCallback()
     auto state = LearnState::finished;
     if (learnState.compare_exchange_strong(state, LearnState::idle))
         applyLearned();
+    followRoleWithPriority();
     updateDynamicMeters();
     publishToBrain();
+}
+
+// The priority follows the role until the user gives the channel one of their own: a role picked
+// by hand used to leave every channel at the default 5, and then the kick got cut for the bass
+// as readily as the bass for the kick (every collision counted both ways).
+void AgentProcessor::followRoleWithPriority()
+{
+    const auto role = static_cast<ma::Role>(juce::jlimit(0, ma::kRoles - 1, juce::roundToInt(parameters.getRawParameterValue(roleId)->load())));
+    const int priority = juce::roundToInt(parameters.getRawParameterValue(priorityId)->load());
+    const int wanted = ma::defaultPriority(role);
+    const bool untouched = priority == 5 || (priorityRole >= 0 && priority == ma::defaultPriority(static_cast<ma::Role>(priorityRole)));
+    if (untouched && priority != wanted)
+        setParam(priorityId, static_cast<float>(wanted));
+    priorityRole = static_cast<int>(role);
 }
 
 ma::WidthSettings AgentProcessor::liveWidth() const

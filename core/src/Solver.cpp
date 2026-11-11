@@ -14,6 +14,10 @@ namespace
 constexpr int kMaxVisitsPerPair = 3;
 constexpr double kDeepenStepDb = 1.5;
 constexpr double kMinimumCutDb = 1.5;
+constexpr double kBroadCutDb = 3.0;      // deepest collision cut with a bell of Q 1 or wider
+constexpr double kWorthGainDb = 0.15;    // a collision cut has to uncover at least this much of the masked part ...
+constexpr double kWorthLeftDb = 0.6;     // ... and leave it mostly audible,
+constexpr double kWorthBigGainDb = 0.3;  // unless it uncovers a lot of a part buried deeper
 constexpr double kContentRangeDb = 30.0;
 
 std::vector<MaskingChannel> withEq(const std::vector<SolverChannel>& channels, const std::vector<EqSettings>& eq)
@@ -489,7 +493,7 @@ SolverResult solve(const std::vector<SolverChannel>& channels, const SolverOptio
         const int visit = visits[key]++;
         auto& eq = result.eq[static_cast<size_t>(issue->masker)];
         // Room for a part that is not there yet is kept smaller: the sketch must still sound.
-        const double maxCut = channels[static_cast<size_t>(issue->masked)].ghost ? std::min(options.maxCutDb, options.maxGhostCutDb)
+        double maxCut = channels[static_cast<size_t>(issue->masked)].ghost ? std::min(options.maxCutDb, options.maxGhostCutDb)
                                                                                 : options.maxCutDb;
 
         // How far the masker sits above the masked channel over the range, as the ear hears it.
@@ -505,6 +509,9 @@ SolverResult solve(const std::vector<SolverChannel>& channels, const SolverOptio
 
         const double centre = std::sqrt(issue->lowHz * issue->highHz);
         const double q = qForRange(issue->lowHz, issue->highHz);
+        // A broad bell changes the part's whole tone: the wider it is, the shallower it stays
+        // (3 dB at an octave and a half or more, the full depth only from Q 2 up).
+        maxCut = std::min(maxCut, std::clamp(kBroadCutDb + (options.maxCutDb - kBroadCutDb) * (q - 1.0), kBroadCutDb, options.maxCutDb));
 
         // Reuse a band already close to this range (half an octave), else take a free one.
         // A collision worked on before keeps its own band, so each change knows the band it deepens.
@@ -568,19 +575,26 @@ SolverResult solve(const std::vector<SolverChannel>& channels, const SolverOptio
     for (auto& change : result.changes)
         change.scoreAfter = final.amount[static_cast<size_t>(change.channel)][static_cast<size_t>(change.maskedChannel)];
 
-    // A cut that did not reduce its collision is not worth having.
+    // A cut that hardly reduced its collision is not worth having: the masker would lose tone and
+    // the masked part would stay covered (real mixes: three channels cut 6 dB for one quiet synth
+    // that went from 96% to 79% covered). Room for a ghost only has to help.
+    const auto worth = [&](const SolverChange& c) {
+        const double gain = c.scoreBefore - c.scoreAfter;
+        if (channels[static_cast<size_t>(c.maskedChannel)].ghost)
+            return gain >= 0.05;
+        return gain >= kWorthGainDb && (c.scoreAfter <= kWorthLeftDb || gain >= kWorthBigGainDb);
+    };
     std::vector<SolverChange> kept;
     for (const auto& change : result.changes)
     {
-        if (change.scoreBefore - change.scoreAfter >= 0.05)
+        if (worth(change))
             kept.push_back(change);
         else
         {
             bool shared = false;
             double needed = 0.0; // the deepest the changes that stay set the band to
             for (const auto& other : result.changes)
-                if (&other != &change && other.channel == change.channel && other.eqSlot == change.eqSlot
-                    && other.scoreBefore - other.scoreAfter >= 0.05)
+                if (&other != &change && other.channel == change.channel && other.eqSlot == change.eqSlot && worth(other))
                 {
                     shared = true;
                     needed = std::min(needed, other.gainDb);

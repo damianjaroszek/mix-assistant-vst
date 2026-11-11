@@ -334,6 +334,8 @@ private:
     void publishToBrain();
     void handleBrainCommand(ma::bus::Region& region);
     void setParam(const juce::String& id, float value);
+    void followRoleWithPriority();
+    int priorityRole = -1; // the role the priority was last matched to
     void setEqParams(const ma::EqSettings& eq);
     void setDynamics(const DynamicState& state);
     void updateDynamicMeters();
