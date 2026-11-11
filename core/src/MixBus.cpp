@@ -29,9 +29,14 @@ void initialise(Region& region)
     if (!current && region.header.magic.compare_exchange_strong(magic, kInitialising))
     {
         region.header.version = kVersion;
-        region.header.brainHeartbeatMs.store(0);
-        region.header.spectraWantedUntil.store(0);
-        region.header.compareBefore.store(0);
+        for (auto& brain : region.header.brains)
+        {
+            brain.sessionId.store(0);
+            brain.processId.store(0);
+            brain.heartbeatMs.store(0);
+            brain.spectraWantedUntil.store(0);
+            brain.compareBefore.store(0);
+        }
         for (auto& slot : region.slots)
         {
             slot.owner.store(0);
@@ -58,6 +63,78 @@ bool isAlive(std::uint64_t heartbeatMs, std::uint64_t nowMs)
     if (heartbeatMs == 0)
         return false;
     return nowMs < heartbeatMs || nowMs - heartbeatMs <= kAliveTimeoutMs;
+}
+
+BrainEntry* claimBrain(Region& region, std::uint64_t sessionId, std::uint64_t processId, std::uint64_t nowMs)
+{
+    if (sessionId == 0)
+        return nullptr;
+    for (auto& brain : region.header.brains)
+        if (brain.sessionId.load() == sessionId)
+        {
+            brain.processId.store(processId);
+            return &brain;
+        }
+    for (auto& brain : region.header.brains)
+    {
+        auto owner = brain.sessionId.load();
+        if ((owner == 0 || !isAlive(brain.heartbeatMs.load(), nowMs)) && brain.sessionId.compare_exchange_strong(owner, sessionId))
+        {
+            brain.processId.store(processId);
+            brain.spectraWantedUntil.store(0);
+            brain.compareBefore.store(0);
+            brain.heartbeatMs.store(nowMs);
+            return &brain;
+        }
+    }
+    return nullptr;
+}
+
+const BrainEntry* findBrain(const Region& region, std::uint64_t sessionId, std::uint64_t nowMs)
+{
+    for (const auto& brain : region.header.brains)
+    {
+        const auto id = brain.sessionId.load();
+        if (id != 0 && (sessionId == 0 || id == sessionId) && isAlive(brain.heartbeatMs.load(), nowMs))
+            return &brain;
+    }
+    return nullptr;
+}
+
+std::uint64_t chooseSession(const Region& region, std::uint64_t current, std::uint64_t processId, std::uint64_t nowMs, std::uint64_t missingMs)
+{
+    std::uint64_t sameProcess = 0, only = 0;
+    int alive = 0, inProcess = 0;
+    bool currentAlive = false, currentInProcess = false;
+    for (const auto& brain : region.header.brains)
+    {
+        const auto id = brain.sessionId.load();
+        if (id == 0 || !isAlive(brain.heartbeatMs.load(), nowMs))
+            continue;
+        ++alive;
+        only = id;
+        const bool here = brain.processId.load() == processId;
+        if (here)
+        {
+            ++inProcess;
+            sameProcess = id;
+        }
+        if (id == current)
+        {
+            currentAlive = true;
+            currentInProcess = here;
+        }
+    }
+    // An Agent that joined another project's Brain before its own was there comes home.
+    if (current != 0 && currentAlive && !currentInProcess && inProcess == 1)
+        return sameProcess;
+    if (current != 0 && (currentAlive || missingMs < kRejoinMs))
+        return current;
+    if (inProcess == 1)
+        return sameProcess;
+    if (alive == 1 && inProcess == 0)
+        return only;
+    return current;
 }
 
 int claimSlot(Region& region, std::uint64_t ownerId, std::uint64_t nowMs)

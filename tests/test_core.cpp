@@ -4120,6 +4120,27 @@ void testReviewFixes()
     check(ma::stemGroupForRole(ma::Role::clap) == static_cast<int>(ma::StemGroup::drums) && ma::defaultPriority(ma::Role::clap) < ma::defaultPriority(ma::Role::percussion)
               && ma::roleLevelOffsetDb(ma::Role::clap, nullptr) > ma::roleLevelOffsetDb(ma::Role::percussion, nullptr),
           "the clap is a drum, ahead of the other percussion and louder");
+
+    // Two projects open at once: each Agent stays with its own Brain.
+    auto region = std::make_unique<ma::bus::Region>();
+    ma::bus::initialise(*region);
+    const std::uint64_t now = 100000;
+    auto* first = ma::bus::claimBrain(*region, 11, 500, now);
+    check(first != nullptr && ma::bus::claimBrain(*region, 11, 500, now) == first, "a Brain keeps its entry");
+    first->heartbeatMs.store(now);
+    check(ma::bus::chooseSession(*region, 0, 500, now, 0) == 11, "a new Agent joins the Brain in its process");
+    check(ma::bus::chooseSession(*region, 0, 777, now, 0) == 11, "or the only Brain alive (a bridged plugin)");
+    auto* second = ma::bus::claimBrain(*region, 22, 600, now);
+    second->heartbeatMs.store(now);
+    check(second != first && ma::bus::chooseSession(*region, 11, 500, now, 0) == 11 && ma::bus::chooseSession(*region, 22, 600, now, 0) == 22,
+          "with two Brains alive each Agent keeps its own");
+    check(ma::bus::chooseSession(*region, 0, 600, now, 0) == 22 && ma::bus::chooseSession(*region, 0, 777, now, 0) == 0,
+          "a new Agent joins the one in its process, and none when it cannot tell");
+    check(ma::bus::chooseSession(*region, 11, 600, now, 0) == 22, "an Agent that joined the other project's Brain first comes home");
+    check(ma::bus::chooseSession(*region, 33, 600, now, 2000) == 33, "a Brain missing for a moment (still loading) is waited for");
+    check(ma::bus::chooseSession(*region, 33, 600, now, ma::bus::kRejoinMs) == 22, "a Brain that was replaced: its Agents join the new one");
+    first->heartbeatMs.store(1); // long gone
+    check(ma::bus::findBrain(*region, 11, now) == nullptr && ma::bus::findBrain(*region, 0, now) == second, "a dead Brain is not found");
 }
 
 int main()

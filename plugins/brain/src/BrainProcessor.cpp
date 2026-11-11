@@ -764,14 +764,16 @@ void BrainProcessor::timerCallback()
     }
 
     const auto now = ma::SharedSession::nowMs();
-    region->header.brainHeartbeatMs.store(now);
+    brainEntry = ma::bus::claimBrain(*region, sessionId, ma::SharedSession::processId(), now);
+    if (brainEntry != nullptr)
+        brainEntry->heartbeatMs.store(now);
     if (resetAtMs != 0 && now >= resetAtMs)
     {
         resetAtMs = 0;
         requestReset();
     }
-    if (editorOpen && !useProfiles)
-        region->header.spectraWantedUntil.store(now + kSpectraRequestMs);
+    if (editorOpen && !useProfiles && brainEntry != nullptr)
+        brainEntry->spectraWantedUntil.store(now + kSpectraRequestMs);
 
     collectChannels(*region, now);
     accumulateDrop();
@@ -1077,6 +1079,9 @@ void BrainProcessor::collectChannels(ma::bus::Region& region, std::uint64_t now)
         MixSnapshot::Channel channel;
         channel.owner = slot.owner.load();
         if (channel.owner == 0 || !ma::bus::read(slot, channel.data, now))
+            continue;
+        // Another project's Agent (a second FL open): not ours. One that has not joined yet is.
+        if (channel.data.sessionId != 0 && channel.data.sessionId != sessionId)
             continue;
 
         channel.data.name[ma::bus::kNameLength - 1] = '\0';
@@ -6326,7 +6331,7 @@ void BrainProcessor::proposeDynamics()
         if (connected)
             item.text += pl(". Sidechain podłączony");
         else if (wireless)
-            item.text += pl(". Bez kabla: Agent ") + quoted(masked.name) + pl(" podaje swoją obwiednię przez wspólną pamięć");
+            item.text += pl(". Bez kabla: Agent ") + quoted(masked.name) + pl(" podaje swoją obwiednię przez wspólną pamięć. Reakcja przychodzi o jeden bufor audio później (przy 512 próbkach ok. 12 ms), więc dla ciasnego dołu podłącz sidechain stopy do tego kanału: z kablem ustępowanie trafia w samo uderzenie");
         else
             item.text += pl(". Potrzebny sidechain: w mikserze FL na kanale ") + kickName()
                          + pl(" kliknij prawym strzałkę wysyłki pod kanałem ") + quoted(masker.name)
@@ -7014,8 +7019,8 @@ void BrainProcessor::setComparing(bool shouldCompare)
         stopRefining();
     comparing = shouldCompare;
     compareSwitchedMs = ma::SharedSession::nowMs();
-    if (auto* region = session->region())
-        region->header.compareBefore.store(shouldCompare ? 1u : 0u);
+    if (brainEntry != nullptr)
+        brainEntry->compareBefore.store(shouldCompare ? 1u : 0u);
     outputGainDb.store(0.0f);
     // Peaks and loudness of one version must not leak into the other's report.
     resetAtMs = compareSwitchedMs + kAgentSwitchMs;
@@ -7052,6 +7057,7 @@ void BrainProcessor::getStateInformation(juce::MemoryBlock& destData)
     parameters.state.setProperty("keyOverride", keyOverride, nullptr);
     parameters.state.setProperty("sketchMode", sketchOn, nullptr);
     parameters.state.setProperty("tonalAfterLimiter", afterLimiterOn, nullptr);
+    parameters.state.setProperty("sessionId", juce::String::toHexString(static_cast<juce::int64>(sessionId)), nullptr);
     if (auto xml = parameters.copyState().createXml())
         copyXmlToBinary(*xml, destData);
 }
@@ -7062,6 +7068,14 @@ void BrainProcessor::setStateInformation(const void* data, int sizeInBytes)
         if (xml->hasTagName(parameters.state.getType()))
         {
             parameters.replaceState(juce::ValueTree::fromXml(*xml));
+            // The project's session: its Agents saved the same id (older projects: they join this Brain).
+            if (const auto saved = static_cast<std::uint64_t>(parameters.state.getProperty("sessionId").toString().getHexValue64()); saved != 0)
+            {
+                if (brainEntry != nullptr && saved != sessionId)
+                    brainEntry->sessionId.store(0); // the entry claimed before the state arrived
+                brainEntry = nullptr;
+                sessionId = saved;
+            }
             const auto name = parameters.state.getProperty("target").toString();
             // Phase 30: a project without a target (or whose target file is gone) takes the last one used.
             if (name.isEmpty() || !selectTarget(name))

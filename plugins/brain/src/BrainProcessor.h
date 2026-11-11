@@ -552,6 +552,9 @@ public:
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
+    // The project's session on the shared bus (saved with the project): only Agents that joined it are ours.
+    std::uint64_t sessionId = ma::SharedSession::newInstanceId();
+    ma::bus::BrainEntry* brainEntry = nullptr;
     void timerCallback() override;
 
 public:

@@ -452,6 +452,9 @@ private:
     // Connection to the Brain (message thread only).
     std::shared_ptr<ma::SharedSession> session = ma::SharedSession::get();
     std::uint64_t instanceId = ma::SharedSession::newInstanceId();
+    std::atomic<std::uint64_t> sessionId { 0 }; // the Brain's session this Agent joined (saved in the project)
+    std::uint64_t brainSeenMs = 0;              // when that Brain was last alive
+    std::atomic<bool> brainComparing { false };
     int slotIndex = -1;
     std::atomic<bool> brainAlive { false };
     juce::String userName, trackName;

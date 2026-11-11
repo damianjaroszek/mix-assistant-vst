@@ -6,6 +6,11 @@
 #include <juce_core/juce_core.h>
 
 #include <chrono>
+#if JUCE_WINDOWS
+ #include <process.h>
+#else
+ #include <unistd.h>
+#endif
 #include <memory>
 #include <mutex>
 
@@ -38,6 +43,16 @@ public:
 
     // Milliseconds on a clock shared by all processes on the machine.
     static std::uint64_t nowMs() { return clock::nowMs(); }
+
+    // The host process: plugins of one project run in it (or in bridges of their own).
+    static std::uint64_t processId()
+    {
+#if JUCE_WINDOWS
+        return static_cast<std::uint64_t>(::_getpid());
+#else
+        return static_cast<std::uint64_t>(::getpid());
+#endif
+    }
 
     static std::uint64_t newInstanceId()
     {
