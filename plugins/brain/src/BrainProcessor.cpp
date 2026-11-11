@@ -7248,7 +7248,7 @@ juce::String BrainProcessor::previewVerdict(MixSnapshot::Status& status) const
                  + pl(" pod głośny master: kliknij „Zastosuj”, potem posłuchaj drop jeszcze raz.");
     else if (loudMasterPlan.made && loudMasterPlan.capped)
         advice = pl(" Clipper na ") + loudMasterPlan.carriers.joinIntoString(", ")
-                 + pl(" ścina już tyle, ile się da bez spłaszczenia uderzenia. Reszta to gęstość dropu (bas, pady): ścisz je trochę")
+                 + pl(" ścina już tyle, ile się da bez spłaszczenia uderzenia. Resztę robi klej: wyślij stopę, clap i perkusję na jedną szynę z Agentem w roli „Bus” (Mózg dobierze jej kompresor), a na sumie miksu ustaw kompresor 2:1 z wolnym atakiem (30 ms), 1–2 dB redukcji")
                  + lower;
     else if (loudMasterPlan.made && !loudMasterPlan.carriers.isEmpty())
         // Measured again with the new clipping and still too busy: the clippers have room left.
