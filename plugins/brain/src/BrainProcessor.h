@@ -553,6 +553,13 @@ public:
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
     void timerCallback() override;
+
+public:
+    // Offline tests (mixcheck) stop the wall-clock timer and tick by the audio they render.
+    void useTestTicks() { stopTimer(); }
+    void testTick() { timerCallback(); }
+
+private:
     void collectChannels(ma::bus::Region& region, std::uint64_t now);
     void buildReport();
     void updateLoudnessMatch(std::uint64_t now);

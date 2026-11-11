@@ -2613,7 +2613,7 @@ void BrainProcessor::buildReport()
     // Phase 38: nothing lost anywhere in the song. From the song's seconds, as the mix hears them now
     // (each second's raw + trim power plus the channel's present EQ and cleanup), worked out every 2 s.
     {
-        const auto nowMs = juce::Time::getMillisecondCounter();
+        const auto nowMs = static_cast<juce::uint32>(ma::clock::nowMs());
         if (lostAtMs == 0 || nowMs - lostAtMs >= kLostRefreshMs)
         {
             lostAtMs = nowMs;
@@ -3212,7 +3212,7 @@ BrainProcessor::IssueHandling BrainProcessor::issueHandling(const ma::MaskingIss
 double BrainProcessor::liveLevelStep(const ma::MaskingIssue& issue) const
 {
     const auto key = std::make_pair(mix.channels[static_cast<size_t>(issue.masker)].owner, mix.channels[static_cast<size_t>(issue.masked)].owner);
-    const auto now = juce::Time::getMillisecondCounter();
+    const auto now = static_cast<juce::uint32>(ma::clock::nowMs());
     const auto cached = liveSteps.find(key);
     if (cached != liveSteps.end() && now - cached->second.second < kLiveStepMs)
         return cached->second.first;

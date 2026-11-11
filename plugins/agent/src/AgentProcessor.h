@@ -321,6 +321,13 @@ private:
 
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
     void timerCallback() override;
+
+public:
+    // Offline tests (mixcheck) stop the wall-clock timer and tick by the audio they render.
+    void useTestTicks() { stopTimer(); }
+    void testTick() { timerCallback(); }
+
+private:
     void applyLearned();
     void recogniseRole();
     bool measuresLufs() const;

@@ -10,10 +10,12 @@
 // four ranges Tonal Balance Control shows, loudness, peaks, dynamics and width. report.md holds the
 // numbers, the Brain's report, its proposal and its decision per tool and channel.
 //
-// The Brain's timers run on the wall clock, so the audio runs at about real time.
+// The plugins' timers are ticked by the rendered audio on a test clock (`ma::clock::testMs`), so a
+// run is faster than real time and gives the same numbers every time.
 
 #include "AgentProcessor.h"
 #include "BrainProcessor.h"
+#include "Clock.h"
 #include "MaUi.h"
 
 #include "ma/LoudnessMeter.h"
@@ -484,7 +486,32 @@ int main(int argc, char** argv)
     brain->setEditorOpen(true); // the Agents send their live spectra only while the Brain's window is open
     if (!targetRefs.isEmpty())
         brain->selectTarget("mixcheck");
-    MessageManager::getInstance()->runDispatchLoopUntil(300);
+
+    // The test clock: the Agents tick at their 10 Hz and the Brain at its 5 Hz of rendered time.
+    for (auto& agent : agents)
+        agent->useTestTicks();
+    brain->useTestTicks();
+    double clockMs = 1000.0;
+    int64 ticks = 0;
+    ma::clock::testMs.store(static_cast<std::int64_t>(clockMs));
+    const auto advance = [&](double ms) {
+        const double end = clockMs + ms;
+        while (static_cast<int64>(end / 100.0) > ticks)
+        {
+            ++ticks;
+            clockMs = static_cast<double>(ticks) * 100.0;
+            ma::clock::testMs.store(static_cast<std::int64_t>(clockMs));
+            for (auto& agent : agents)
+                agent->testTick();
+            if (ticks % 2 == 0)
+                brain->testTick();
+            if (ticks % 10 == 0)
+                MessageManager::getInstance()->runDispatchLoopUntil(1); // async updates, if any
+        }
+        clockMs = end;
+        ma::clock::testMs.store(static_cast<std::int64_t>(clockMs));
+    };
+    advance(300.0);
 
     AudioBuffer<float> block(4, kBlock), sum(2, kBlock);
     MidiBuffer midi;
@@ -545,11 +572,10 @@ int main(int argc, char** argv)
                 for (int c = 0; c < 2; ++c)
                     render->copyFrom(c, static_cast<int>(position), sum, c, 0, std::min<int>(n, render->getNumSamples() - static_cast<int>(position)));
             done += n;
-            // Timers on the wall clock: keep the audio at about real time.
-            if (++blocks % 20 == 0)
-                MessageManager::getInstance()->runDispatchLoopUntil(static_cast<int>(20.0 * kBlock / rate * 1000.0));
+            ++blocks;
+            advance(1000.0 * n / rate);
         }
-        MessageManager::getInstance()->runDispatchLoopUntil(50);
+        advance(50.0);
     };
 
     // 1. Learn on the drop.
@@ -560,7 +586,7 @@ int main(int argc, char** argv)
     for (auto& agent : agents)
         if (agent->isLearning())
             agent->stopLearning();
-    MessageManager::getInstance()->runDispatchLoopUntil(500);
+    advance(500.0);
     for (size_t t = 0; t < tracks.size(); ++t)
     {
         const auto r = agents[t]->lastResult();

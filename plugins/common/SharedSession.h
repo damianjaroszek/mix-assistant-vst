@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Clock.h"
 #include "ma/MixBus.h"
 
 #include <juce_core/juce_core.h>
@@ -36,11 +37,7 @@ public:
     bus::Region* region() const { return regionPtr; }
 
     // Milliseconds on a clock shared by all processes on the machine.
-    static std::uint64_t nowMs()
-    {
-        using namespace std::chrono;
-        return static_cast<std::uint64_t>(duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
-    }
+    static std::uint64_t nowMs() { return clock::nowMs(); }
 
     static std::uint64_t newInstanceId()
     {

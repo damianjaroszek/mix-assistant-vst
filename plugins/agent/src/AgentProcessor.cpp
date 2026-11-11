@@ -1018,7 +1018,7 @@ void AgentProcessor::planWidthNow(ma::bus::Region& region, std::uint64_t now)
 
 void AgentProcessor::updateDynamicMeters()
 {
-    const auto now = juce::Time::getMillisecondCounterHiRes();
+    const auto now = static_cast<double>(ma::clock::nowMs());
     const float peak = sidechainPeakHold.exchange(0.0f);
     const double peakDb = ma::gainToDb(peak);
     if (peakDb > -80.0)
