@@ -2180,7 +2180,53 @@ void BrainProcessor::buildReport()
         {
             item.status = Status::problem;
             item.detail = pl("Szczyt ") + juce::String(peak - ceiling, 1) + pl(" dB ponad limitem ")
-                          + ma::ui::formatDb(ceiling, "dBTP") + pl(". Ścisz kanały (Agent: niższy cel) zamiast sumy.");
+                          + ma::ui::formatDb(ceiling, "dBTP")
+                          + (topPeakAtSeconds >= 0.0 && !topPeakInDrop
+                                 ? pl(". Pada poza dropem, więc „Analizuj” na dropie go nie widzi: ścisz w tym miejscu ślad, który go robi "
+                                      "(automatyka głośności w FL), albo puść cały utwór i kliknij „Analizuj” jeszcze raz.")
+                                 : pl(". Ścisz kanały (Agent: niższy cel) zamiast sumy."));
+        }
+        if (std::isfinite(peak) && topPeakAtSeconds >= 0.0)
+        {
+            const int at = juce::roundToInt(topPeakAtSeconds);
+            item.detail += pl(" Najwyższy szczyt pada w ") + juce::String(at / 60) + ":" + juce::String(at % 60).paddedLeft('0', 2)
+                           + (topPeakInDrop ? juce::String() : pl(" (poza dropem)"))
+                           + (topPeakChannel.isNotEmpty() ? pl("; najwyżej sięga wtedy „") + topPeakChannel + pl("”.") : juce::String("."));
+        }
+        report.push_back(item);
+    }
+
+    // Before and after the last "Zastosuj": the same measurements, so the change is a number and not a feeling.
+    if (scoreBefore.valid)
+    {
+        MixSnapshot::ReportItem item;
+        item.title = pl("Przed i po (ostatnie „Zastosuj”)");
+        const auto now = scoreNow();
+        if (refine.active || !now.valid)
+            item.detail = pl("Puść drop: po zmianach mierzę od nowa, wynik pojawi się za chwilę.");
+        else
+        {
+            const auto line = [](const juce::String& what, double before, double after, const char* unit) {
+                return what + juce::String(before, 1) + pl(" → ") + juce::String(after, 1) + unit;
+            };
+            juce::StringArray lines, worse;
+            lines.add(line(pl("barwa poza korytarzem celu: "), scoreBefore.outsideDb, now.outsideDb, " dB"));
+            lines.add(line(pl("odległość od środka korytarza (4 zakresy razem): "), scoreBefore.offCentreDb, now.offCentreDb, " dB"));
+            lines.add(pl("kolizje: ") + juce::String(scoreBefore.collisions) + pl(" → ") + juce::String(now.collisions));
+            lines.add(line(pl("szczyt względem głośności (PLR, mniej = gęściej): "), scoreBefore.plrDb, now.plrDb, " dB"));
+            if (now.outsideDb > scoreBefore.outsideDb + 1.0)
+                worse.add(pl("barwa poza korytarzem"));
+            if (now.offCentreDb > scoreBefore.offCentreDb + 1.0)
+                worse.add(pl("odległość od środka korytarza"));
+            if (now.collisions > scoreBefore.collisions + 1)
+                worse.add(pl("kolizje"));
+            if (now.plrDb > scoreBefore.plrDb + 1.0)
+                worse.add(pl("gęstość"));
+            item.status = worse.isEmpty() ? Status::good : Status::warning;
+            item.detail = lines.joinIntoString(pl("; ")) + "."
+                          + (worse.isEmpty() ? pl(" Nic się nie pogorszyło.")
+                                             : pl(" Pogorszyło się: ") + worse.joinIntoString(", ")
+                                                   + pl(". Porównaj na słuch („Przed / po”); „Cofnij” przywraca poprzedni stan."));
         }
         report.push_back(item);
     }
@@ -6988,9 +7034,25 @@ std::array<std::int64_t, 5> BrainProcessor::itemSignature(const Proposal::Item& 
              static_cast<std::int64_t>(item.group), extra };
 }
 
+BrainProcessor::MixScore BrainProcessor::scoreNow() const
+{
+    MixScore score;
+    if (!mix.tonal.valid || mix.dropSeconds < kMinimumDropSeconds || !std::isfinite(truePeakDb()) || !std::isfinite(integratedLufs()))
+        return score;
+    score.valid = true;
+    score.outsideDb = ma::outsideCorridorDb(mix.tonal);
+    for (const auto& zone : ma::zoneOffsets(mix.tonal, activeTarget()))
+        if (zone.valid)
+            score.offCentreDb += std::abs(zone.offsetDb);
+    score.collisions = static_cast<int>(mix.masking.issues.size());
+    score.plrDb = truePeakDb() - integratedLufs();
+    return score;
+}
+
 int BrainProcessor::applyByUser()
 {
     stopRefining();
+    scoreBefore = scoreNow();
     // What the user unticked stays unticked in the rounds that follow.
     std::vector<std::array<std::int64_t, 5>> unticked;
     for (const auto& item : currentProposal.items)
@@ -7125,6 +7187,7 @@ bool BrainProcessor::canUndo() const
 
 int BrainProcessor::undoLast()
 {
+    scoreBefore = {};
     stopRefining();
     if (comparing)
         setComparing(false);
@@ -7344,6 +7407,20 @@ void BrainProcessor::updatePreview()
             if (!added)
                 it->second = std::max(it->second, channel.data.outputPeakDb);
         }
+    if (fresh && std::isfinite(truePeakDb()) && truePeakDb() > topPeakDb + 0.05)
+    {
+        topPeakDb = truePeakDb();
+        topPeakAtSeconds = songSeconds.load();
+        topPeakInDrop = std::isfinite(dropLevel) && shortTermLufs() >= dropLevel - 3.0;
+        float highest = -200.0f;
+        topPeakChannel = {};
+        for (const auto& channel : mix.channels)
+            if (inMixSums(channel) && std::isfinite(channel.data.outputPeakDb) && channel.data.outputPeakDb > highest)
+            {
+                highest = channel.data.outputPeakDb;
+                topPeakChannel = channel.name;
+            }
+    }
     const double integratedNow = integratedLufs();
     if (!std::isfinite(integratedNow) || integratedNow < -60.0)
         return;
@@ -7401,7 +7478,7 @@ juce::String BrainProcessor::previewVerdict(MixSnapshot::Status& status) const
                  + pl(" pod głośny master: kliknij „Zastosuj”, potem posłuchaj drop jeszcze raz.");
     else if (loudMasterPlan.made && loudMasterPlan.capped)
         advice = pl(" Clipper na ") + loudMasterPlan.carriers.joinIntoString(", ")
-                 + pl(" ścina już tyle, ile się da bez spłaszczenia uderzenia. Resztę robi klej: wyślij stopę, clap i perkusję na jedną szynę z Agentem w roli „Bus” (Mózg dobierze jej kompresor), a na sumie miksu ustaw kompresor 2:1 z wolnym atakiem (30 ms), 1–2 dB redukcji")
+                 + pl(" ścina już tyle, ile się da bez spłaszczenia uderzenia. Resztę robi klej: wyślij stopę, clap i perkusję na jedną szynę z Agentem w roli „Bus” (Mózg dobierze jej kompresor), a w Ozone, przed limiterem, kompresor 2:1 z wolnym atakiem (30 ms), 1–2 dB redukcji")
                  + lower;
     else if (loudMasterPlan.made && !loudMasterPlan.carriers.isEmpty())
         // Measured again with the new clipping and still too busy: the clippers have room left.
@@ -7414,6 +7491,10 @@ juce::String BrainProcessor::previewVerdict(MixSnapshot::Status& status) const
     const auto shortOf = std::isfinite(s.outputLufs) && s.outputLufs < target - 1.0
                              ? pl(" I tak nie dobije do celu: wychodzi ") + juce::String(s.outputLufs, 1) + " LUFS."
                              : juce::String();
+    // The sum is Ozone's: what the tracks cannot give is split there between a clipper and the limiter.
+    const juce::String ozone = pl(" Na śladach więcej się nie wyciśnie bez straty; resztę rozłóż w Ozone na dwa etapy: najpierw clipper "
+                                  "(albo Maximizer z „Soft Clip”) 2–3 dB, dopiero potem limiter. Jeden limiter robiący wszystko pompuje. "
+                                  "„Kontrola mastera” po Ozone pokaże, ile naprawdę zabrał.");
     if (s.typicalReductionDb <= 3.0)
     {
         status = MixSnapshot::Status::good;
@@ -7422,10 +7503,10 @@ juce::String BrainProcessor::previewVerdict(MixSnapshot::Status& status) const
     if (s.typicalReductionDb <= 6.0)
     {
         status = MixSnapshot::Status::warning;
-        return base + pl(". Stopa i perkusja stracą trochę uderzenia.") + shortOf + advice;
+        return base + pl(". Stopa i perkusja stracą trochę uderzenia.") + shortOf + advice + ozone;
     }
     status = MixSnapshot::Status::problem;
-    return base + pl(". To za dużo: master zgniecie uderzenie.") + shortOf + advice;
+    return base + pl(". To za dużo: master zgniecie uderzenie.") + shortOf + advice + ozone;
 }
 
 namespace

@@ -287,6 +287,9 @@ public:
     {
         resetRequested.store(true);
         ++resetEpoch; // the master check after the mastering chain starts over with us
+        topPeakDb = -INFINITY;
+        topPeakAtSeconds = -1.0;
+        topPeakChannel = {};
         mix.master.valid = false; // the stereo picture starts over too
         dropResetPending = true;  // and so does the drop
         previewResetRequested.store(true);
@@ -773,6 +776,22 @@ private:
         double peakSeconds = 0.0;
     };
     Refine refine;
+    // "Before and after": what the measurements said at the user's last "Zastosuj", to show what it changed.
+    struct MixScore
+    {
+        bool valid = false;
+        double outsideDb = 0.0;  // tonal balance: sum of distances outside the corridor
+        double offCentreDb = 0.0; // sum over TBC's ranges of the distance from the corridor's centre
+        int collisions = 0;
+        double plrDb = 0.0;      // true peak minus integrated loudness
+    };
+    MixScore scoreNow() const;
+    MixScore scoreBefore;
+    // Where the highest peak since the reset fell: the song position, whether that was the drop, and the
+    // channel peaking highest at that moment.
+    double topPeakDb = -INFINITY, topPeakAtSeconds = -1.0;
+    bool topPeakInDrop = false;
+    juce::String topPeakChannel;
     bool autoSelectedTarget = false;
     bool groupLevelsPlanned = false; // phase 30: the analysis plans group levels (no per-channel level steps then)
     static juce::File lastTargetFile();
