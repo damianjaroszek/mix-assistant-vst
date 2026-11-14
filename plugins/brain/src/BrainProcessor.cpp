@@ -2267,7 +2267,7 @@ void BrainProcessor::buildReport()
                        + (noStats.isEmpty() ? pl(" (projekt sprzed fazy 23, brak szczytu)") : juce::String()))
                   + pl(" → kompresja, clipper, wyrównanie basu, rola, strój stopy"));
         lines.add((currentTarget.valid() ? yes + pl("cel tonalny ") + quoted(juce::String::fromUTF8(currentTarget.name.c_str()))
-                                         : no + pl("własny cel tonalny (do tego czasu wbudowany „Typowy house”)"))
+                                         : no + pl("własny cel tonalny (do tego czasu wbudowany „Klubowy”)"))
                   + pl(" → balans tonalny, korekcje barwy"));
         lines.add((currentStems.valid() ? yes + pl("referencje ze stemów ") + quoted(juce::String::fromUTF8(currentStems.name.c_str()))
                                         : no + pl("referencje ze stemów (proporcje grup i szkic: typowy house)"))

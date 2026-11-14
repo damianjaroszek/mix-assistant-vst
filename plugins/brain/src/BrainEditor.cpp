@@ -488,7 +488,7 @@ void BrainEditor::updateGuide()
                           ? (tonal ? pl("Cel tonalny „") + juce::String::fromUTF8(processor.target().name.c_str()) + pl("” wybrany. ") : juce::String())
                                 + (stems ? pl("Stemy referencji wczytane.") : pl("Stemy referencji (zakładka „Referencje”) dadzą jeszcze proporcje grup i szerokość."))
                           : pl("Raz na gatunek: „Balans tonalny” → „Nowy cel” → nagraj 3–10 utworów (jak Capture w TBC). Bez tego Mózg "
-                               "trzyma się typowych proporcji house'u i wbudowanego celu „Typowy house” (szerokiego jak w TBC).");
+                               "trzyma się typowych proporcji house'u i wbudowanego celu „Klubowy” (z 13 klubowych masterów).");
         setup.steps.push_back(step);
     }
 
@@ -622,8 +622,8 @@ void BrainEditor::timerCallback()
         tonalStatus = pl("Nagrywam referencję do „") + targetName + pl("”: ") + juce::String(juce::roundToInt(processor.secondsAnalysed()))
                       + pl(" s. Puść cały utwór (albo drop) na masterze i kliknij „Zakończ nagrywanie”.");
     else if (!target.valid())
-        tonalStatus = (targetName.isEmpty() ? pl("Bez własnego celu: wbudowany „Typowy house” (szeroki jak TBC). Własny: „Nowy cel” i referencje")
-                                            : pl("Cel „") + targetName + pl("” nie ma referencji (do tego czasu wbudowany „Typowy house”). Kliknij „Nagraj referencję”"))
+        tonalStatus = (targetName.isEmpty() ? pl("Bez własnego celu: wbudowany „Klubowy” (z 13 klubowych masterów). Własny: „Nowy cel” i referencje")
+                                            : pl("Cel „") + targetName + pl("” nie ma referencji (do tego czasu wbudowany „Klubowy”). Kliknij „Nagraj referencję”"))
                       + (mix.tonal.valid ? juce::String()
                                          : pl(". Słucham miksu: ") + juce::String(juce::roundToInt(processor.secondsAnalysed())) + " / "
                                                + juce::String(juce::roundToInt(BrainProcessor::kMinimumSeconds)) + " s");
