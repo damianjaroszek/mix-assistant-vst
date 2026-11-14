@@ -2560,9 +2560,21 @@ void BrainProcessor::buildReport()
     // Kick and bass in time: dynamic give-way and polarity, measured by Agents with a sidechain.
     {
         juce::StringArray noSignal, cancelling, ducking, keyed;
-        bool kick = false, bass = false, anySidechain = false;
+        bool kick = false, bass = false, anySidechain = false, kickPlays = false;
+        for (const auto& channel : mix.channels)
+            kickPlays = kickPlays || (channel.data.role == 1 && channel.data.inputRmsDb > -50.0f);
+        mix.bassWithoutCable.clear();
         for (const auto& channel : mix.channels)
         {
+            // The cable only shows while the kick sends signal down it, so the answer is taken then and kept.
+            if (channel.data.role == 2)
+            {
+                if (kickPlays)
+                    bassCable[channel.owner] = channel.data.sidechainConnected != 0;
+                const auto known = bassCable.find(channel.owner);
+                if (known != bassCable.end() && !known->second)
+                    mix.bassWithoutCable.add(channel.name);
+            }
             kick = kick || channel.data.role == 1;
             bass = bass || channel.data.role == 2;
             const bool connected = channel.data.sidechainConnected != 0;
@@ -2601,16 +2613,29 @@ void BrainProcessor::buildReport()
         }
         else if (!keyed.isEmpty())
         {
-            item.status = Status::good;
-            item.detail = pl("Ustępuje stopie bez kabla (Agent stopy podaje obwiednię przez wspólną pamięć): ") + joinNames(keyed)
-                          + pl(". Fazę stopa-bas sprawdzi tylko sidechain: podłącz stopę do Agenta basu, jeśli chcesz ją znać.");
-        }
-        else if (kick && bass)
-        {
-            item.detail = pl("Podłącz stopę jako sidechain do Agenta basu, żeby sprawdzić fazę i ustępować dynamicznie.");
+            item.status = Status::warning;
+            item.detail = pl("Ustępuje stopie bez kabla: ") + joinNames(keyed) + ".";
         }
         if (!keyed.isEmpty() && anySidechain && item.status == Status::good)
             item.detail += pl(" Bez kabla: ") + joinNames(keyed) + ".";
+        mix.kickAndBass = kick && bass;
+        // The cable is the proper way; without it the plugin works, but worse, and says so.
+        if (mix.kickAndBass && !mix.bassWithoutCable.isEmpty() && cancelling.isEmpty())
+        {
+            item.status = Status::warning;
+            item.title = pl("Stopa i bas: brak kabla sidechain");
+            item.detail = (item.detail.isEmpty() ? juce::String() : item.detail + pl("\n"))
+                          + pl("Bas bez kabla od stopy: ") + joinNames(mix.bassWithoutCable)
+                          + pl(". Bez kabla ustępowanie spóźnia się o jeden bufor audio (ok. 12 ms przy 512 próbkach), a fazy i "
+                               "przesunięcia stopa-bas nie da się zmierzyć.\nJak podłączyć w FL: 1) w mikserze zaznacz kanał stopy, "
+                               "2) kliknij prawym strzałkę na dole kanału basu i wybierz „Sidechain to this track”, 3) w oknie Agenta "
+                               "basu kliknij koło zębate, zakładkę „Processing” i w „Connections” przy wejściu sidechain wybierz 1. "
+                               "Potem puść drop: ta pozycja sama zmieni się na zieloną.");
+        }
+        else if (mix.kickAndBass && !anySidechain && keyed.isEmpty() && item.detail.isEmpty())
+        {
+            item.detail = pl("Puść drop, żeby Mózg sprawdził, czy bas ma kabel sidechain od stopy.");
+        }
         if (item.detail.isNotEmpty())
             report.push_back(item);
     }

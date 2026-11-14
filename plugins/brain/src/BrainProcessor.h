@@ -44,6 +44,10 @@ struct MixSnapshot
         unknown
     };
 
+    // Kick-to-bass sidechain cable: bass Agents without one (judged while a kick plays, kept while it rests).
+    juce::StringArray bassWithoutCable;
+    bool kickAndBass = false;
+
     struct Channel
     {
         std::uint64_t owner = 0;
@@ -805,6 +809,7 @@ private:
     std::vector<ma::LostSpan> lostSpans;
     std::vector<juce::String> lostNames;
     std::uint32_t lostAtMs = 0;
+    std::map<std::uint64_t, bool> bassCable; // bass Agent -> its kick cable brought signal the last time a kick played
     double firstDropSecond = INFINITY; // where the drop came in, in the song
     std::atomic<double> songSeconds { -1.0 }; // the host's position while playing, else -1
     SectionSums introSums, buildSums;

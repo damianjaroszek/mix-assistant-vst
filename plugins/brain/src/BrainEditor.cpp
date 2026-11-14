@@ -478,6 +478,19 @@ void BrainEditor::updateGuide()
                                              + pl(". Ustaw właściwą w Agencie („Poziom” → „Rola”), a priorytet 1 dla najważniejszych.");
         setup.steps.push_back(step);
     }
+    if (mix.kickAndBass)
+    {
+        brain::GuideView::Step step;
+        step.title = pl("Kabel sidechain: stopa do Agenta basu");
+        step.state = mix.bassWithoutCable.isEmpty() ? State::done : State::now;
+        step.detail = mix.bassWithoutCable.isEmpty()
+                          ? pl("Bas dostaje stopę kablem: ustępuje w samo uderzenie, a Mózg mierzy fazę i przesunięcie w czasie.")
+                          : pl("Brakuje na: ") + list(mix.bassWithoutCable)
+                                + pl(". W mikserze FL zaznacz kanał stopy, kliknij prawym strzałkę na dole kanału basu i wybierz „Sidechain to "
+                                     "this track”; potem w oknie Agenta basu: koło zębate → „Processing” → „Connections”, wejście sidechain 1. "
+                                     "Bez kabla ustępowanie działa awaryjnie, o jeden bufor za późno.");
+        setup.steps.push_back(step);
+    }
     {
         brain::GuideView::Step step;
         step.title = pl("Cel brzmienia: referencje");
