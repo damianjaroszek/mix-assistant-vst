@@ -246,7 +246,7 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   chain loss and level plans ignore a pan; the peak after it): constant power, unity in the centre (sqrt2 cos/sin), below
   `monoBelowHz` (default 150, LR4 split that sums flat) the signal stays put. `BalanceMeter` publishes the input's lean
   (`AgentData::inputBalanceDb`, L minus R above 150 Hz). `planPan` (whole-mix analysis, after `planStereo`, from the same pre-pan
-  mid/side): kick, bass, bus, send and the loudest vocal and lead stay centred; user pans (on but not in `brainTools`) and inputs
+  mid/side): kick, bass, bus, send, the loudest vocal and lead and any part with >= `kCarriesLowShare` 25% of its power below 150 Hz (a loop with a kick in it, `Reason::carriesLow`) stay centred; user pans (on but not in `brainTools`) and inputs
   leaning >= 3 dB are counted where they are; wide (coherence < 0.3) and quiet (< -40 dB of the mix) parts stay; the rest by role
   (perc/fx 0.45, other 0.35, pad/lead 0.3, vocal 0.25, less when partly wide): pairs sharing >= 35% of their 150 Hz-16 kHz spectrum go
   opposite, then singles where they balance the mix; then the loudest leaning part steps back 0.05 until the mix is within 0.5 dB and
@@ -254,10 +254,10 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   before phase 33), `ToolBit::toolPan`, `kToolCount` 13, `bus::kVersion` 19; Agent "Stereo" tab, Brain `ChainTool::pan`, notes, verdict.
 - Phase 34 depth (`ma/Depth.h`): `DepthSettings::highCutHz` (12 dB/oct `HighCut`, right after the cleanup; `depthResponseDb` is the
   digital response at 48 kHz and goes into `applyCleanup`, so `bandsDb` carries it). `planChains` step 7: a `send` whose `topTiltDb`
-  (8-16 kHz minus 1-4 kHz) is above the rest of the mix's minus `kDarkerThanMixDb` 3 gets `kSendHighCutHz` 9 kHz. The Brain
+  (8-16 kHz minus 1-4 kHz) is above the rest of the mix's minus `kDarkerThanMixDb` 3 gets `kSendHighCutHz` 9 kHz. Learn never lifts a send's trim (`LearnResult::sendKept`: a return is set by the source channels' send knobs; it only lowers one louder than its role level). The Brain
   (`proposeWholeMix`) also has every send without a cable duck the whole signal by `kSendDuckDb` 3 dB under `mainVoice()` (loudest
   vocal, else lead; keyed over the bus, 10 ms, release 1/4 synced) and adds an advisory item with `depthTimes` (pre-delay 1/64, decay
-  half a bar, delay 1/8, dotted 1/8, 1/4); report "Głębia (pogłos, delay)" (sends vs dry 200 Hz-8 kHz, warning over -6 dB). Part of
+  half a bar, delay 1/8, dotted 1/8, 1/4; two items `reverbAdviceText` / `delayAdviceText` named by the usual knobs); report "Głębia (pogłos, delay)" (sends vs dry 200 Hz-8 kHz, warning over -6 dB). Part of
   `Command`, the A/B backup and `brainSet` (packed dynamics 100 floats, 99 = before phase 34), `ToolBit::toolDepth`, `kToolCount` 14,
   `bus::kVersion` 20; Agent param `highCut` (20 kHz = off) on the "Inżynier miksu" tab. mixcheck names reverb/delay/return/send files as sends.
 - Phase 35 kick-bass time and the Ozone gate (`ma/Alignment.h`): `LowAlignMeter` (both LP2 150 Hz, decimated ~2 kHz, cross-correlation
@@ -281,6 +281,23 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   none, `AgentData::sendDuckTo`, the user's, `bus::kVersion` 22; "Inżynier miksu" tab, enabled on sends): auto = drums source -> whole-signal
   duck under it (2 ms, 1/16 synced, depth over 200 Hz-8 kHz, <= `kSendDuckSourceMaxDb` 6), else the main voice (phase 36), else its source
   (bell 300 Hz-6 kHz, 1/8); "none" turns a Brain-made duck off. `lastSendNotes` feeds the "Głębia" report line (sources, key).
+- Phase 38 engineer's checks: without a tonal target of the user's (`currentTarget` invalid) the Brain uses `ma::builtinHouseTarget()`
+  ("Typowy house (wbudowany)": the mean of the Chardonnay remix and Galias masters from `ma-lab --make-target`, smoothed over +-2 ERB
+  bands, corridor +-2.5 dB, +-3.5 below 60 Hz / above 10 kHz) through `activeTarget()` everywhere the analysis compares (report, view,
+  sketch, solver, translation `tonalOk`, HTML); `target()` stays the user's for the target list and capture. Before it, nothing balanced
+  collision cuts and level moves without a target and the top rose 3-5 dB on both real songs.
+  Report "Ślady w mono" (per channel 150 Hz-8 kHz mid vs mid + processed side, `processedSidePower`, against the mix's; warning 3 dB,
+  problem 6 dB, parts > -30 dB of the mix) and "Słyszalność w czasie" (`ma/Audibility.h` `findLostSpans` on `songBins` plus each
+  channel's present heard - raw EQ, refreshed every 2 s: a part playing within 15 dB of its loud level whose share of its own range
+  falls 6 dB under its typical share and under the rest by 6 dB for >= 4 s; sends never counted; advice: volume automation in FL).
+- Phase 39 fit to the target: `ChainContext::tonalKnown` / `mixMinusCentreDb` (mix minus the active target's centre) let
+  `planChains` skip the lowEndOwned HPF raise where the low end is >= 1 dB under the centre (`kLowUnderCentreDb`) and the crowd mud
+  cut unless 200-500 Hz is >= `kMudOverCentreDb` 0.5 over it without any mud cut (power with the planned vs `ChainChannel::currentCleanup`,
+  so re-planning is idempotent). Solver: predicting stage up to 8 regions, `centreZones` also on ranges outside the corridor, a tonal cut
+  tries the next least important carrier when one's cut is already as deep or at its limit. Group levels (`planLevels`) are measured
+  pre-EQ so tonal cuts do not come back as trim. A hole no channel can fill names the channel playing an octave below (saturation /
+  harmonics); `ozoneCurve` lists what is left (bells, +-4 dB) in the tonal report item and the HTML ("Krzywa EQ do Ozone").
+  mixcheck vs the references (sum of TBC zone distances): Galias 5.6 -> 7.3, Chardonnay 6.3 -> 4.7 (the built-in curve comes from them).
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

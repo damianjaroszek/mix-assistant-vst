@@ -165,6 +165,7 @@ constexpr double kRegionEdgeHz[] = { 150.0, 2000.0, 9000.0, 16000.0 };
 constexpr int kRegions = 3;
 constexpr double kQuietShare = 1e-4; // -40 dB of the mix above the low end
 constexpr double kWideCoherence = 0.3;
+constexpr double kLowFromHz = 30.0;
 constexpr double kStep = 0.05;
 constexpr double kSmallest = 0.1;
 
@@ -192,15 +193,18 @@ struct Part
     double sum = 0.0;
     double coherence = 1.0;
     double leftShare = 0.5; // of its power on the left before any pan (its input balance)
+    double lowShare = 0.0;  // of its power (30 Hz-16 kHz) below 150 Hz
 };
 
 Part measure(const PanChannel& channel)
 {
     Part part;
-    double mid = 0.0, side = 0.0;
+    double mid = 0.0, side = 0.0, low = 0.0;
     for (int b = 0; b < kBands; ++b)
     {
         const double hz = centreHz(b);
+        if (hz >= kLowFromHz && hz < kLowestHz)
+            low += power(channel.midDb[static_cast<size_t>(b)]) + power(channel.sideDb[static_cast<size_t>(b)]);
         if (hz < kLowestHz || hz > kHighestHz)
             continue;
         const double m = power(channel.midDb[static_cast<size_t>(b)]), s = power(channel.sideDb[static_cast<size_t>(b)]);
@@ -209,6 +213,7 @@ Part measure(const PanChannel& channel)
         mid += m;
         side += s;
     }
+    part.lowShare = low + mid + side > 0.0 ? low / (low + mid + side) : 0.0;
     part.coherence = mid + side > 0.0 ? (mid - side) / (mid + side) : 1.0;
     if (channel.balanceKnown)
     {
@@ -375,6 +380,12 @@ PanResult planPan(const std::vector<PanChannel>& channels)
         if (base <= 0.0)
         {
             plan.reason = PanPlan::Reason::centreRole;
+            add(planned, parts[c], 0.0);
+            continue;
+        }
+        if (parts[c].lowShare >= kCarriesLowShare)
+        {
+            plan.reason = PanPlan::Reason::carriesLow;
             add(planned, parts[c], 0.0);
             continue;
         }

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ma/Audibility.h"
+
 #include "SharedSession.h"
 
 #include <map>
@@ -435,6 +437,8 @@ public:
     // Tonal targets built from reference tracks, kept as files in the user's app data folder.
     juce::StringArray targetNames() const;
     const ma::TonalTarget& target() const { return currentTarget; }
+    // Phase 38: the user's target, or the built-in house one while they have none.
+    const ma::TonalTarget& activeTarget() const { return currentTarget.valid() ? currentTarget : builtinTarget; }
     bool selectTarget(const juce::String& name);
     bool createTarget(const juce::String& name);
     bool selectLastTarget();
@@ -497,6 +501,8 @@ public:
     // master spectrum the tonal balance and the solver work on.
     ma::Curve limiterTilt() const;
     ma::Curve tonalMasterSpectrum() const;
+    juce::String builtinNote() const;
+    juce::StringArray ozoneCurve(const ma::TonalComparison& tonal) const;
     // The comparison of the mix as it plays, for the thin line when the main one is after the limiter.
     const ma::TonalComparison& tonalBeforeLimiter() const { return tonalPlain; }
     static constexpr double kMaxTiltDb = 2.0;
@@ -758,6 +764,7 @@ private:
                     std::map<int, std::vector<Proposal::Item>>& dips) const;
     double loudnessBefore = -INFINITY, loudnessAfter = -INFINITY;
     ma::TonalTarget currentTarget;
+    ma::TonalTarget builtinTarget = ma::builtinHouseTarget();
     bool capturing = false;
     AdaptiveStatus adaptiveState;
     std::uint64_t lastAdaptMs = 0;
@@ -784,6 +791,10 @@ private:
     // Phase 16: everything heard, per second of the song (the host's position), so the intro
     // (before the first drop) and its build (the 8 s before it) are known once the drop is.
     std::map<int, SectionSums> songBins;
+    // Phase 38: where a part gets lost in the song (report), refreshed every 2 s.
+    std::vector<ma::LostSpan> lostSpans;
+    std::vector<juce::String> lostNames;
+    std::uint32_t lostAtMs = 0;
     double firstDropSecond = INFINITY; // where the drop came in, in the song
     std::atomic<double> songSeconds { -1.0 }; // the host's position while playing, else -1
     SectionSums introSums, buildSums;

@@ -185,6 +185,35 @@ std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& input, const 
                 owners[static_cast<size_t>(b)] += power(c.bandsDb[static_cast<size_t>(b)]);
         }
 
+    // Phase 39: the mix against the tonal target in a range, as it would be if every channel had
+    // `planned(i)` instead of its present cleanup (so planning again gives the same answer).
+    const auto offsetWith = [&](double lowHz, double highHz, const auto& planned) {
+        double sum = 0.0;
+        int n = 0;
+        for (int b = 0; b < kBands; ++b)
+        {
+            const double hz = centre(b);
+            if (hz < lowHz || hz > highHz)
+                continue;
+            double now = 0.0, then = 0.0;
+            for (size_t i = 0; i < count; ++i)
+            {
+                if (!channels[i].valid)
+                    continue;
+                const double db = channels[i].bandsDb[static_cast<size_t>(b)];
+                now += power(db + cleanupResponseDb(channels[i].currentCleanup, hz));
+                then += power(db + cleanupResponseDb(planned(i), hz));
+            }
+            if (now <= 0.0 || then <= 0.0)
+                continue;
+            sum += context.mixMinusCentreDb[static_cast<size_t>(b)] + 10.0 * std::log10(then / now);
+            ++n;
+        }
+        return n > 0 ? sum / n : 0.0;
+    };
+    // Without any high-pass the low end still sits under the target: nobody hands it over.
+    const bool lowWanted = context.tonalKnown && offsetWith(60.0, 300.0, [](size_t) { return CleanupSettings {}; }) < kLowUnderCentreDb;
+
     // 1. High-pass and mono low end.
     for (size_t i = 0; i < count; ++i)
     {
@@ -219,7 +248,7 @@ std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& input, const 
         double hz = junk ? belowContent(edgeHz) : 0.0;
         plan.highPassReason = junk ? ChainPlan::HighPass::junk : ChainPlan::HighPass::none;
         // Where the kick and bass are much louder, this channel's low end only adds mud.
-        if (anyOwner && c.role != Role::other)
+        if (anyOwner && c.role != Role::other && !lowWanted)
         {
             int owned = 0;
             while (owned < kBands && centre(owned) < profile.highPassCapHz
@@ -272,7 +301,13 @@ std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& input, const 
             if (share[i] >= kMudShare)
                 crowd.push_back(i);
         }
-        if (crowd.size() >= 3)
+        // Phase 39: no mud cut where the mix without one is not over the target's centre.
+        const bool mudWanted = !context.tonalKnown || offsetWith(kMudLowHz, kMudHighHz, [&](size_t i) {
+                                   auto planned = plans[i].cleanup;
+                                   planned.mudDb = 0.0f;
+                                   return planned;
+                               }) >= kMudOverCentreDb;
+        if (crowd.size() >= 3 && mudWanted)
         {
             // The most important member keeps its low mids; kick and bass only give way when
             // their 200-500 Hz is close to their low peak (boxy rather than defining).

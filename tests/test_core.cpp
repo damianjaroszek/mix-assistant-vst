@@ -47,6 +47,7 @@
 #include <cstring>
 #include <functional>
 #include <memory>
+#include "ma/Audibility.h"
 #include <string>
 #include <vector>
 
@@ -1453,6 +1454,35 @@ void testChainPlanner()
     const auto crowdPlans = ma::planChains(crowd);
     check(crowdPlans[0].cleanup.mudDb == 0.0f && crowdPlans[1].cleanup.mudDb < 0.0f && crowdPlans[2].cleanup.mudDb < 0.0f,
           "low-mid mud: the most important keeps it, the others give way");
+    // Phase 39: under the target's centre there the mud stays; well over it, it goes. Planned again
+    // with the cuts in place (the master measured with them), the answer is the same.
+    ma::ChainContext thin;
+    thin.tonalKnown = true;
+    thin.mixMinusCentreDb.fill(-2.0);
+    const auto thinPlans = ma::planChains(crowd, thin);
+    check(thinPlans[1].cleanup.mudDb == 0.0f && thinPlans[2].cleanup.mudDb == 0.0f, "phase 39: no mud cut where the target wants more");
+    ma::ChainContext thick = thin;
+    thick.mixMinusCentreDb.fill(3.0);
+    const auto thickPlans = ma::planChains(crowd, thick);
+    check(thickPlans[1].cleanup.mudDb < 0.0f && thickPlans[2].cleanup.mudDb < 0.0f, "phase 39: mud cut where the mix is over the target");
+    auto cut = crowd;
+    for (size_t i = 0; i < cut.size(); ++i)
+        cut[i].currentCleanup = thickPlans[i].cleanup;
+    ma::ChainContext measured = thick;
+    for (int b = 0; b < 40; ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        double was = 0.0, now = 0.0;
+        for (size_t i = 0; i < cut.size(); ++i)
+        {
+            was += std::pow(10.0, cut[i].bandsDb[static_cast<size_t>(b)] / 10.0);
+            now += std::pow(10.0, (cut[i].bandsDb[static_cast<size_t>(b)] + ma::cleanupResponseDb(cut[i].currentCleanup, hz)) / 10.0);
+        }
+        measured.mixMinusCentreDb[static_cast<size_t>(b)] += 10.0 * std::log10(now / was);
+    }
+    const auto again = ma::planChains(cut, measured);
+    check(again[1].cleanup.mudDb == thickPlans[1].cleanup.mudDb && again[2].cleanup.mudDb == thickPlans[2].cleanup.mudDb,
+          "phase 39: planning again with the cuts measured keeps them");
 }
 
 ma::Resonances resonancesOf(const std::function<double(double)>& part)
@@ -3686,6 +3716,35 @@ void testDynamicEq()
     }
 }
 
+void testAudibility()
+{
+    const int bands = ma::SpectrumAnalyzer::numBandsFor(ma::BandScale::erb);
+    const auto part = [&](double lowHz, double highHz, double db, int from, int to, int seconds) {
+        ma::AudibilityChannel c;
+        c.valid = true;
+        c.secondsDb.resize(static_cast<size_t>(seconds));
+        for (int t = 0; t < seconds; ++t)
+            for (int b = 0; b < bands; ++b)
+            {
+                const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+                c.secondsDb[static_cast<size_t>(t)][static_cast<size_t>(b)] = t >= from && t <= to && hz >= lowHz && hz <= highHz ? db : -200.0;
+            }
+        return c;
+    };
+    std::vector<ma::AudibilityChannel> song { part(100.0, 800.0, -12.0, 0, 39, 40), part(2000.0, 5000.0, -20.0, 0, 39, 40),
+                                              part(1500.0, 6000.0, -8.0, 15, 22, 40) };
+    const auto spans = ma::findLostSpans(song);
+    check(spans.size() == 1 && spans[0].channel == 1 && spans[0].coveredBy == 2, "audibility 1");
+    check(!spans.empty() && spans[0].fromSecond == 15 && spans[0].toSecond == 22, "audibility 2");
+    check(!spans.empty() && spans[0].spanShareDb < spans[0].typicalShareDb - 6.0, "audibility 3");
+    // Too short a cover (3 s) is not a loss; a send is never counted.
+    song[2] = part(1500.0, 6000.0, -8.0, 15, 17, 40);
+    check(ma::findLostSpans(song).empty(), "audibility 4");
+    song[2] = part(1500.0, 6000.0, -8.0, 15, 22, 40);
+    song[1].background = true;
+    check(ma::findLostSpans(song).empty(), "audibility 5");
+}
+
 void testPan()
 {
     // The law: unity in the centre, constant power, silent on the far side.
@@ -3790,6 +3849,26 @@ void testPan()
     const auto alone = ma::planPan(lonely);
     check(!ma::panOn(alone.plans[1].settings) && alone.plans[1].reason == ma::PanPlan::Reason::alone, "pan 18");
     check(std::abs(alone.balancePlannedDb) <= ma::kMaxMixBalanceDb + 0.05, "pan 19");
+
+    // A percussion loop with the kick in it holds the centre; a hat loop beside it still moves.
+    {
+        auto loop = part(ma::Role::percussion, 3000.0, 12000.0, -24.0);
+        for (int b = 0; b < ma::bus::kBands; ++b)
+        {
+            const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+            if (hz >= 40.0 && hz <= 120.0)
+            {
+                loop.midDb[static_cast<size_t>(b)] = -10.0;
+                loop.sideDb[static_cast<size_t>(b)] = -30.0;
+            }
+        }
+        std::vector<ma::PanChannel> drums { part(ma::Role::bass, 40.0, 400.0, -12.0), loop,
+                                            part(ma::Role::percussion, 6000.0, 16000.0, -24.0),
+                                            part(ma::Role::percussion, 5500.0, 16000.0, -25.0) };
+        const auto kick = ma::planPan(drums);
+        check(!ma::panOn(kick.plans[1].settings) && kick.plans[1].reason == ma::PanPlan::Reason::carriesLow, "pan 19b");
+        check(kick.plans[2].reason == ma::PanPlan::Reason::paired && ma::panOn(kick.plans[2].settings), "pan 19c");
+    }
 
     // The user's pan stays, a part that arrives panned is left alone, a wide pad is not moved.
     auto own = mix;
@@ -4014,6 +4093,7 @@ int main()
     testPercussionLevel();
     testDynamicEq();
     testPan();
+    testAudibility();
     testDepth();
     testSendDuck();
     testSendSources();

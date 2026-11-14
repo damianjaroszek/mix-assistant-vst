@@ -88,6 +88,7 @@ public:
         // Hardly played in the passage (under kLearnFloorDb, or active < kLearnMinActiveShare): trim left alone.
         bool barelyPlayed = false;
         bool boostCapped = false; // the role target wanted more than kLearnMaxBoostDb
+    bool sendKept = false;    // a send: Learn never lifts it, its level is the send knobs'
         double activeShare = 0.0;
         // Dynamics of the passage for the Brain's engineer pass (pre-trim).
         bool statsValid = false;

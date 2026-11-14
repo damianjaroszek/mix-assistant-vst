@@ -70,6 +70,12 @@ std::array<TonalZone, kTonalZones> zoneOffsets(const TonalComparison& comparison
 // Sum over the bands of the distance outside the corridor.
 double outsideCorridorDb(const TonalComparison& comparison);
 
+// Phase 38: the target used while the user has none of their own. The mean of two house masters
+// (one remix, one progressive house track), smoothed over +-2 ERB bands, inside a corridor as wide
+// as Tonal Balance Control's (+-2.5 dB, +-3.5 dB below 60 Hz and above 10 kHz).
+TonalTarget builtinHouseTarget();
+constexpr const char* kBuiltinTargetName = "Typowy house (wbudowany)";
+
 // Plain-text file: name on the first line, then one line of band levels per reference.
 std::string serialiseTarget(const TonalTarget& target);
 bool parseTarget(const std::string& text, TonalTarget& target);

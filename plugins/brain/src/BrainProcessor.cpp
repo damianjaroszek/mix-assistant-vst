@@ -1,4 +1,5 @@
 #include "BrainProcessor.h"
+#include "ma/Audibility.h"
 
 #include "BrainEditor.h"
 #include "MaUi.h"
@@ -99,16 +100,29 @@ juce::String arrangementHint(double hz)
     return pl("hi-hat, shaker, ride, „powietrze” na wokalu");
 }
 
-// Phase 34: the times for the user's reverb and delay, at the song's tempo.
-juce::String depthTimesText(double bpm)
+// Phase 34: the settings for the user's own reverb and delay plugins, at the song's tempo, named by
+// the knobs most plugins have (ValhallaPlate / Room, Fruity Reeverb 2, Fruity Delay 3 ...).
+juce::String reverbAdviceText(double bpm)
 {
     const auto t = ma::depthTimes(bpm);
     if (!t.valid)
         return {};
-    return pl("pod tempo ") + juce::String(bpm, 1) + pl(" BPM: pogłos z pre-delay ") + juce::String(juce::roundToInt(t.preDelayMs))
-           + pl(" ms (1/64) i ogonem ok. ") + juce::String(t.decaySeconds, 2) + pl(" s (pół taktu, wygasa przed następną frazą); delay 1/8 = ")
-           + juce::String(juce::roundToInt(t.eighthMs)) + pl(" ms, 1/8 z kropką = ") + juce::String(juce::roundToInt(t.dottedEighthMs))
-           + pl(" ms, 1/4 = ") + juce::String(juce::roundToInt(t.quarterMs)) + " ms";
+    return pl("Pogłos (na szynie wysyłki, ") + juce::String(bpm, 1) + pl(" BPM): Mix/Wet 100%, Dry 0%; Pre-delay ")
+           + juce::String(juce::roundToInt(t.preDelayMs)) + pl(" ms (1/64: głos wchodzi pierwszy); Decay ok. ")
+           + juce::String(t.decaySeconds, 1) + pl(" s (pół taktu, wygasa przed następną frazą); EQ pogłosu: dół na minus "
+                                                  "(Low gain -4 do -6 dB poniżej ok. 500 Hz), góra lekko w dół (High gain ok. -3 dB od ok. 4 kHz)");
+}
+
+juce::String delayAdviceText(double bpm)
+{
+    const auto t = ma::depthTimes(bpm);
+    if (!t.valid)
+        return {};
+    return pl("Delay (na szynie wysyłki): Tempo sync włączony, Time 3/16 (1/8 z kropką = ")
+           + juce::String(juce::roundToInt(t.dottedEighthMs)) + pl(" ms), spokojniej 1/4 (") + juce::String(juce::roundToInt(t.quarterMs))
+           + pl(" ms), gęściej 1/8 (") + juce::String(juce::roundToInt(t.eighthMs))
+           + pl(" ms); Feedback 25–35% (2–4 powtórzenia); filtr feedbacku LP ok. 3–5 kHz (każde powtórzenie ciemniejsze); "
+                "Ping pong albo Stereo; Wet 100%, Dry 0%");
 }
 
 // Phase 35: the bass's low end against the kick's in time, from the bass Agent's own measurement
@@ -796,10 +810,10 @@ void BrainProcessor::timerCallback()
     mix.masking = ma::analyseMasking(masking);
     mix.tonal = {};
     tonalPlain = {};
-    if (currentTarget.valid() && !capturing && !comparing && secondsAnalysed() >= kMinimumSeconds)
+    if (activeTarget().valid() && !capturing && !comparing && secondsAnalysed() >= kMinimumSeconds)
     {
-        mix.tonal = ma::compareToTarget(tonalMasterSpectrum(), currentTarget);
-        tonalPlain = ma::compareToTarget(averageSpectrum(), currentTarget);
+        mix.tonal = ma::compareToTarget(tonalMasterSpectrum(), activeTarget());
+        tonalPlain = ma::compareToTarget(averageSpectrum(), activeTarget());
     }
 
     std::vector<ma::TranslationChannel> translation(mix.channels.size());
@@ -930,7 +944,7 @@ ma::SolverResult BrainProcessor::solveNow(double headroomGainDb, const ma::StemS
         options.tonal = &mix.tonal;
     if (mix.tonal.valid)
     {
-        options.tonalTarget = &currentTarget;
+        options.tonalTarget = &activeTarget(); // phase 38: the built-in one until the user has a target
         options.tonalMasterDb = mix.sketch.active() ? ma::addGhosts(tonalMasterSpectrum(), mix.sketch.analysis) : tonalMasterSpectrum();
         options.centreZones = true; // phase 24
     }
@@ -1745,6 +1759,48 @@ ma::Curve BrainProcessor::limiterTilt() const
     return tilt;
 }
 
+constexpr std::uint32_t kLostRefreshMs = 2000;
+constexpr size_t kMaxLostListed = 5;
+constexpr double kMonoFoldLowHz = 150.0, kMonoFoldHighHz = 8000.0;
+constexpr double kMonoFoldAudibleDb = -30.0; // a part this far under the mix does not count
+constexpr double kMonoFoldWarnDb = 3.0, kMonoFoldProblemDb = 6.0;
+// Phase 39: what is left between the mix and the target as bells for Ozone's EQ on the master: each
+// region outside the corridor (its own width), then each of TBC's ranges still off the centre that no
+// region covers; at most +-4 dB each (more belongs in the mix).
+juce::StringArray BrainProcessor::ozoneCurve(const ma::TonalComparison& tonal) const
+{
+    juce::StringArray bells;
+    if (!tonal.valid)
+        return bells;
+    const auto bell = [&](double lowHz, double highHz, double gainDb) {
+        const double ratio = std::max(1.05, highHz / lowHz);
+        const double q = juce::jlimit(0.3, 4.0, std::sqrt(ratio) / (ratio - 1.0));
+        bells.add(hzText(std::sqrt(lowHz * highHz)) + " " + signedOneDecimal(juce::jlimit(-4.0, 4.0, gainDb)) + " dB, Q "
+                  + juce::String(q, 1));
+    };
+    for (const auto& region : tonal.regions)
+        if (std::abs(region.deviationDb) >= 0.75)
+            bell(region.lowHz, region.highHz, -region.deviationDb);
+    const auto zones = ma::zoneOffsets(tonal, activeTarget());
+    for (int z = 0; z < ma::kTonalZones; ++z)
+    {
+        const auto& zone = zones[static_cast<size_t>(z)];
+        const bool covered = std::any_of(tonal.regions.begin(), tonal.regions.end(), [&](const ma::TonalRegion& region) {
+            return region.lowHz < zone.highHz && region.highHz > zone.lowHz;
+        });
+        if (zone.valid && !covered && std::abs(zone.offsetDb) > 0.75)
+            bell(zone.lowHz, zone.highHz, -zone.offsetDb);
+    }
+    return bells;
+}
+
+juce::String BrainProcessor::builtinNote() const
+{
+    return currentTarget.valid() ? juce::String()
+                                 : pl(" To wbudowany cel z dwóch masterów house, szeroki jak korytarz TBC; własny („Nowy cel”, "
+                                      "2-3 referencje) zawsze ma pierwszeństwo.");
+}
+
 ma::Curve BrainProcessor::tonalMasterSpectrum() const
 {
     auto master = averageSpectrum();
@@ -1847,7 +1903,7 @@ void BrainProcessor::updateSketch()
 
     if (mix.tonal.valid)
     {
-        sketch.tonal = ma::compareToTarget(ma::addGhosts(tonalMasterSpectrum(), sketch.analysis), currentTarget);
+        sketch.tonal = ma::compareToTarget(ma::addGhosts(tonalMasterSpectrum(), sketch.analysis), activeTarget());
         sketch.arrangementRegion = ma::arrangementRegions(mix.tonal, sketch.tonal);
     }
 
@@ -2093,6 +2149,71 @@ void BrainProcessor::buildReport()
                            + pl(". W mono te pasma osłabną. „Analizuj” (cały łańcuch) zdejmie tam side na winnym kanale.");
         }
         report.push_back(perBand);
+
+        // Each part folded to mono (club, phone, a mono speaker): how much more it loses than the mix.
+        MixSnapshot::ReportItem folded;
+        folded.title = pl("Ślady w mono");
+        struct Fold
+        {
+            juce::String name;
+            double mid = 0.0, side = 0.0;
+        };
+        std::vector<Fold> folds;
+        double mixMid = 0.0, mixSide = 0.0;
+        for (const auto& channel : mix.channels)
+        {
+            if (!channel.spectrumValid || !channel.stereoValid || !inMixSums(channel))
+                continue;
+            Fold fold { juce::String::fromUTF8(channel.data.name) };
+            for (int b = 0; b < ma::bus::kBands; ++b)
+            {
+                const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+                if (hz < kMonoFoldLowHz || hz > kMonoFoldHighHz)
+                    continue;
+                // As it plays: after the Agent's side bells, widener and width slider.
+                const double m = std::pow(10.0, channel.midDb[static_cast<size_t>(b)] / 10.0);
+                fold.mid += m;
+                fold.side += ma::processedSidePower(channel.data.stereo, channel.data.width, hz, m,
+                                                    std::pow(10.0, channel.sideDb[static_cast<size_t>(b)] / 10.0));
+            }
+            mixMid += fold.mid;
+            mixSide += fold.side;
+            folds.push_back(fold);
+        }
+        const double mixTotal = mixMid + mixSide;
+        if (folds.empty() || mixTotal <= 1e-20)
+        {
+            folded.detail = pl("Czekam na muzykę.");
+        }
+        else
+        {
+            const double mixLoss = 10.0 * std::log10(std::max(mixMid, 1e-20) / mixTotal);
+            juce::StringArray worse, bad;
+            for (const auto& fold : folds)
+            {
+                const double total = fold.mid + fold.side;
+                if (total <= 1e-20 || 10.0 * std::log10(total / mixTotal) < kMonoFoldAudibleDb)
+                    continue;
+                const double extra = 10.0 * std::log10(std::max(fold.mid, 1e-20) / total) - mixLoss;
+                if (extra > -kMonoFoldWarnDb)
+                    continue;
+                const auto line = quoted(fold.name) + " " + juce::String(extra, 1) + " dB";
+                (extra <= -kMonoFoldProblemDb ? bad : worse).add(line);
+            }
+            folded.status = !bad.isEmpty() ? Status::problem : !worse.isEmpty() ? Status::warning : Status::good;
+            if (bad.isEmpty() && worse.isEmpty())
+                folded.detail = pl("Po zsumowaniu do mono żaden ślad nie cichnie wyraźnie bardziej niż cały miks (150 Hz–8 kHz).");
+            else
+            {
+                juce::StringArray all;
+                all.addArray(bad);
+                all.addArray(worse);
+                folded.detail = pl("W mono (klub, telefon, jeden głośnik) cichną bardziej niż reszta miksu: ") + all.joinIntoString(", ")
+                                + pl(". Ich szerokość to głównie side, którego mono nie słyszy. Zawęź je (suwak „Szerokość” w Agencie poniżej 100%) "
+                                     "albo zamień poszerzacz/chorus na krótki delay po jednej stronie.");
+            }
+        }
+        report.push_back(folded);
     }
 
     // Agents connected.
@@ -2141,7 +2262,7 @@ void BrainProcessor::buildReport()
                        + (noStats.isEmpty() ? pl(" (projekt sprzed fazy 23, brak szczytu)") : juce::String()))
                   + pl(" → kompresja, clipper, wyrównanie basu, rola, strój stopy"));
         lines.add((currentTarget.valid() ? yes + pl("cel tonalny ") + quoted(juce::String::fromUTF8(currentTarget.name.c_str()))
-                                         : no + pl("cel tonalny"))
+                                         : no + pl("własny cel tonalny (do tego czasu wbudowany „Typowy house”)"))
                   + pl(" → balans tonalny, korekcje barwy"));
         lines.add((currentStems.valid() ? yes + pl("referencje ze stemów ") + quoted(juce::String::fromUTF8(currentStems.name.c_str()))
                                         : no + pl("referencje ze stemów (proporcje grup i szkic: typowy house)"))
@@ -2250,7 +2371,7 @@ void BrainProcessor::buildReport()
     {
         MixSnapshot::ReportItem item;
         item.title = pl("Balans tonalny");
-        if (!currentTarget.valid())
+        if (!activeTarget().valid())
         {
             item.detail = currentTarget.name.empty()
                               ? pl("Raz na zawsze: w widoku „Balans tonalny” kliknij „Nowy cel” i nagraj 2-3 utwory referencyjne puszczone "
@@ -2282,7 +2403,7 @@ void BrainProcessor::buildReport()
                                                                      + pl(". To aranż, nie EQ (widok „Aranż”).");
             // Phase 24: where each of TBC's ranges sits against the corridor's centre, and on what curve.
             const auto& judged = sketch ? mix.sketch.tonal : mix.tonal;
-            const auto zones = ma::zoneOffsets(judged, currentTarget);
+            const auto zones = ma::zoneOffsets(judged, activeTarget());
             juce::StringArray offsets;
             bool offCentre = false;
             for (int z = 0; z < ma::kTonalZones; ++z)
@@ -2305,7 +2426,7 @@ void BrainProcessor::buildReport()
             {
                 item.status = Status::good;
                 item.detail = (sketch ? pl("Z partiami-duchami miks mieści się w korytarzu celu ") : pl("Cały miks mieści się w korytarzu celu "))
-                              + quoted(juce::String::fromUTF8(currentTarget.name.c_str())) + "." + zonesText + curveText + arrangementText;
+                              + quoted(juce::String::fromUTF8(activeTarget().name.c_str())) + "." + zonesText + curveText + arrangementText + builtinNote();
             }
             else
             {
@@ -2318,8 +2439,33 @@ void BrainProcessor::buildReport()
                 {
                     if (region.hole() && !carriedByAChannel(mix.channels, region))
                     {
+                        // Phase 39: who could fill it: the part playing an octave under it, through overtones.
                         if (unfixable.size() < 3)
-                            unfixable.add(rangeText(region));
+                        {
+                            juce::String source;
+                            double best = 0.0;
+                            for (const auto& channel : mix.channels)
+                            {
+                                if (!channel.spectrumValid || !inMixSums(channel))
+                                    continue;
+                                double below = 0.0;
+                                for (int b = 0; b < ma::bus::kBands; ++b)
+                                {
+                                    const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+                                    if (hz >= region.lowHz / 2.0 && hz <= region.highHz / 2.0)
+                                        below += std::pow(10.0, channel.heardDb[static_cast<size_t>(b)] / 10.0);
+                                }
+                                if (below > best)
+                                {
+                                    best = below;
+                                    source = channel.name;
+                                }
+                            }
+                            unfixable.add(rangeText(region)
+                                          + (source.isEmpty() ? juce::String()
+                                                              : pl(" (wypełni je saturacja albo harmoniczne na ") + quoted(source)
+                                                                    + pl(", gra oktawę niżej; zakładka „Barwa” w jego Agencie)")));
+                        }
                         continue;
                     }
                     worst = std::max(worst, std::abs(region.deviationDb));
@@ -2331,7 +2477,7 @@ void BrainProcessor::buildReport()
                                         ? juce::String()
                                         : (parts.isEmpty() ? juce::String() : pl(" ")) + pl("Poza zasięgiem EQ: ")
                                               + unfixable.joinIntoString(", ")
-                                              + pl(" (nic tam nie gra: saturacja kanału, który ma tam alikwoty, albo nowa partia; widok „Aranż”).");
+                                              + pl(". Tam żaden kanał nie gra, EQ nie ma czego podbić; jeśli nic nie gra też oktawę niżej, to nowa partia (widok „Aranż”).");
                 if (parts.isEmpty())
                 {
                     item.status = Status::warning;
@@ -2341,6 +2487,9 @@ void BrainProcessor::buildReport()
                 {
                     item.status = worst >= 3.0 ? Status::problem : Status::warning;
                     item.detail = prefix + parts.joinIntoString(", ") + pl(". „Analizuj” podpowie, co zrobić.") + notMix + curveText + arrangementText;
+                    const auto bells = ozoneCurve(judged);
+                    if (!bells.isEmpty())
+                        item.detail += pl(" Czego kanały nie uniosą, zostaje na EQ w Ozone: ") + bells.joinIntoString("; ") + ".";
                 }
             }
         }
@@ -2461,6 +2610,92 @@ void BrainProcessor::buildReport()
             report.push_back(item);
     }
 
+    // Phase 38: nothing lost anywhere in the song. From the song's seconds, as the mix hears them now
+    // (each second's raw + trim power plus the channel's present EQ and cleanup), worked out every 2 s.
+    {
+        const auto nowMs = juce::Time::getMillisecondCounter();
+        if (lostAtMs == 0 || nowMs - lostAtMs >= kLostRefreshMs)
+        {
+            lostAtMs = nowMs;
+            lostSpans.clear();
+            lostNames.clear();
+            int last = -1;
+            for (const auto& [second, bin] : songBins)
+                if (bin.updates > 0)
+                    last = std::max(last, second);
+            std::vector<ma::AudibilityChannel> in;
+            for (const auto& channel : mix.channels)
+            {
+                if (!inMixSums(channel) || last < 0)
+                    continue;
+                ma::AudibilityChannel a;
+                a.valid = true;
+                a.background = channel.data.role == static_cast<int>(ma::Role::send);
+                a.secondsDb.resize(static_cast<size_t>(last + 1));
+                for (auto& sec : a.secondsDb)
+                    sec.fill(-200.0);
+                for (const auto& [second, bin] : songBins)
+                {
+                    const auto found = bin.sums.find(channel.owner);
+                    if (bin.updates <= 0 || found == bin.sums.end() || second < 0)
+                        continue;
+                    auto& sec = a.secondsDb[static_cast<size_t>(second)];
+                    for (int b = 0; b < ma::bus::kBands; ++b)
+                    {
+                        const auto at = static_cast<size_t>(b);
+                        const double p = found->second.power[at] / static_cast<double>(bin.updates);
+                        const double eq = channel.spectrumValid && channel.heardDb[at] > -150.0 && channel.rawDb[at] > -150.0
+                                              ? channel.heardDb[at] - channel.rawDb[at]
+                                              : 0.0;
+                        sec[at] = p > 1e-20 ? 10.0 * std::log10(p) + eq : -200.0;
+                    }
+                }
+                in.push_back(std::move(a));
+                lostNames.push_back(channel.name);
+            }
+            lostSpans = ma::findLostSpans(in);
+        }
+        MixSnapshot::ReportItem item;
+        item.title = pl("Słyszalność w czasie");
+        const auto clock = [](int second) {
+            return juce::String(second / 60) + ":" + juce::String(second % 60).paddedLeft('0', 2);
+        };
+        if (lostNames.empty())
+        {
+            item.detail = pl("Puść cały utwór od początku: sprawdzę, czy w którymś fragmencie jakiś ślad nie ginie.");
+        }
+        else if (lostSpans.empty())
+        {
+            item.status = Status::good;
+            item.detail = pl("W odsłuchanych fragmentach żaden ślad nie ginie na dłużej niż 3 s (każdy w swoim głównym paśmie).");
+        }
+        else
+        {
+            item.status = Status::warning;
+            auto spans = lostSpans;
+            std::stable_sort(spans.begin(), spans.end(), [](const auto& a, const auto& b) {
+                return a.spanShareDb - a.typicalShareDb < b.spanShareDb - b.typicalShareDb;
+            });
+            juce::StringArray parts;
+            for (size_t k = 0; k < spans.size() && k < kMaxLostListed; ++k)
+            {
+                const auto& span = spans[k];
+                auto part = quoted(lostNames[static_cast<size_t>(span.channel)]) + " " + clock(span.fromSecond) + pl("–")
+                            + clock(span.toSecond + 1) + " (" + hzText(span.lowHz) + pl("–") + hzText(span.highHz) + ", "
+                            + juce::String(span.typicalShareDb - span.spanShareDb, 1) + pl(" dB słabiej niż zwykle");
+                if (span.coveredBy >= 0)
+                    part += pl(", zasłania go ") + quoted(lostNames[static_cast<size_t>(span.coveredBy)]);
+                parts.add(part + ")");
+            }
+            if (spans.size() > kMaxLostListed)
+                parts.add(pl("i ") + juce::String(static_cast<int>(spans.size() - kMaxLostListed)) + pl(" innych"));
+            item.detail = pl("Ginie na chwilę: ") + parts.joinIntoString("; ")
+                          + pl(". Mózg ustawia balans na dropie, te fragmenty popraw automatyką głośności w FL: podnieś ten ślad "
+                               "albo ścisz zasłaniający na czas fragmentu (przed Agentem, w głośności kanału).");
+        }
+        report.push_back(item);
+    }
+
     // Phase 34: depth. How loud the sends (reverb, delay) are against the dry parts, 200 Hz-8 kHz.
     {
         double sends = 0.0, dry = 0.0;
@@ -2482,7 +2717,7 @@ void BrainProcessor::buildReport()
         MixSnapshot::ReportItem item;
         item.title = pl("Głębia (pogłos, delay)");
         item.group = MixSnapshot::ReportGroup::arrangement;
-        const auto times = depthTimesText(tempoBpm());
+        const auto times = reverbAdviceText(tempoBpm());
         if (dry <= 0.0)
             ;
         else if (names.isEmpty())
@@ -2511,7 +2746,7 @@ void BrainProcessor::buildReport()
         if (item.detail.isNotEmpty() && !feeds.isEmpty())
             item.detail += " " + feeds.joinIntoString("; ") + ".";
         if (item.detail.isNotEmpty() && times.isNotEmpty())
-            item.detail += pl(" Czasy ") + times + ".";
+            item.detail += " " + times + ". " + delayAdviceText(tempoBpm()) + ".";
         if (item.detail.isNotEmpty())
             report.push_back(item);
     }
@@ -3435,7 +3670,7 @@ void BrainProcessor::proposeOnce(const std::array<double, ma::kStemGroups>* grou
     {
         Proposal::Item item;
         item.change = change;
-        const auto targetName = quoted(juce::String::fromUTF8(currentTarget.name.c_str()));
+        const auto targetName = quoted(juce::String::fromUTF8(activeTarget().name.c_str()));
         const auto range = hzText(change.lowHz) + pl("–") + hzText(change.highHz);
         if (change.kind == ma::SolverChange::Kind::globalGain)
         {
@@ -3640,6 +3875,8 @@ juce::String panReasonText(ma::PanPlan::Reason reason, double inputBalanceDb)
     {
         case R::centreRole: return pl("stopa, bas, busy i wysyłki trzymają środek");
         case R::mainPart: return pl("główny wokal albo lead trzyma środek");
+        case R::carriesLow:
+            return pl("dużo grania poniżej 150 Hz (np. pętla ze stopą): przesunięcie zabrałoby stopę ze środka");
         case R::prePanned:
             return pl("wejście już przechyla się w ") + (inputBalanceDb > 0.0 ? pl("lewo") : pl("prawo")) + " o "
                    + juce::String(std::abs(inputBalanceDb), 1) + pl(" dB, to panorama producenta");
@@ -3798,6 +4035,7 @@ void BrainProcessor::proposeWholeMix()
         in.levelP95 = channel.data.levelP95 + channel.data.trimDb;
         in.truePeakDb = channel.data.learnedTruePeakDb + channel.data.trimDb;
         in.lowNoteHz = channel.data.lowNoteHz;
+        in.currentCleanup = channel.data.cleanup;
         in.intentionalDrive = channel.data.intentionalDrive != 0;
         in.contentRole = static_cast<ma::Role>(juce::jlimit(0, static_cast<int>(ma::Role::send), static_cast<int>(channel.data.detectedRole)));
         in.contentConfidence = channel.data.detectedConfidence;
@@ -3812,6 +4050,14 @@ void BrainProcessor::proposeWholeMix()
     }
     ma::ChainContext context;
     context.bpm = tempoBpm();
+    // Phase 39: where the target wants more, cleanup does not take it away.
+    if (mix.tonal.valid && activeTarget().valid())
+    {
+        context.tonalKnown = true;
+        for (int b = 0; b < ma::bus::kBands; ++b)
+            context.mixMinusCentreDb[static_cast<size_t>(b)]
+                = mix.tonal.mixDb[static_cast<size_t>(b)] > -149.0 ? mix.tonal.mixDb[static_cast<size_t>(b)] - activeTarget().centre[static_cast<size_t>(b)] : 0.0;
+    }
     const double peak = truePeakDb();
     context.headroomShortDb = std::isfinite(peak) ? std::max(0.0, peak - peakCeilingDb()) : 0.0;
     loudMasterPlan = {};
@@ -3948,7 +4194,9 @@ void BrainProcessor::proposeWholeMix()
             eqs.push_back(eq);
         }
         std::array<bool, ma::kStemGroups> present {}, ghostOnly {};
-        auto groups = stemGroupDb(true, present, nullptr, &eqs);
+        // Phase 39: before EQ. The tonal stage's bells (applied in earlier rounds or proposed now) shape the
+        // master towards the target; counted here they came back as level (a sub cut lifted with the trim).
+        auto groups = stemGroupDb(false, present, nullptr, &eqs);
         addGhostGroups(groups, present, ghostOnly);
         // Phase 29: without stem references, the typical house balance of the groups.
         if (typicalLevels)
@@ -4354,11 +4602,14 @@ void BrainProcessor::proposeWholeMix()
     // The times for the user's own reverb and delay plugins.
     if ((anySend || voice != nullptr) && bpm > 0.0)
     {
-        Proposal::Item item;
-        item.advisory = true;
-        item.selected = false;
-        item.text = pl("Pogłos i delay ") + depthTimesText(bpm) + pl(". Ustaw je w swojej wtyczce pogłosu i delayu");
-        chainItems.push_back(item);
+        for (const auto& text : { reverbAdviceText(bpm), delayAdviceText(bpm) })
+        {
+            Proposal::Item item;
+            item.advisory = true;
+            item.selected = false;
+            item.text = text + pl(". Ustaw to w swojej wtyczce");
+            chainItems.push_back(item);
+        }
     }
 
     // Phase 35: the bass's low end onto the kick's, in time (measured by the bass Agent with the kick on its sidechain).
@@ -5010,8 +5261,7 @@ void BrainProcessor::buildToolNotes(bool wholeMix)
                 });
                 auto why = masks ? pl("jego kolizje biorą na siebie inne narzędzia (ustępowanie, poziom grup) albo inne kanały")
                                  : pl("nie zasłania innych kanałów");
-                why += currentTarget.valid() ? pl(", a balans tonalny nie potrzebuje jego pasm")
-                                             : pl("; balansu tonalnego nie sprawdzam, bo nie ma celu (zakładka „Balans tonalny”)");
+                why += pl(", a balans tonalny nie potrzebuje jego pasm");
                 set(ma::bus::toolEq, D::notNeeded, why);
             }
         }
@@ -5473,7 +5723,7 @@ void BrainProcessor::proposeHarmonics()
     // Phase 27: a step may not push the balance further out of the target's corridor than it already
     // is (overtones on the kick and bass used to lift Low past it, and the next round could not undo
     // it). How far outside, summed over the bands, with the steps so far against what plays now.
-    const bool tonalKnown = mix.tonal.valid && currentTarget.valid();
+    const bool tonalKnown = mix.tonal.valid && activeTarget().valid();
     const auto masterAfter = tonalKnown ? tonalMasterSpectrum() : ma::Curve {};
     const auto outside = [&](const std::vector<ma::TranslationChannel>& t) {
         if (!tonalKnown)
@@ -5491,7 +5741,7 @@ void BrainProcessor::proposeHarmonics()
             if (was > 1e-20 && now > 1e-20)
                 master[static_cast<size_t>(b)] += 10.0 * std::log10(now / was);
         }
-        return ma::outsideCorridorDb(ma::compareToTarget(master, currentTarget));
+        return ma::outsideCorridorDb(ma::compareToTarget(master, activeTarget()));
     };
     const auto tonalOk = [&](const std::vector<ma::TranslationChannel>& test) {
         return !tonalKnown || outside(test) <= outside(trial) + kTranslationTonalSlackDb;
@@ -7256,7 +7506,7 @@ juce::String BrainProcessor::masteringReportHtml() const
     const auto& masterTonal = mix.sketch.active() && mix.sketch.tonal.valid ? mix.sketch.tonal : mix.tonal;
     if (masterTonal.valid && !masterTonal.regions.empty())
     {
-        out << "<li>" << pl("EQ na sumie (szeroko, względem celu ") << html(quoted(juce::String::fromUTF8(currentTarget.name.c_str()))) << "): ";
+        out << "<li>" << pl("EQ na sumie (szeroko, względem celu ") << html(quoted(juce::String::fromUTF8(activeTarget().name.c_str()))) << "): ";
         juce::StringArray parts;
         for (const auto& region : masterTonal.regions)
             parts.add((region.hole() ? "+" : pl("−")) + juce::String(std::abs(region.deviationDb), 1) + " dB " + hzText(region.lowHz) + pl("–")
@@ -7265,25 +7515,17 @@ juce::String BrainProcessor::masteringReportHtml() const
     }
     else if (masterTonal.valid)
     {
-        out << "<li>" << pl("EQ na sumie: balans mieści się w korytarzu celu ") << html(quoted(juce::String::fromUTF8(currentTarget.name.c_str())))
+        out << "<li>" << pl("EQ na sumie: balans mieści się w korytarzu celu ") << html(quoted(juce::String::fromUTF8(activeTarget().name.c_str())))
             << pl(", wystarczą drobne korekty do gustu.") << "</li>";
     }
     // Phase 24: what is left of each TBC range's distance from the centre (after "Zastosuj" it is
     // what the channels could not take): a broad move in Ozone's EQ or a Dynamics band's gain.
     if (masterTonal.valid)
     {
-        const auto zones = ma::zoneOffsets(masterTonal, currentTarget);
-        juce::StringArray moves;
-        for (int z = 0; z < ma::kTonalZones; ++z)
-        {
-            const auto& zone = zones[static_cast<size_t>(z)];
-            if (zone.valid && std::abs(zone.offsetDb) > 0.75 && std::abs(zone.offsetDb) < 4.0)
-                moves.add(zoneName(z) + " (" + hzText(zone.lowHz) + pl("–") + hzText(zone.highHz) + ") "
-                          + signedOneDecimal(-juce::jlimit(-1.5, 1.5, zone.offsetDb)) + " dB");
-        }
+        const auto moves = ozoneCurve(masterTonal);
         if (!moves.isEmpty())
-            out << "<li>" << pl("Do środka korytarza (jak zakresy w Tonal Balance; szeroki bell w EQ albo Band Gain w Dynamics): ")
-                << html(moves.joinIntoString(", "))
+            out << "<li>" << pl("Krzywa EQ do Ozone na resztę (Bell, kolejno): ")
+                << html(moves.joinIntoString("; "))
                 << pl(". Najpierw „Analizuj” i „Zastosuj” w Mózgu: zrobi to na kanałach, tu zostaje tylko reszta.")
                 << (afterLimiterOn && limiterTiltKnown() ? pl(" Liczone jak po limiterze do celu.") : juce::String()) << "</li>";
     }

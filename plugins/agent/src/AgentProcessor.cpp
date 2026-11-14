@@ -1693,6 +1693,16 @@ void AgentProcessor::applyLearned()
         plan.trimDb = kLearnMaxBoostDb;
         plan.limitedByPeak = false;
     }
+    // A send's (reverb, delay) level is the send knobs on its sources: the producer's balance of wet
+    // against dry. Learn never lifts it (lifting a quiet return to the role level put a bright tail
+    // almost as loud as the voice), only takes it down when it is louder than the role's place.
+    result.sendKept = plan.valid && role == ma::Role::send && plan.trimDb > 0.0;
+    if (result.sendKept)
+    {
+        plan.trimDb = 0.0;
+        plan.limitedByPeak = false;
+        result.boostCapped = false;
+    }
 
     result.serial += 1;
     inputShiftDb = 0.0; // measured anew
