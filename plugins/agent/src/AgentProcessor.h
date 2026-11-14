@@ -234,6 +234,9 @@ public:
     static constexpr const char* panMonoBelowId = "panMonoBelow";
     // Phase 34: a send's high cut (Hz, 20000 = off).
     static constexpr const char* highCutId = "highCut";
+    static constexpr const char* tailRatioId = "tailShorten";
+    double tailSecondsMeasured() const { return tailSeconds.load(); }
+    double tailReductionDb() const { return tailReduction.load(); }
     // Phase 35: the channel's own delay (ms), to line its low end up with the kick.
     static constexpr const char* alignDelayId = "alignDelay";
     static constexpr const char* sendDuckToId = "sendDuckTo";
@@ -378,6 +381,8 @@ private:
     ma::StereoShaper stereoShaper;
     ma::Panner panner;             // phase 33: the last stage
     ma::HighCut highCut;           // phase 34: after the cleanup
+    ma::TailShaper tailShaper;     // a send's tail shortened to the tempo, after the high cut
+    std::atomic<float> tailReduction { 0.0f };
     ma::LowAlignMeter alignMeter;  // phase 35: against the sidechain, before the delay
     ma::AlignDelay alignDelay;
     std::atomic<bool> alignValid { false };
@@ -485,7 +490,7 @@ private:
     std::array<std::array<std::atomic<float>, 3>, ma::kEqBands> backupEqAudio {};
     // DuckSettings (8), sync, polarity, harmonics (3), transients (3), cleanup (5), compressor (7), clipper (3), evener (3)
     // stereo (12 + the widener's 3, phase 25), saturation (4), unmask (2 x 5, phase 30)
-    static constexpr int kDynamicValues = 101; // phase 32: the dynamic EQ after the dips (25), phase 33: the pan (2), phase 34: depth (1), phase 35: delay (1)
+    static constexpr int kDynamicValues = 102; // phase 32: the dynamic EQ after the dips (25), phase 33: the pan (2), phase 34: depth (1), phase 35: delay (1), tail ratio (1)
     std::array<std::atomic<float>, kDynamicValues> backupDynamicsAudio {};
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(AgentProcessor)

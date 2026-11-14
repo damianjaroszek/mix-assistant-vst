@@ -3,7 +3,9 @@
 #include "Biquad.h"
 #include "SpectrumAnalyzer.h"
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <vector>
 
 namespace ma
@@ -15,7 +17,10 @@ namespace ma
 struct DepthSettings
 {
     float highCutHz = 0.0f; // 12 dB/oct low-pass; <= 0 = off
+    float tailRatio = 1.0f; // TailShaper: how many times faster the tail dies away; <= 1 = off
 };
+
+bool tailOn(const DepthSettings& depth);
 
 bool depthOn(const DepthSettings& depth);
 // What the high cut does at `hz`, dB (<= 0).
@@ -63,6 +68,31 @@ private:
     double topDb = -200.0, minDb = -200.0, lastDb = -200.0, since3 = -1.0, atMin = 0.0;
     int hops = 0;
 };
+
+// Shortens a tail that rings too long without touching the reverb or delay that makes it: a downward
+// expander against the part's own recent top. The level (30 ms mean square of the mono sum) under a
+// peak follower that forgets `kTailPeakFallDb` a second is pushed down `ratio - 1` times further, past
+// a 3 dB knee (so a steady wash is not modulated), at most `kMaxTailCutDb`. Both channels get one gain.
+constexpr double kTailPeakFallDb = 3.0;
+constexpr double kMaxTailCutDb = 36.0;
+constexpr float kMaxTailRatio = 8.0f;
+class TailShaper
+{
+public:
+    void prepare(double sampleRate);
+    void reset();
+    void setSettings(const DepthSettings& settings) { ratio = tailOn(settings) ? std::min(settings.tailRatio, kMaxTailRatio) : 1.0f; }
+    void process(float* const* channels, int numChannels, int numSamples);
+    double reductionDb() const { return -20.0 * std::log10(std::max(1e-6, gain)); }
+
+private:
+    double levelCoefficient = 0.0, openCoefficient = 0.0, closeCoefficient = 0.0, fallPerStep = 0.0;
+    double power = 0.0, peakDb = -200.0, gain = 1.0, targetGain = 1.0;
+    int untilStep = 0;
+    float ratio = 1.0f;
+};
+// The ratio that turns a tail of `measuredSeconds` (time to fall 60 dB) into one of `targetSeconds`.
+float tailRatioFor(double measuredSeconds, double targetSeconds);
 
 // A tail against the tempo: longer than a bar it runs into the next phrase.
 constexpr double kLongTailBars = 1.0;

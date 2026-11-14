@@ -2197,6 +2197,14 @@ void BrainProcessor::buildReport()
     }
 
     // Before and after the last "Zastosuj": the same measurements, so the change is a number and not a feeling.
+    if (autoUndone.isNotEmpty() && !scoreBefore.valid)
+    {
+        MixSnapshot::ReportItem item;
+        item.title = pl("Przed i po (ostatnie „Zastosuj”)");
+        item.status = Status::warning;
+        item.detail = autoUndone;
+        report.push_back(item);
+    }
     if (scoreBefore.valid)
     {
         MixSnapshot::ReportItem item;
@@ -2214,14 +2222,8 @@ void BrainProcessor::buildReport()
             lines.add(line(pl("odległość od środka korytarza (4 zakresy razem): "), scoreBefore.offCentreDb, now.offCentreDb, " dB"));
             lines.add(pl("kolizje: ") + juce::String(scoreBefore.collisions) + pl(" → ") + juce::String(now.collisions));
             lines.add(line(pl("szczyt względem głośności (PLR, mniej = gęściej): "), scoreBefore.plrDb, now.plrDb, " dB"));
-            if (now.outsideDb > scoreBefore.outsideDb + 1.0)
-                worse.add(pl("barwa poza korytarzem"));
-            if (now.offCentreDb > scoreBefore.offCentreDb + 1.0)
-                worse.add(pl("odległość od środka korytarza"));
-            if (now.collisions > scoreBefore.collisions + 1)
-                worse.add(pl("kolizje"));
-            if (now.plrDb > scoreBefore.plrDb + 1.0)
-                worse.add(pl("gęstość"));
+            juce::StringArray better;
+            scoreChange(now, worse, better);
             item.status = worse.isEmpty() ? Status::good : Status::warning;
             item.detail = lines.joinIntoString(pl("; ")) + "."
                           + (worse.isEmpty() ? pl(" Nic się nie pogorszyło.")
@@ -2935,11 +2937,14 @@ void BrainProcessor::buildReport()
             if (bars > 0.0)
             {
                 line += " (" + juce::String(bars, 1) + pl(" taktu)");
-                if (bars > ma::kLongTailBars)
+                if (ma::tailOn(channel.data.depth))
+                    line += pl(": Agent skraca go ") + juce::String(channel.data.depth.tailRatio, 1) + pl("×, do ok. taktu");
+                else if (bars > 1.1 * ma::kLongTailBars)
                 {
                     longTail = true;
-                    line += pl(": dłużej niż takt, ogon wchodzi w następną frazę; skróć Decay do ok. ")
-                            + juce::String(ma::depthTimes(tempoBpm()).decaySeconds, 1) + " s";
+                    line += pl(": dłużej niż takt, ogon wchodzi w następną frazę; kliknij „Analizuj”, Agent skróci go sam "
+                               "(albo skróć Decay / Feedback do ok. ")
+                            + juce::String(ma::depthTimes(tempoBpm()).decaySeconds, 1) + " s)";
                 }
             }
             tails.add(line);
@@ -4672,17 +4677,47 @@ void BrainProcessor::proposeWholeMix()
         anySend = true;
         const auto name = quoted(channel.name);
         const bool brainMade = (channel.data.brainTools & ma::bus::toolDepth) != 0;
-        if (plan.depthConsidered
-            && ((ma::depthOn(plan.depth) && std::abs(plan.depth.highCutHz - channel.data.depth.highCutHz) > 50.0f)
-                || (!ma::depthOn(plan.depth) && ma::depthOn(channel.data.depth) && brainMade)))
         {
-            Proposal::Item item;
-            item.action = Proposal::Item::Action::chain;
-            item.tool = Proposal::Item::ChainTool::depth;
-            item.owner = channel.owner;
-            item.depth = plan.depth;
-            item.text = name + ": " + depthText(plan);
-            chainItems.push_back(item);
+            // The high cut and the tail are one tool: what the plan does not touch stays as the Agent has it.
+            ma::DepthSettings wanted = channel.data.depth;
+            juce::StringArray texts;
+            if (plan.depthConsidered
+                && ((ma::depthOn(plan.depth) && std::abs(plan.depth.highCutHz - channel.data.depth.highCutHz) > 50.0f)
+                    || (!ma::depthOn(plan.depth) && ma::depthOn(channel.data.depth) && brainMade)))
+            {
+                wanted.highCutHz = plan.depth.highCutHz;
+                texts.add(depthText(plan));
+            }
+            // The tail against the tempo: measured on the Agent's input (before its own shortening, so
+            // planning again lands on the same ratio); longer than a bar it is shortened to a bar.
+            const double bar = tempoBpm() > 20.0 ? 240.0 / tempoBpm() : 0.0, tail = channel.data.tailSeconds;
+            if (bar > 0.0 && tail > 0.0)
+            {
+                const float ratio = tail > 1.1 * bar ? ma::tailRatioFor(tail, bar) : 1.0f;
+                const float current = std::max(1.0f, channel.data.depth.tailRatio);
+                if (ratio > 1.05f && std::abs(ratio - current) > 0.1f * ratio)
+                {
+                    wanted.tailRatio = ratio;
+                    texts.add(pl("ogon skrócony do taktu: wybrzmiewa ok. ") + juce::String(tail, 1) + " s (" + juce::String(tail / bar, 1)
+                              + pl(" taktu) i wchodzi w następną frazę, więc Agent ścisza jego koniec ") + juce::String(ratio, 1)
+                              + pl("× szybciej, do ok. ") + juce::String(bar, 1) + pl(" s. Pogłos i delay zostają, jak je ustawiłeś"));
+                }
+                else if (ratio <= 1.05f && current > 1.05f && brainMade)
+                {
+                    wanted.tailRatio = 1.0f;
+                    texts.add(pl("skracanie ogona wyłączone: ogon (") + juce::String(tail, 1) + pl(" s) mieści się już w takcie"));
+                }
+            }
+            if (!texts.isEmpty())
+            {
+                Proposal::Item item;
+                item.action = Proposal::Item::Action::chain;
+                item.tool = Proposal::Item::ChainTool::depth;
+                item.owner = channel.owner;
+                item.depth = wanted;
+                item.text = name + ": " + texts.joinIntoString("; ");
+                chainItems.push_back(item);
+            }
         }
 
         // Phase 36/37: what the send gives way to, and how.
@@ -5669,7 +5704,11 @@ void BrainProcessor::buildToolNotes(bool wholeMix)
             else if (!p.depthConsidered)
                 set(ma::bus::toolDepth, D::notChecked, pl("brak widma wysyłki albo reszty miksu"));
             else
-                set(ma::bus::toolDepth, ma::depthOn(p.depth) ? D::kept : D::notNeeded, depthText(p));
+                set(ma::bus::toolDepth, ma::depthOn(p.depth) || ma::tailOn(channel.data.depth) ? D::kept : D::notNeeded,
+                    depthText(p)
+                        + (ma::tailOn(channel.data.depth) ? pl("; ogon skracany ") + juce::String(channel.data.depth.tailRatio, 1) + pl("× do taktu")
+                           : channel.data.tailSeconds > 0.0f ? pl("; ogon ") + juce::String(channel.data.tailSeconds, 1) + pl(" s mieści się w takcie, bez skracania")
+                                                             : pl("; ogon jeszcze niezmierzony (za mało wybrzmień)")));
 
             // Phase 35: the bass against the kick in time.
             const auto advice = alignAdvice(channel.data);
@@ -7066,6 +7105,20 @@ std::array<std::int64_t, 5> BrainProcessor::itemSignature(const Proposal::Item& 
              static_cast<std::int64_t>(item.group), extra };
 }
 
+void BrainProcessor::scoreChange(const MixScore& now, juce::StringArray& worse, juce::StringArray& better) const
+{
+    const auto judge = [&](double before, double after, double step, const juce::String& name) {
+        if (after > before + step)
+            worse.add(name);
+        else if (after < before - step)
+            better.add(name);
+    };
+    judge(scoreBefore.outsideDb, now.outsideDb, 1.0, pl("barwa poza korytarzem"));
+    judge(scoreBefore.offCentreDb, now.offCentreDb, 1.0, pl("odległość od środka korytarza"));
+    judge(scoreBefore.collisions, now.collisions, 1.0, pl("kolizje"));
+    judge(scoreBefore.plrDb, now.plrDb, 1.0, pl("gęstość"));
+}
+
 BrainProcessor::MixScore BrainProcessor::scoreNow() const
 {
     MixScore score;
@@ -7084,6 +7137,7 @@ BrainProcessor::MixScore BrainProcessor::scoreNow() const
 int BrainProcessor::applyByUser()
 {
     stopRefining();
+    autoUndone = {};
     scoreBefore = scoreNow();
     // What the user unticked stays unticked in the rounds that follow.
     std::vector<std::array<std::int64_t, 5>> unticked;
@@ -7172,6 +7226,27 @@ void BrainProcessor::updateRefine(std::uint64_t now)
     if (left == 0 || refine.roundsLeft <= 0 || repeating)
     {
         refine.active = false;
+        // The rounds are over and the same measurements read worse than before the click, with nothing
+        // better to weigh against it: the Brain takes its own changes back rather than leave it as a to-do.
+        if (const auto after = scoreNow(); scoreBefore.valid && after.valid)
+        {
+            juce::StringArray worse, better;
+            scoreChange(after, worse, better);
+            if (!worse.isEmpty() && better.isEmpty())
+            {
+                const auto text = pl("Cofnąłem ostatnie „Zastosuj” sam: po zmianach pogorszyło się (") + worse.joinIntoString(", ")
+                                  + pl("), a nic się nie poprawiło. Barwa poza korytarzem ") + juce::String(scoreBefore.outsideDb, 1) + pl(" → ")
+                                  + juce::String(after.outsideDb, 1) + pl(" dB, kolizje ") + juce::String(scoreBefore.collisions) + pl(" → ")
+                                  + juce::String(after.collisions) + pl(", PLR ") + juce::String(scoreBefore.plrDb, 1) + pl(" → ")
+                                  + juce::String(after.plrDb, 1)
+                                  + pl(" dB. Miks jest jak przed kliknięciem. W propozycji odznacz kroki, których nie chcesz, i zastosuj resztę, "
+                                       "albo zostaw miks tak, jak jest.");
+                undoLast();
+                autoUndone = text;
+                refine.status = text;
+                return;
+            }
+        }
         // mixcheck: the last round's other changes (levels, EQ, a vocal rider) can lift the peak past what
         // its give-back left as margin. The rounds end inside the ceiling: only the analysis's own ceiling
         // cut goes out then, everything else stays as it is.
@@ -7220,6 +7295,7 @@ bool BrainProcessor::canUndo() const
 int BrainProcessor::undoLast()
 {
     scoreBefore = {};
+    autoUndone = {};
     stopRefining();
     if (comparing)
         setComparing(false);

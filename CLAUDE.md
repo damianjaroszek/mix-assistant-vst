@@ -352,6 +352,14 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   `ma::TailMeter` (Depth.h; 15 ms level every 10 ms, each fall >= 7 dB timed from its first 3 dB down, median as time to fall 60 dB,
   >= 4 falls) runs on every Agent's input, `AgentData::tailSeconds` (`bus::kVersion` 25); the "Głębia" item lists each send's tail in
   seconds and bars and goes amber over `kLongTailBars` 1. Tested on synthetic decays only (the test songs have no reverb returns).
+- Report items fixed automatically (bus v26): `ma::TailShaper` (Depth.h, after the high cut; a downward expander on the 30 ms level
+  against a peak follower forgetting 3 dB/s, 3 dB knee, <= 36 dB, one gain for both channels) with `DepthSettings::tailRatio`
+  (<= 1 off, Agent param `tailShorten`, packed dynamics 102 with the ratio last, 101 = before). `proposeWholeMix`: a send whose measured
+  tail (the Agent's input, so idempotent) is over 1.1 bars gets `tailRatioFor(tail, bar)`; a Brain-made ratio goes off when the tail fits;
+  high cut and tail share the depth item (what the plan leaves alone stays as the Agent has it). Loud master: besides drums within 6 dB,
+  any non-vocal part within 1 dB of the highest unclipped peak is a carrier; tonal carriers keep `kTonalKeepCrestDb` 8. After the
+  refining rounds, `scoreChange` worse on something and better on nothing makes the Brain undo its own apply (`autoUndone`, shown in the
+  "Przed i po" item and the refine status).
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

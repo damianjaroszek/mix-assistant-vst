@@ -787,6 +787,10 @@ private:
     };
     MixScore scoreNow() const;
     MixScore scoreBefore;
+    // What got worse and what got better since `scoreBefore` (names for the report).
+    void scoreChange(const MixScore& now, juce::StringArray& worse, juce::StringArray& better) const;
+    // Set when the refining rounds ended worse on every count that moved and the Brain undid them itself.
+    juce::String autoUndone;
     // Where the highest peak since the reset fell: the song position, whether that was the drop, and the
     // channel peaking highest at that moment.
     double topPeakDb = -INFINITY, topPeakAtSeconds = -1.0;

@@ -32,7 +32,7 @@ namespace ma::bus
 {
 
 constexpr std::uint32_t kMagic = 0x4D414255; // "MABU"
-constexpr std::uint32_t kVersion = 25; // a session per project: Brain entries in the header, AgentData::sessionId
+constexpr std::uint32_t kVersion = 26; // a session per project: Brain entries in the header, AgentData::sessionId
 constexpr int kMaxSlots = 128;
 constexpr int kNameLength = 48;
 constexpr int kBands = 40;            // ERB bands, as SpectrumAnalyzer with BandScale::erb

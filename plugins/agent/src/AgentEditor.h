@@ -112,6 +112,8 @@ private:
     // Phase 34: a send's high cut.
     juce::Label highCutLabel;
     juce::Slider highCutSlider;
+    juce::Label tailLabel;
+    juce::Slider tailSlider;
     juce::Label alignLabel, sendDuckLabel;
     juce::ComboBox sendDuckBox;
     juce::Slider alignSlider;

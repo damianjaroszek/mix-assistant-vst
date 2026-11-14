@@ -332,6 +332,10 @@ AgentEditor::AgentEditor(AgentProcessor& p)
     highCutLabel.setTooltip(pl("Cięcie góry (12 dB/okt.). Na wysyłce z pogłosem albo delayem ciemniejszy ogon stoi za suchymi "
                                "śladami i nie rozmywa ich góry: „Analizuj” ustawia 9 kHz, gdy wysyłka jest tak jasna jak reszta miksu. "
                                "20 kHz = wyłączone."));
+    styleLabel(tailLabel, pl("Ogon ×"), colours::quiet, 13.0f);
+    tailLabel.setTooltip(pl("Tylko dla wysyłki (pogłos, delay): ile razy szybciej ma wygasać ogon. Agent mierzy, jak długo wysyłka "
+                            "wybrzmiewa, a „Analizuj” ustawia skracanie tak, żeby ogon zmieścił się w takcie i nie wchodził w następną "
+                            "frazę. Twój pogłos i delay zostają nietknięte, ściszany jest tylko koniec ogona. 1,0 = wyłączone."));
     styleLabel(sendDuckLabel, pl("Ustępuje"), colours::quiet, 13.0f);
     sendDuckLabel.setTooltip(pl("Tylko dla wysyłki (pogłos, delay): komu ogon robi miejsce. Auto: Mózg sam rozpoznaje, co zasila wysyłkę; "
                                 "pogłos wokalu i muzyki ustępuje głównemu głosowi w jego paśmie, pogłos bębnów swoim uderzeniom "
@@ -379,6 +383,7 @@ AgentEditor::AgentEditor(AgentProcessor& p)
         { &panSlider, AgentProcessor::panId },
         { &panMonoSlider, AgentProcessor::panMonoBelowId },
         { &highCutSlider, AgentProcessor::highCutId },
+        { &tailSlider, AgentProcessor::tailRatioId },
         { &alignSlider, AgentProcessor::alignDelayId },
     };
     for (const auto& [slider, id] : chainSliders)
@@ -499,7 +504,7 @@ AgentEditor::AgentEditor(AgentProcessor& p)
          [this](auto area) { layoutTone(area); });
     page(chainPage, pl("Inżynier miksu"),
          { &chainTitle, &origins[1], &origins[2], &origins[3], &origins[4], &cleanLabel, &hpfLabel, &hpfSlider, &monoLabel, &monoSlider, &mudFreqLabel, &mudFreqSlider,
-           &mudGainLabel, &mudGainSlider, &highCutLabel, &highCutSlider, &sendDuckLabel, &sendDuckBox, &cleanStatus, &compLabel, &compOnButton, &compThresholdLabel, &compThresholdSlider,
+           &mudGainLabel, &mudGainSlider, &highCutLabel, &highCutSlider, &tailLabel, &tailSlider, &sendDuckLabel, &sendDuckBox, &cleanStatus, &compLabel, &compOnButton, &compThresholdLabel, &compThresholdSlider,
            &compRatioLabel, &compRatioSlider, &compAttackLabel, &compAttackSlider, &compReleaseLabel, &compReleaseSlider,
            &compKneeLabel, &compKneeSlider, &compMakeupLabel, &compMakeupSlider, &compStatus, &clipLabel, &clipOnButton,
            &clipCeilingLabel, &clipCeilingSlider, &clipSoftnessLabel, &clipSoftnessSlider, &clipStatus, &evenLabel,
@@ -622,6 +627,8 @@ void AgentEditor::timerCallback()
         const bool send = static_cast<int>(processor.parameters.getRawParameterValue(AgentProcessor::roleId)->load())
                           == static_cast<int>(ma::Role::send);
         sendDuckBox.setEnabled(send);
+        tailSlider.setEnabled(send);
+        tailLabel.setEnabled(send);
         sendDuckLabel.setEnabled(send);
     }
     const bool connected = processor.isConnectedToBrain();
@@ -803,6 +810,10 @@ void AgentEditor::updateChainStatus()
     for (const auto& notch : cleanup.notches)
         if (notch.db < -0.01f)
             clean.add(pl("rezonans ") + juce::String(notch.db, 1) + " dB @ " + juce::String(juce::roundToInt(notch.hz)) + " Hz");
+    if (ma::tailOn(dynamics.depth))
+        clean.add(pl("ogon ×") + juce::String(dynamics.depth.tailRatio, 1)
+                  + (processor.tailSecondsMeasured() > 0.0 ? pl(" (zmierzony ") + juce::String(processor.tailSecondsMeasured(), 1) + " s)" : juce::String())
+                  + (processor.tailReductionDb() > 0.5 ? pl(", teraz -") + juce::String(processor.tailReductionDb(), 0) + " dB" : juce::String()));
     cleanStatus.setText(clean.isEmpty() ? pl("Wyłączone. 0 Hz = filtr wyłączony.") : clean.joinIntoString(", "),
                         juce::dontSendNotification);
     cleanStatus.setColour(juce::Label::textColourId, clean.isEmpty() ? colours::quiet : colours::good);
@@ -1146,7 +1157,7 @@ void AgentEditor::layoutChain(juce::Rectangle<int> area)
     header(area, cleanLabel, nullptr, origin(ma::bus::toolCleanup));
     for (auto [label, slider] : { std::pair { &hpfLabel, &hpfSlider }, std::pair { &monoLabel, &monoSlider },
                                   std::pair { &mudFreqLabel, &mudFreqSlider }, std::pair { &mudGainLabel, &mudGainSlider },
-                                  std::pair { &highCutLabel, &highCutSlider } })
+                                  std::pair { &highCutLabel, &highCutSlider }, std::pair { &tailLabel, &tailSlider } })
         sliderRow(area, *label, *slider);
     {
         auto row = area.removeFromTop(24);

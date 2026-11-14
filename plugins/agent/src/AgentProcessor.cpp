@@ -56,7 +56,8 @@ void take(const float*& in, Settings& settings)
 // Phase 25: 62 since the stereo settings carry the widener (3 floats after the side bells).
 // Phase 30: 72 with the two dips at the end. Phase 32: 97 with the dynamic EQ after them.
 // Phase 33: 99 with the pan. Phase 34: 100 with the depth. Phase 35: 101 with the delay last.
-constexpr size_t kPackedDynamics = 101;
+constexpr size_t kPackedDynamics = 102; // the tail shaper's ratio last
+constexpr size_t kPackedBeforeTail = 101;
 constexpr size_t kPackedBeforeAlign = 100;
 constexpr size_t kPackedBeforeDepth = 99;
 constexpr size_t kPackedBeforePan = 97;
@@ -82,8 +83,9 @@ std::array<float, kPackedDynamics> packDynamics(const AgentProcessor::DynamicSta
     put(out, s.unmask);
     put(out, s.dynamicEq);
     put(out, s.pan);
-    put(out, s.depth);
+    *out++ = s.depth.highCutHz;
     put(out, s.align);
+    *out++ = s.depth.tailRatio;
     jassert(out == v.data() + v.size());
     return v;
 }
@@ -106,8 +108,9 @@ AgentProcessor::DynamicState unpackDynamics(const std::array<float, kPackedDynam
     take(in, s.unmask);
     take(in, s.dynamicEq);
     take(in, s.pan);
-    take(in, s.depth);
+    s.depth.highCutHz = *in++;
     take(in, s.align);
+    s.depth.tailRatio = *in++;
     return s;
 }
 
@@ -154,7 +157,7 @@ bool anyOn(const ma::PanSettings& p)
 
 bool anyOn(const ma::DepthSettings& d)
 {
-    return ma::depthOn(d);
+    return ma::depthOn(d) || ma::tailOn(d);
 }
 
 bool anyOn(const ma::AlignSettings& a)
@@ -520,6 +523,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout AgentProcessor::createLayout
         layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { highCutId, 16 }, "High cut", range, 20000.0f,
                                                                juce::AudioParameterFloatAttributes().withLabel("Hz")));
     }
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { tailRatioId, 18 }, "Tail shorten",
+                                                           Range { 1.0f, ma::kMaxTailRatio, 0.1f }, 1.0f,
+                                                           juce::AudioParameterFloatAttributes().withLabel("x")));
     layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { alignDelayId, 17 }, "Delay",
                                                            Range { 0.0f, ma::kMaxAlignDelayMs, 0.05f }, 0.0f,
                                                            juce::AudioParameterFloatAttributes().withLabel("ms")));
@@ -582,6 +588,7 @@ void AgentProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     stereoShaper.prepare(sampleRate);
     panner.prepare(sampleRate);
     highCut.prepare(sampleRate);
+    tailShaper.prepare(sampleRate);
     alignMeter.prepare(sampleRate);
     alignDelay.prepare(sampleRate, std::max(2, getTotalNumInputChannels()));
     balanceMeter.prepare(sampleRate);
@@ -781,6 +788,9 @@ void AgentProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     cleanup.process(mainBuffer.getArrayOfWritePointers(), numChannels, numSamples);
     highCut.setSettings(dynamics.depth);
     highCut.process(mainBuffer.getArrayOfWritePointers(), numChannels, numSamples);
+    tailShaper.setSettings(dynamics.depth);
+    tailShaper.process(mainBuffer.getArrayOfWritePointers(), numChannels, numSamples);
+    tailReduction.store(static_cast<float>(tailShaper.reductionDb()));
     stereoShaper.setSettings(dynamics.stereo);
     stereoShaper.setWidth(liveWidth()); // the user's: the same before and after
     stereoShaper.process(mainBuffer.getArrayOfWritePointers(), numChannels, numSamples);
@@ -1539,6 +1549,7 @@ void AgentProcessor::setDynamics(const DynamicState& state)
     setParam(panId, state.pan.position * 100.0f);
     setParam(panMonoBelowId, state.pan.monoBelowHz);
     setParam(highCutId, ma::depthOn(state.depth) ? state.depth.highCutHz : 20000.0f);
+    setParam(tailRatioId, ma::tailOn(state.depth) ? state.depth.tailRatio : 1.0f);
     setParam(alignDelayId, ma::alignOn(state.align) ? state.align.delayMs : 0.0f);
 }
 
@@ -1624,6 +1635,7 @@ AgentProcessor::DynamicState AgentProcessor::currentDynamics() const
     state.pan.position = value(panId) / 100.0f;
     state.pan.monoBelowHz = value(panMonoBelowId);
     state.depth.highCutHz = value(highCutId) >= 19990.0f ? 0.0f : value(highCutId);
+    state.depth.tailRatio = value(tailRatioId);
     state.align.delayMs = value(alignDelayId);
     return state;
 }
@@ -1938,7 +1950,8 @@ void AgentProcessor::setStateInformation(const void* data, int sizeInBytes)
     brainSet = {};
     brainSetBackup = {};
     const int dynamicCount = setValues.size() - 3 * ma::kEqBands;
-    if (dynamicCount == static_cast<int>(kPackedDynamics) || dynamicCount == static_cast<int>(kPackedBeforeAlign)
+    if (dynamicCount == static_cast<int>(kPackedDynamics) || dynamicCount == static_cast<int>(kPackedBeforeTail)
+        || dynamicCount == static_cast<int>(kPackedBeforeAlign)
         || dynamicCount == static_cast<int>(kPackedBeforeDepth)
         || dynamicCount == static_cast<int>(kPackedBeforePan)
         || dynamicCount == static_cast<int>(kPackedBeforeDynamicEq)
@@ -1954,7 +1967,8 @@ void AgentProcessor::setStateInformation(const void* data, int sizeInBytes)
             const ma::StereoSettings::Widener off {};
             floats.insert(floats.end() - 4, { off.amountDb, off.lowHz, off.delayMs });
         }
-        if (dynamicCount != static_cast<int>(kPackedDynamics) && dynamicCount != static_cast<int>(kPackedBeforeAlign)
+        if (dynamicCount != static_cast<int>(kPackedDynamics) && dynamicCount != static_cast<int>(kPackedBeforeTail)
+            && dynamicCount != static_cast<int>(kPackedBeforeAlign)
             && dynamicCount != static_cast<int>(kPackedBeforeDepth)
             && dynamicCount != static_cast<int>(kPackedBeforePan) && dynamicCount != static_cast<int>(kPackedBeforeDynamicEq))
         {
@@ -1963,7 +1977,8 @@ void AgentProcessor::setStateInformation(const void* data, int sizeInBytes)
             for (int d = 0; d < ma::kMaxUnmask; ++d)
                 floats.insert(floats.end(), { off.on, off.hz, off.q, off.depthDb, off.keyBands });
         }
-        if (dynamicCount != static_cast<int>(kPackedDynamics) && dynamicCount != static_cast<int>(kPackedBeforeAlign)
+        if (dynamicCount != static_cast<int>(kPackedDynamics) && dynamicCount != static_cast<int>(kPackedBeforeTail)
+            && dynamicCount != static_cast<int>(kPackedBeforeAlign)
             && dynamicCount != static_cast<int>(kPackedBeforeDepth)
             && dynamicCount != static_cast<int>(kPackedBeforePan))
         {
@@ -1972,17 +1987,21 @@ void AgentProcessor::setStateInformation(const void* data, int sizeInBytes)
             const auto* f = reinterpret_cast<const float*>(&off);
             floats.insert(floats.end(), f, f + sizeof(off) / sizeof(float));
         }
-        if (dynamicCount != static_cast<int>(kPackedDynamics) && dynamicCount != static_cast<int>(kPackedBeforeAlign)
+        if (dynamicCount != static_cast<int>(kPackedDynamics) && dynamicCount != static_cast<int>(kPackedBeforeTail)
+            && dynamicCount != static_cast<int>(kPackedBeforeAlign)
             && dynamicCount != static_cast<int>(kPackedBeforeDepth))
         {
             // Saved before phase 33: in the centre.
             const ma::PanSettings centre {};
             floats.insert(floats.end(), { centre.position, centre.monoBelowHz });
         }
-        if (dynamicCount != static_cast<int>(kPackedDynamics) && dynamicCount != static_cast<int>(kPackedBeforeAlign))
+        if (dynamicCount != static_cast<int>(kPackedDynamics) && dynamicCount != static_cast<int>(kPackedBeforeTail)
+            && dynamicCount != static_cast<int>(kPackedBeforeAlign))
             floats.push_back(0.0f); // saved before phase 34: no high cut
-        if (dynamicCount != static_cast<int>(kPackedDynamics))
+        if (dynamicCount != static_cast<int>(kPackedDynamics) && dynamicCount != static_cast<int>(kPackedBeforeTail))
             floats.push_back(0.0f); // saved before phase 35: no delay
+        if (dynamicCount != static_cast<int>(kPackedDynamics))
+            floats.push_back(1.0f); // saved before the tail shaper: off
         std::array<float, kPackedDynamics> packed {};
         std::copy(floats.begin(), floats.end(), packed.begin());
         brainSet.dynamics = unpackDynamics(packed);

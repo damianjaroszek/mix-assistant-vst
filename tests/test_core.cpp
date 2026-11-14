@@ -4185,6 +4185,60 @@ void testTailMeter()
             meter.process(block.data(), nullptr, 512);
         check(!meter.valid() && meter.seconds() == 0.0, "a steady signal has no tail to measure");
     }
+    {
+        // The shaper turns a 4 s tail into about a bar (1.92 s at 125 BPM), measured by the same meter.
+        const double from = 4.0, to = 1.92;
+        ma::DepthSettings depth;
+        depth.tailRatio = ma::tailRatioFor(from, to);
+        check(depth.tailRatio > 1.5f && depth.tailRatio < ma::kMaxTailRatio && ma::tailRatioFor(1.0, 1.92) == 1.0f, "a ratio for a long tail, none for a short one");
+        ma::TailShaper shaper;
+        shaper.prepare(rate);
+        shaper.setSettings(depth);
+        ma::TailMeter before, after;
+        before.prepare(rate);
+        after.prepare(rate);
+        std::uint32_t seed = 777u;
+        std::vector<float> left(512), right(512);
+        const double perSample = std::pow(10.0, -60.0 / (20.0 * from * rate));
+        double gain = 0.0, steadyIn = 0.0, steadyOut = 0.0;
+        long long n = 0;
+        const long long every = static_cast<long long>(3.84 * rate), total = static_cast<long long>(60.0 * rate);
+        while (n < total)
+        {
+            for (size_t i = 0; i < left.size(); ++i)
+            {
+                if (n % every == 0)
+                    gain = 0.5;
+                seed = seed * 1664525u + 1013904223u;
+                left[i] = right[i] = static_cast<float>(gain * (static_cast<double>(seed >> 8) / 8388608.0 - 1.0));
+                gain *= perSample;
+                ++n;
+            }
+            before.process(left.data(), right.data(), 512);
+            float* io[2] = { left.data(), right.data() };
+            shaper.process(io, 2, 512);
+            after.process(left.data(), right.data(), 512);
+        }
+        std::printf("      tail shaper: ratio %.1f, %.2f s -> %.2f s (wanted %.2f)\n", depth.tailRatio, before.seconds(), after.seconds(), to);
+        check(after.valid() && std::abs(after.seconds() - to) < 0.5, "the shortened tail lands near the target");
+        // A steady signal passes untouched.
+        shaper.reset();
+        for (int block = 0; block < 400; ++block)
+        {
+            for (size_t i = 0; i < left.size(); ++i)
+            {
+                seed = seed * 1664525u + 1013904223u;
+                left[i] = right[i] = static_cast<float>(0.25 * (static_cast<double>(seed >> 8) / 8388608.0 - 1.0));
+                steadyIn += left[i] * left[i];
+            }
+            float* io[2] = { left.data(), right.data() };
+            shaper.process(io, 2, 512);
+            for (size_t i = 0; i < left.size(); ++i)
+                steadyOut += left[i] * left[i];
+        }
+        std::printf("      tail shaper on a steady wash: %.2f dB\n", 10.0 * std::log10(steadyOut / steadyIn));
+        check(10.0 * std::log10(steadyOut / steadyIn) > -0.5, "a steady wash is left alone");
+    }
     check(std::abs(ma::tailBars(1.92, 125.0) - 1.0) < 1e-9 && ma::tailBars(1.0, 0.0) == 0.0, "a tail in bars at the tempo");
 }
 
