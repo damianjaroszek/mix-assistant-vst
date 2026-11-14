@@ -9,6 +9,7 @@ add_library(ma_core STATIC
     src/GainStaging.cpp
     src/ChannelAnalyzer.cpp
     src/MixBus.cpp
+    src/MasterCheck.cpp
     src/Masking.cpp
     src/CorrelationMeter.cpp
     src/ChannelEq.cpp

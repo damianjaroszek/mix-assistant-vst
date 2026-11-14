@@ -36,6 +36,9 @@ void initialise(Region& region)
             brain.heartbeatMs.store(0);
             brain.spectraWantedUntil.store(0);
             brain.compareBefore.store(0);
+            brain.resetEpoch.store(0);
+            brain.master.sequence.store(0);
+            brain.master.heartbeatMs.store(0);
         }
         for (auto& slot : region.slots)
         {
@@ -83,6 +86,9 @@ BrainEntry* claimBrain(Region& region, std::uint64_t sessionId, std::uint64_t pr
             brain.processId.store(processId);
             brain.spectraWantedUntil.store(0);
             brain.compareBefore.store(0);
+            brain.resetEpoch.store(0);
+            brain.master.sequence.store(0);
+            brain.master.heartbeatMs.store(0);
             brain.heartbeatMs.store(nowMs);
             return &brain;
         }
@@ -99,6 +105,44 @@ const BrainEntry* findBrain(const Region& region, std::uint64_t sessionId, std::
             return &brain;
     }
     return nullptr;
+}
+
+void publishMaster(BrainEntry& brain, const MasterValues& values, std::uint64_t nowMs)
+{
+    auto& m = brain.master;
+    m.sequence.fetch_add(1); // odd: being written
+    m.seconds = values.seconds;
+    m.integratedLufs = values.integratedLufs;
+    m.maxShortTermLufs = values.maxShortTermLufs;
+    m.truePeakDb = values.truePeakDb;
+    m.sideDb = values.sideDb;
+    m.lowSideDb = values.lowSideDb;
+    std::memcpy(m.bandsDb, values.bandsDb, sizeof(m.bandsDb));
+    m.sequence.fetch_add(1);
+    m.heartbeatMs.store(nowMs);
+}
+
+bool readMaster(const BrainEntry& brain, MasterValues& out, std::uint64_t nowMs)
+{
+    const auto& m = brain.master;
+    if (!isAlive(m.heartbeatMs.load(), nowMs))
+        return false;
+    for (int attempt = 0; attempt < 4; ++attempt)
+    {
+        const auto before = m.sequence.load();
+        if (before & 1u)
+            continue;
+        out.seconds = m.seconds;
+        out.integratedLufs = m.integratedLufs;
+        out.maxShortTermLufs = m.maxShortTermLufs;
+        out.truePeakDb = m.truePeakDb;
+        out.sideDb = m.sideDb;
+        out.lowSideDb = m.lowSideDb;
+        std::memcpy(out.bandsDb, m.bandsDb, sizeof(out.bandsDb));
+        if (m.sequence.load() == before)
+            return true;
+    }
+    return false;
 }
 
 std::uint64_t chooseSession(const Region& region, std::uint64_t current, std::uint64_t processId, std::uint64_t nowMs, std::uint64_t missingMs)

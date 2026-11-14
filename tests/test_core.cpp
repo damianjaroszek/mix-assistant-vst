@@ -32,6 +32,7 @@
 #include "ma/GainStaging.h"
 #include "ma/LevelStats.h"
 #include "ma/Masking.h"
+#include "ma/MasterCheck.h"
 #include "ma/MixBus.h"
 #include "ma/CorrelationMeter.h"
 #include "ma/LoudnessMeter.h"
@@ -4119,6 +4120,56 @@ void testAlignment()
     }
 }
 
+// "Kontrola mastera": what mastering added, took off the peaks and did to the tone.
+void testMasterCheck()
+{
+    const int bands = ma::SpectrumAnalyzer::numBandsFor(ma::BandScale::erb);
+    ma::MasterSide before, after;
+    before.valid = after.valid = true;
+    before.seconds = 30.0;
+    after.seconds = 29.5;
+    before.integratedLufs = -20.0;
+    before.truePeakDb = -6.0;
+    after.integratedLufs = -7.0;
+    after.truePeakDb = -1.0;
+    after.lowSideDb = -30.0;
+    for (int b = 0; b < bands; ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        before.bandsDb[static_cast<size_t>(b)] = -30.0;
+        after.bandsDb[static_cast<size_t>(b)] = -17.0 + (hz >= 9000.0 ? 4.0 : 0.0); // mastering lifts the top 4 dB
+    }
+    const auto result = ma::compareMaster(before, after);
+    check(result.valid, "master check: both sides measured the same stretch");
+    checkNear(result.gainDb, 13.0, 0.01, "master check: loudness added");
+    checkNear(result.densityDb, 8.0, 0.01, "master check: what came off the peaks");
+    check(result.largestZone == 3 && result.zoneChangeDb[3] > 3.5 && std::abs(result.zoneChangeDb[1]) < 0.5,
+          "master check: the top is the range mastering moved");
+    check(!result.overs && !result.lowSideWide, "master check: peak and low end fine");
+    const auto tilt = ma::cappedMasterTilt(result);
+    check(tilt[static_cast<size_t>(bands - 1)] <= ma::kMasterTiltCapDb + 1e-9 && tilt[static_cast<size_t>(bands - 1)] > 2.5,
+          "master check: the tilt is capped");
+    auto hot = after;
+    hot.truePeakDb = 0.4;
+    hot.lowSideDb = -8.0;
+    check(ma::compareMaster(before, hot).overs && ma::compareMaster(before, hot).lowSideWide, "master check: overs and a wide low end are flagged");
+    auto other = after;
+    other.seconds = 12.0;
+    check(!ma::compareMaster(before, other).valid, "master check: different stretches do not compare");
+
+    auto region = std::make_unique<ma::bus::Region>();
+    ma::bus::initialise(*region);
+    auto* entry = ma::bus::claimBrain(*region, 77, 1, 1000);
+    ma::bus::MasterValues values, read;
+    check(entry != nullptr && !ma::bus::readMaster(*entry, read, 1000), "master check: nothing on the bus before the plugin writes");
+    values.seconds = 12.0f;
+    values.integratedLufs = -7.5f;
+    values.bandsDb[5] = -21.0f;
+    ma::bus::publishMaster(*entry, values, 1000);
+    check(ma::bus::readMaster(*entry, read, 1500) && read.integratedLufs == -7.5f && read.bandsDb[5] == -21.0f, "master check: the report crosses the bus");
+    check(!ma::bus::readMaster(*entry, read, 60000), "master check: a stale report is not read");
+}
+
 // Engineer's review: a note is not a tonal problem, a tom keeps its body, the clap its place.
 void testReviewFixes()
 {
@@ -4225,6 +4276,7 @@ int main()
     testStereoHysteresis();
     testLoudMasterClip();
     testReviewFixes();
+    testMasterCheck();
     testSectionAutomation();
     testEnergyMap();
     testGhostNoise();

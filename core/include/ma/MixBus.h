@@ -32,7 +32,7 @@ namespace ma::bus
 {
 
 constexpr std::uint32_t kMagic = 0x4D414255; // "MABU"
-constexpr std::uint32_t kVersion = 23; // a session per project: Brain entries in the header, AgentData::sessionId
+constexpr std::uint32_t kVersion = 24; // a session per project: Brain entries in the header, AgentData::sessionId
 constexpr int kMaxSlots = 128;
 constexpr int kNameLength = 48;
 constexpr int kBands = 40;            // ERB bands, as SpectrumAnalyzer with BandScale::erb
@@ -280,6 +280,24 @@ struct Slot
     ToolNotes notes;
 };
 
+// "Kontrola mastera": the plugin after the mastering chain writes what it measures into its Brain's entry
+// (own sequence lock). Everything is since the Brain's last reset (`BrainEntry::resetEpoch`), like the
+// Brain's own master measurements, so the two compare.
+struct MasterReport
+{
+    std::atomic<std::uint32_t> sequence;
+    std::uint32_t reserved;
+    std::atomic<std::uint64_t> heartbeatMs;
+    float seconds;          // analysed since the reset
+    float integratedLufs;
+    float maxShortTermLufs; // the loudest 3 s
+    float truePeakDb;
+    float sideDb;           // side minus mid, 150 Hz up (dB)
+    float lowSideDb;        // side minus mid below 120 Hz
+    float bandsDb[kBands];  // average ERB spectrum, like the Brain's master analyser
+    float reserved2[2];
+};
+
 // One per Brain that is running: FL can have two projects open (two instances), and their
 // plugins all map the same file.
 constexpr int kMaxBrains = 4;
@@ -290,7 +308,8 @@ struct BrainEntry
     std::atomic<std::uint64_t> heartbeatMs;        // this Brain is alive
     std::atomic<std::uint64_t> spectraWantedUntil; // its Agents compute live spectra until this time
     std::atomic<std::uint32_t> compareBefore;      // A/B: its Agents play their settings from before the last apply
-    std::uint32_t reserved;
+    std::atomic<std::uint32_t> resetEpoch;         // goes up when the Brain starts measuring from scratch
+    MasterReport master;
 };
 
 struct Header
@@ -314,6 +333,15 @@ void initialise(Region& region);
 BrainEntry* claimBrain(Region& region, std::uint64_t sessionId, std::uint64_t processId, std::uint64_t nowMs);
 // Agent side: the alive Brain of `sessionId`; with 0 (not joined yet) any alive Brain. Null if none.
 const BrainEntry* findBrain(const Region& region, std::uint64_t sessionId, std::uint64_t nowMs);
+// Master check side: writes its report into the entry; the Brain reads a consistent copy (false: none yet,
+// stale, or it kept changing).
+struct MasterValues
+{
+    float seconds = 0.0f, integratedLufs = -200.0f, maxShortTermLufs = -200.0f, truePeakDb = -200.0f, sideDb = -200.0f, lowSideDb = -200.0f;
+    float bandsDb[kBands] {};
+};
+void publishMaster(BrainEntry& brain, const MasterValues& values, std::uint64_t nowMs);
+bool readMaster(const BrainEntry& brain, MasterValues& out, std::uint64_t nowMs);
 // Agent side: the session to belong to. One that is alive is kept. An Agent without one joins the
 // Brain in its own process, else the only Brain alive. One whose Brain has been gone for
 // `missingMs` >= kRejoinMs (the Brain was replaced; a project still loading has its Brain up long
