@@ -10,10 +10,13 @@
 // four ranges Tonal Balance Control shows, loudness, peaks, dynamics and width. report.md holds the
 // numbers, the Brain's report, its proposal and its decision per tool and channel.
 //
-// The Brain's timers run on the wall clock, so the audio runs at about real time.
+// The plugins' timers are ticked by the rendered audio on a test clock (`ma::clock::testMs`), so a
+// run is faster than real time and gives the same numbers every time.
 
 #include "AgentProcessor.h"
 #include "BrainProcessor.h"
+#include "MasterProcessor.h"
+#include "Clock.h"
 #include "MaUi.h"
 
 #include "ma/LoudnessMeter.h"
@@ -95,7 +98,9 @@ int roleFromName(const String& fileName)
         return static_cast<int>(ma::Role::kick);
     if (any({ "vox", "vocal", "voc", "lead vox", "acapella", "adlib", "choir" }))
         return static_cast<int>(ma::Role::vocal);
-    if (any({ "snare", "clap", "hat", "hh", "perc", "shaker", "ride", "cymbal", "crash", "toms", "conga", "bongo", "top", "loop", "drum" }))
+    if (any({ "snare", "clap" })) // "KickSnare" is caught as a kick above
+        return static_cast<int>(ma::Role::clap);
+    if (any({ "hat", "hh", "perc", "shaker", "ride", "cymbal", "crash", "toms", "conga", "bongo", "top", "loop", "drum" }))
         return static_cast<int>(ma::Role::percussion);
     if (any({ "fx", "riser", "sweep", "impact", "noise", "uplifter", "downlifter", "atmos", "reverse" })) // before bass: "BassFX"
         return static_cast<int>(ma::Role::effects);
@@ -306,6 +311,7 @@ int main(int argc, char** argv)
     Array<File> targetRefs;
     double bpm = 124.0;
     String name;
+    bool masterCheck = false; // a stand-in mastering chain (gain, clip, top lift) and the master check plugin after it
     bool kickCable = false;  // the kick on each bass Agent's sidechain input, as a cable in FL
     double shiftBassMs = 0.0; // move the bass stems in time (> 0 later), to check the alignment
     for (int i = 1; i < argc; ++i)
@@ -322,6 +328,8 @@ int main(int argc, char** argv)
             outDir = File(next());
         else if (arg == "--name")
             name = next();
+        else if (arg == "--master-check")
+            masterCheck = true;
         else if (arg == "--kick-cable")
             kickCable = true;
         else if (arg == "--shift-bass")
@@ -404,7 +412,7 @@ int main(int argc, char** argv)
             raw.addFrom(c, 0, t.audio, c, 0, length);
     }
     int kickTrack = -1;
-    for (size_t t = 0; t < tracks.size() && kickCable; ++t)
+    for (size_t t = 0; t < tracks.size(); ++t)
         if (tracks[t].role == static_cast<int>(ma::Role::kick))
         {
             kickTrack = static_cast<int>(t);
@@ -458,7 +466,7 @@ int main(int argc, char** argv)
     {
         auto agent = std::make_unique<AgentProcessor>();
         auto layout = agent->getBusesLayout();
-        const bool cable = kickTrack >= 0 && t.role == static_cast<int>(ma::Role::bass);
+        const bool cable = kickCable && kickTrack >= 0 && t.role == static_cast<int>(ma::Role::bass);
         cabled.push_back(cable);
         if (layout.inputBuses.size() > 1)
             layout.inputBuses.getReference(1) = cable ? AudioChannelSet::stereo()
@@ -484,7 +492,43 @@ int main(int argc, char** argv)
     brain->setEditorOpen(true); // the Agents send their live spectra only while the Brain's window is open
     if (!targetRefs.isEmpty())
         brain->selectTarget("mixcheck");
-    MessageManager::getInstance()->runDispatchLoopUntil(300);
+
+    // The test clock: the Agents tick at their 10 Hz and the Brain at its 5 Hz of rendered time.
+    for (auto& agent : agents)
+        agent->useTestTicks();
+    brain->useTestTicks();
+    std::unique_ptr<MasterProcessor> master;
+    if (masterCheck)
+    {
+        master = std::make_unique<MasterProcessor>();
+        master->prepareToPlay(rate, kBlock);
+        master->useTestTicks();
+    }
+    AudioBuffer<float> mastered(2, kBlock);
+    float shelfState[2] = { 0.0f, 0.0f };
+    double clockMs = 1000.0;
+    int64 ticks = 0;
+    ma::clock::testMs.store(static_cast<std::int64_t>(clockMs));
+    const auto advance = [&](double ms) {
+        const double end = clockMs + ms;
+        while (static_cast<int64>(end / 100.0) > ticks)
+        {
+            ++ticks;
+            clockMs = static_cast<double>(ticks) * 100.0;
+            ma::clock::testMs.store(static_cast<std::int64_t>(clockMs));
+            for (auto& agent : agents)
+                agent->testTick();
+            if (ticks % 2 == 0)
+                brain->testTick();
+            if (master != nullptr)
+                master->testTick();
+            if (ticks % 10 == 0)
+                MessageManager::getInstance()->runDispatchLoopUntil(1); // async updates, if any
+        }
+        clockMs = end;
+        ma::clock::testMs.store(static_cast<std::int64_t>(clockMs));
+    };
+    advance(300.0);
 
     AudioBuffer<float> block(4, kBlock), sum(2, kBlock);
     MidiBuffer midi;
@@ -498,6 +542,13 @@ int main(int argc, char** argv)
     for (auto& a : outAnalysers)
         a.prepare(rate, ma::BandScale::erb);
     bool measureOut = false;
+    // Each part's output over the drop, kept to see which of them make the peaks of the sum.
+    std::vector<AudioBuffer<float>> dropOut(tracks.size());
+    for (auto& b : dropOut)
+    {
+        b.setSize(2, static_cast<int>(dropLength));
+        b.clear();
+    }
     const auto play = [&](int64 from, double seconds, bool loop, AudioBuffer<float>* render) {
         const auto total = static_cast<int64>(seconds * rate);
         int64 done = 0;
@@ -535,21 +586,40 @@ int main(int argc, char** argv)
                 {
                     const float* ch[] = { block.getReadPointer(0), block.getReadPointer(1) };
                     outAnalysers[t].process(ch, 2, n);
+                    for (int c = 0; c < 2; ++c)
+                        dropOut[t].copyFrom(c, static_cast<int>(position - dropStart), block, c, 0, n);
                 }
                 for (int c = 0; c < 2; ++c)
                     sum.addFrom(c, 0, block, c, 0, n);
             }
             AudioBuffer<float> sumView(sum.getArrayOfWritePointers(), 2, n);
             brain->processBlock(sumView, midi);
+            if (master != nullptr)
+            {
+                // The stand-in for Ozone: +14 dB, the top lifted 3 dB from about 6 kHz, hard ceiling at -1 dBFS.
+                const float gain = 5.0f, ceiling = 0.891f, k = static_cast<float>(1.0 - std::exp(-2.0 * 3.14159265 * 6000.0 / rate));
+                for (int c = 0; c < 2; ++c)
+                {
+                    const float* in = sum.getReadPointer(c);
+                    float* out = mastered.getWritePointer(c);
+                    for (int i = 0; i < n; ++i)
+                    {
+                        shelfState[c] += k * (in[i] - shelfState[c]);
+                        const float lifted = in[i] + 0.41f * (in[i] - shelfState[c]);
+                        out[i] = jlimit(-ceiling, ceiling, gain * lifted);
+                    }
+                }
+                AudioBuffer<float> masteredView(mastered.getArrayOfWritePointers(), 2, n);
+                master->processBlock(masteredView, midi);
+            }
             if (render != nullptr && position < render->getNumSamples())
                 for (int c = 0; c < 2; ++c)
                     render->copyFrom(c, static_cast<int>(position), sum, c, 0, std::min<int>(n, render->getNumSamples() - static_cast<int>(position)));
             done += n;
-            // Timers on the wall clock: keep the audio at about real time.
-            if (++blocks % 20 == 0)
-                MessageManager::getInstance()->runDispatchLoopUntil(static_cast<int>(20.0 * kBlock / rate * 1000.0));
+            ++blocks;
+            advance(1000.0 * n / rate);
         }
-        MessageManager::getInstance()->runDispatchLoopUntil(50);
+        advance(50.0);
     };
 
     // 1. Learn on the drop.
@@ -560,7 +630,7 @@ int main(int argc, char** argv)
     for (auto& agent : agents)
         if (agent->isLearning())
             agent->stopLearning();
-    MessageManager::getInstance()->runDispatchLoopUntil(500);
+    advance(500.0);
     for (size_t t = 0; t < tracks.size(); ++t)
     {
         const auto r = agents[t]->lastResult();
@@ -693,6 +763,190 @@ int main(int argc, char** argv)
             md << " | " << (in > -120.0 && o > -120.0 ? signedDb(o - in) : String("-"));
         }
         md << " |\n";
+    }
+
+    // Who makes the peaks of the sum: the 32 highest peaks of the drop (at least 100 ms apart), each part's
+    // share of the sample there, its own level and crest, and what leaving it out would do to the sum's
+    // crest (peak minus RMS): a part that only brings peaks lowers it a lot when it goes.
+    {
+        const int n = static_cast<int>(dropLength);
+        AudioBuffer<float> total(2, n);
+        total.clear();
+        for (const auto& b : dropOut)
+            for (int c = 0; c < 2; ++c)
+                total.addFrom(c, 0, b, c, 0, n);
+        const auto crestOf = [n](const AudioBuffer<float>& b, double& peakDb, double& rmsDb) {
+            double peak = 0.0, square = 0.0;
+            for (int c = 0; c < 2; ++c)
+            {
+                const float* x = b.getReadPointer(c);
+                for (int i = 0; i < n; ++i)
+                {
+                    peak = std::max(peak, static_cast<double>(std::abs(x[i])));
+                    square += static_cast<double>(x[i]) * x[i];
+                }
+            }
+            peakDb = 20.0 * std::log10(std::max(peak, 1e-9));
+            rmsDb = 10.0 * std::log10(std::max(square / (2.0 * n), 1e-18));
+        };
+        double sumPeak = 0.0, sumRms = 0.0;
+        crestOf(total, sumPeak, sumRms);
+        struct Peak
+        {
+            int at = 0, channel = 0;
+            float value = 0.0f;
+        };
+        std::vector<Peak> peaks;
+        std::vector<char> taken(static_cast<size_t>(n), 0);
+        const int apart = static_cast<int>(0.1 * rate);
+        for (int k = 0; k < 32; ++k)
+        {
+            Peak best;
+            for (int c = 0; c < 2; ++c)
+            {
+                const float* x = total.getReadPointer(c);
+                for (int i = 0; i < n; ++i)
+                    if (!taken[static_cast<size_t>(i)] && std::abs(x[i]) > std::abs(best.value))
+                        best = { i, c, x[i] };
+            }
+            if (best.value == 0.0f)
+                break;
+            peaks.push_back(best);
+            for (int i = std::max(0, best.at - apart); i < std::min(n, best.at + apart); ++i)
+                taken[static_cast<size_t>(i)] = 1;
+        }
+        md << "\n## Who makes the peaks (drop)\n\nSum: peak " << db(sumPeak) << " dBFS, RMS " << db(sumRms) << ", crest " << db(sumPeak - sumRms)
+           << " dB; the lowest of the 32 peaks is " << db(peaks.empty() ? 0.0 : 20.0 * std::log10(std::abs(peaks.back().value)) - sumPeak)
+           << " dB under the highest.\n\n| channel | share of the peaks | peak dBFS | RMS dBFS | crest | sum's crest without it |\n|---|---|---|---|---|---|\n";
+        struct Row
+        {
+            String name;
+            double share = 0.0, peakDb = 0.0, rmsDb = 0.0, without = 0.0;
+        };
+        std::vector<Row> rows;
+        AudioBuffer<float> rest(2, n);
+        for (size_t t = 0; t < tracks.size(); ++t)
+        {
+            Row row;
+            row.name = tracks[t].name;
+            for (const auto& peak : peaks)
+                row.share += dropOut[t].getSample(peak.channel, peak.at) / peak.value;
+            row.share /= std::max<size_t>(1, peaks.size());
+            crestOf(dropOut[t], row.peakDb, row.rmsDb);
+            for (int c = 0; c < 2; ++c)
+            {
+                rest.copyFrom(c, 0, total, c, 0, n);
+                rest.addFrom(c, 0, dropOut[t], c, 0, n, -1.0f);
+            }
+            double restPeak = 0.0, restRms = 0.0;
+            crestOf(rest, restPeak, restRms);
+            row.without = (restPeak - restRms) - (sumPeak - sumRms);
+            rows.push_back(row);
+        }
+        // What if: nothing but the kick may peak higher than the kick's peak plus this (hard-clipped here, the
+        // crudest tool): how far the sum's peak comes down and what it costs in level.
+        double kickPeakDb = -200.0;
+        for (size_t t = 0; t < tracks.size(); ++t)
+            if (static_cast<int>(t) == kickTrack)
+                kickPeakDb = rows[t].peakDb;
+        String whatIf;
+        if (kickPeakDb > -100.0)
+            for (const double over : { 0.0, -3.0, -6.0 })
+            {
+                const float ceiling = static_cast<float>(std::pow(10.0, (kickPeakDb + over) / 20.0));
+                rest.clear();
+                for (size_t t = 0; t < tracks.size(); ++t)
+                    for (int c = 0; c < 2; ++c)
+                    {
+                        const float* x = dropOut[t].getReadPointer(c);
+                        float* y = rest.getWritePointer(c);
+                        const bool kick = static_cast<int>(t) == kickTrack;
+                        for (int i = 0; i < n; ++i)
+                            y[i] += kick ? x[i] : jlimit(-ceiling, ceiling, x[i]);
+                    }
+                double p = 0.0, r = 0.0;
+                crestOf(rest, p, r);
+                whatIf << "- other parts held to the kick's peak " << signedDb(over) << " dB: sum peak " << signedDb(p - sumPeak) << " dB, RMS "
+                       << signedDb(r - sumRms) << " dB, crest " << db(p - r) << " dB\n";
+            }
+        // What if the kick were louder (the anchor of a club mix): the sum's crest with the kick up 3 and 6 dB.
+        if (kickPeakDb > -100.0)
+            for (const double up : { 3.0, 6.0 })
+            {
+                const float g = static_cast<float>(std::pow(10.0, up / 20.0)) - 1.0f;
+                for (int c = 0; c < 2; ++c)
+                {
+                    rest.copyFrom(c, 0, total, c, 0, n);
+                    rest.addFrom(c, 0, dropOut[static_cast<size_t>(kickTrack)], c, 0, n, g);
+                }
+                double p = 0.0, r = 0.0;
+                crestOf(rest, p, r);
+                whatIf << "- kick " << signedDb(up) << " dB: sum peak " << signedDb(p - sumPeak) << " dB, RMS " << signedDb(r - sumRms) << " dB, crest "
+                       << db(p - r) << " dB\n";
+            }
+        // More what-ifs: everything but the drums pumping under the kick (a whole-signal duck following the
+        // kick's envelope), and each part's own peaks clipped a little.
+        if (kickPeakDb > -100.0)
+        {
+            std::vector<float> envelope(static_cast<size_t>(n), 0.0f);
+            const float* kl = dropOut[static_cast<size_t>(kickTrack)].getReadPointer(0);
+            const float* kr = dropOut[static_cast<size_t>(kickTrack)].getReadPointer(1);
+            const float release = static_cast<float>(std::exp(-1.0 / (0.12 * rate)));
+            float e = 0.0f, top = 1e-9f;
+            for (int i = 0; i < n; ++i)
+            {
+                e = std::max(std::max(std::abs(kl[i]), std::abs(kr[i])), e * release);
+                envelope[static_cast<size_t>(i)] = e;
+                top = std::max(top, e);
+            }
+            for (const double depth : { 3.0, 6.0 })
+            {
+                rest.clear();
+                for (size_t t = 0; t < tracks.size(); ++t)
+                {
+                    const bool drums = tracks[t].role == static_cast<int>(ma::Role::kick) || ma::isPercussion(static_cast<ma::Role>(tracks[t].role));
+                    for (int c = 0; c < 2; ++c)
+                    {
+                        const float* x = dropOut[t].getReadPointer(c);
+                        float* y = rest.getWritePointer(c);
+                        for (int i = 0; i < n; ++i)
+                            y[i] += drums ? x[i] : x[i] * static_cast<float>(std::pow(10.0, -depth * std::min(1.0f, envelope[static_cast<size_t>(i)] / top) / 20.0));
+                    }
+                }
+                double p = 0.0, r = 0.0;
+                crestOf(rest, p, r);
+                whatIf << "- everything but the drums ducks " << db(depth) << " dB under the kick: sum peak " << signedDb(p - sumPeak) << " dB, RMS "
+                       << signedDb(r - sumRms) << " dB, crest " << db(p - r) << " dB\n";
+            }
+        }
+        for (const double clip : { 3.0, 6.0 })
+            for (const bool bassOnly : { true, false })
+            {
+                rest.clear();
+                for (size_t t = 0; t < tracks.size(); ++t)
+                {
+                    const bool held = bassOnly ? tracks[t].role == static_cast<int>(ma::Role::bass) : static_cast<int>(t) != kickTrack;
+                    const float ceiling = static_cast<float>(std::pow(10.0, (rows[t].peakDb - (held ? clip : 0.0)) / 20.0));
+                    for (int c = 0; c < 2; ++c)
+                    {
+                        const float* x = dropOut[t].getReadPointer(c);
+                        float* y = rest.getWritePointer(c);
+                        for (int i = 0; i < n; ++i)
+                            y[i] += jlimit(-ceiling, ceiling, x[i]);
+                    }
+                }
+                double p = 0.0, r = 0.0;
+                crestOf(rest, p, r);
+                whatIf << "- " << (bassOnly ? "bass parts" : "every part but the kick") << " clipped " << db(clip) << " dB under their own peak: sum peak "
+                       << signedDb(p - sumPeak) << " dB, RMS " << signedDb(r - sumRms) << " dB, crest " << db(p - r) << " dB\n";
+            }
+        std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.share > b.share; });
+        for (const auto& row : rows)
+            if (row.rmsDb > -90.0)
+                md << "| " << row.name << " | " << String(roundToInt(row.share * 100.0)) << "% | " << db(row.peakDb) << " | " << db(row.rmsDb) << " | "
+                   << db(row.peakDb - row.rmsDb) << " | " << signedDb(row.without) << " |\n";
+        if (whatIf.isNotEmpty())
+            md << "\nKick peak " << db(kickPeakDb) << " dBFS. What if:\n" << whatIf;
     }
 
     md << "\n## Collisions\n\nBefore: " << String(static_cast<int>(before.masking.issues.size())) << ", after: "

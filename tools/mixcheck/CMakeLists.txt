@@ -8,12 +8,15 @@ target_sources(MixCheck PRIVATE
     ${CMAKE_SOURCE_DIR}/plugins/agent/src/AgentProcessor.cpp
     ${CMAKE_SOURCE_DIR}/plugins/agent/src/AgentEditor.cpp
     ${CMAKE_SOURCE_DIR}/plugins/brain/src/BrainProcessor.cpp
-    ${CMAKE_SOURCE_DIR}/plugins/brain/src/BrainEditor.cpp)
+    ${CMAKE_SOURCE_DIR}/plugins/brain/src/BrainEditor.cpp
+    ${CMAKE_SOURCE_DIR}/plugins/master/src/MasterProcessor.cpp
+    ${CMAKE_SOURCE_DIR}/plugins/master/src/MasterEditor.cpp)
 
 target_include_directories(MixCheck PRIVATE
     ${CMAKE_SOURCE_DIR}/plugins/common
     ${CMAKE_SOURCE_DIR}/plugins/agent/src
-    ${CMAKE_SOURCE_DIR}/plugins/brain/src)
+    ${CMAKE_SOURCE_DIR}/plugins/brain/src
+    ${CMAKE_SOURCE_DIR}/plugins/master/src)
 
 target_compile_definitions(MixCheck PRIVATE
     JucePlugin_Name="mixcheck"
@@ -32,3 +35,5 @@ target_link_libraries(MixCheck PRIVATE
 # Both plugins define the plugin factory; here neither is a plugin, so the Agent's gets another name.
 set_source_files_properties(${CMAKE_SOURCE_DIR}/plugins/agent/src/AgentProcessor.cpp
     PROPERTIES COMPILE_DEFINITIONS createPluginFilter=createAgentFilter)
+set_source_files_properties(${CMAKE_SOURCE_DIR}/plugins/master/src/MasterProcessor.cpp
+    PROPERTIES COMPILE_DEFINITIONS createPluginFilter=createMasterFilter)

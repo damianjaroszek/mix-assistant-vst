@@ -294,7 +294,7 @@ bool carriedByAChannel(const std::vector<MixSnapshot::Channel>& channels, const 
 
 int groupOfChannel(const MixSnapshot::Channel& channel)
 {
-    return ma::stemGroupForRole(static_cast<ma::Role>(juce::jlimit(0, static_cast<int>(ma::Role::send), static_cast<int>(channel.data.role))));
+    return ma::stemGroupForRole(static_cast<ma::Role>(juce::jlimit(0, ma::kRoles - 1, static_cast<int>(channel.data.role))));
 }
 
 // Phase 19: runs of the song's seconds (gaps up to 2 s bridged, runs under 2 s left out), as
@@ -764,15 +764,20 @@ void BrainProcessor::timerCallback()
     }
 
     const auto now = ma::SharedSession::nowMs();
-    region->header.brainHeartbeatMs.store(now);
+    brainEntry = ma::bus::claimBrain(*region, sessionId, ma::SharedSession::processId(), now);
+    if (brainEntry != nullptr)
+        brainEntry->heartbeatMs.store(now);
     if (resetAtMs != 0 && now >= resetAtMs)
     {
         resetAtMs = 0;
         requestReset();
     }
-    if (editorOpen && !useProfiles)
-        region->header.spectraWantedUntil.store(now + kSpectraRequestMs);
+    if (editorOpen && !useProfiles && brainEntry != nullptr)
+        brainEntry->spectraWantedUntil.store(now + kSpectraRequestMs);
 
+    if (brainEntry != nullptr)
+        brainEntry->resetEpoch.store(resetEpoch);
+    updateMasterCheck(brainEntry, now);
     collectChannels(*region, now);
     accumulateDrop();
     updateKey();
@@ -1077,6 +1082,9 @@ void BrainProcessor::collectChannels(ma::bus::Region& region, std::uint64_t now)
         MixSnapshot::Channel channel;
         channel.owner = slot.owner.load();
         if (channel.owner == 0 || !ma::bus::read(slot, channel.data, now))
+            continue;
+        // Another project's Agent (a second FL open): not ours. One that has not joined yet is.
+        if (channel.data.sessionId != 0 && channel.data.sessionId != sessionId)
             continue;
 
         channel.data.name[ma::bus::kNameLength - 1] = '\0';
@@ -1729,9 +1737,93 @@ void BrainProcessor::setTonalAfterLimiter(bool on)
     parameters.state.setProperty("tonalAfterLimiter", on, nullptr);
 }
 
+// "Kontrola mastera": what the plugin after the mastering chain measures against our own master
+// measurements since the same reset.
+void BrainProcessor::updateMasterCheck(const ma::bus::BrainEntry* entry, std::uint64_t nowMs)
+{
+    masterAfter = {};
+    masterCheck = {};
+    ma::bus::MasterValues values;
+    mix.masterCheckPresent = entry != nullptr && ma::bus::readMaster(*entry, values, nowMs);
+    if (!mix.masterCheckPresent)
+        return;
+    masterAfter.valid = true;
+    masterAfter.seconds = values.seconds;
+    masterAfter.integratedLufs = values.integratedLufs;
+    masterAfter.maxShortTermLufs = values.maxShortTermLufs;
+    masterAfter.truePeakDb = values.truePeakDb;
+    masterAfter.sideDb = values.sideDb;
+    masterAfter.lowSideDb = values.lowSideDb;
+    for (size_t b = 0; b < masterAfter.bandsDb.size() && b < static_cast<size_t>(ma::bus::kBands); ++b)
+        masterAfter.bandsDb[b] = values.bandsDb[b];
+    ma::MasterSide before;
+    // The playback simulator and the audible ghosts sit in our output: what comes after them is not the mix.
+    before.valid = !capturing && !comparing && previewSystem.load() == 0 && !ghostAudible.load();
+    before.seconds = secondsAnalysed();
+    before.integratedLufs = std::isfinite(integratedLufs()) ? integratedLufs() : -200.0;
+    before.truePeakDb = std::isfinite(truePeakDb()) ? truePeakDb() : -200.0;
+    before.bandsDb = averageSpectrum();
+    masterCheck = ma::compareMaster(before, masterAfter);
+}
+
+juce::String BrainProcessor::masterCheckVerdict(MixSnapshot::Status& status) const
+{
+    using Status = MixSnapshot::Status;
+    status = Status::unknown;
+    const auto& after = masterAfter;
+    if (after.seconds < ma::kMasterMinimumSeconds || after.integratedLufs < -100.0)
+        return pl("Wtyczka po Ozone jest podłączona. Puść drop (albo cały utwór): zbieram pomiar po masteringu.");
+    juce::String text = pl("Master: ") + juce::String(after.integratedLufs, 1) + " LUFS"
+                        + (after.maxShortTermLufs > -100.0 ? pl(" (najgłośniejsze 3 s ") + juce::String(after.maxShortTermLufs, 1) + ")" : juce::String())
+                        + pl(", szczyt ") + juce::String(after.truePeakDb, 1) + pl(" dBTP, PLR ") + juce::String(after.truePeakDb - after.integratedLufs, 1)
+                        + pl(" dB. Twoje wzorce klubowe: drop od −4 do −10 LUFS, PLR od 5 do 10 dB.");
+    if (!masterCheck.valid)
+        return text + pl(" Porównanie z miksem przed Ozone pojawi się, gdy oba pomiary obejmą ten sam fragment (wyłącz symulację odsłuchu, "
+                         "kliknij „Od nowa” i puść drop).");
+    status = Status::good;
+    text += pl("\nOzone dodał ") + juce::String(masterCheck.gainDb, 1) + pl(" dB głośności i zabrał szczytom ") + juce::String(masterCheck.densityDb, 1)
+            + pl(" dB (miks miał PLR ") + juce::String(masterCheck.plrBeforeDb, 1) + " dB).";
+    if (masterCheck.densityDb > 6.0)
+    {
+        status = Status::warning;
+        text += pl(" To dużo pracy dla limitera: uderzenia tracą kształt")
+                + (loudMasterPlan.loudest.isNotEmpty() ? pl(". Najwyższe szczyty miksu robi „") + loudMasterPlan.loudest + pl("”") : juce::String())
+                + pl(". Kliknij „Analizuj” (cały łańcuch): propozycja przytnie szczyty na śladach, zanim trafią do Ozone.");
+    }
+    static const char* const zoneNames[] = { "dół (40–250 Hz)", "niski środek (250 Hz–2 kHz)", "wysoki środek (2–9 kHz)", "góra (9–16 kHz)" };
+    juce::StringArray moved;
+    for (int z = 0; z < ma::kTonalZones; ++z)
+        if (std::abs(masterCheck.zoneChangeDb[static_cast<size_t>(z)]) >= ma::kMasterToneChangeDb)
+            moved.add(pl(zoneNames[z]) + " " + (masterCheck.zoneChangeDb[static_cast<size_t>(z)] > 0 ? "+" : "")
+                      + juce::String(masterCheck.zoneChangeDb[static_cast<size_t>(z)], 1) + " dB");
+    if (!moved.isEmpty())
+    {
+        status = Status::warning;
+        text += pl("\nOzone zmienia barwę: ") + moved.joinIntoString(", ")
+                + pl(". Tak duża korekta na masterze to znak, że miks powinien to mieć sam. Balans tonalny liczę teraz po Ozone, "
+                     "więc „Analizuj” zaproponuje poprawkę w miksie, a Ozone będzie miał mniej do roboty.");
+    }
+    else
+        text += pl("\nBarwa: Ozone nie zmienia żadnego zakresu o więcej niż 2 dB. Balans tonalny liczę po Ozone.");
+    if (masterCheck.overs)
+    {
+        status = Status::problem;
+        text += pl("\nSzczyt po masteringu przekracza −0.1 dBTP: ustaw sufit limitera w Ozone na −1 dBTP, inaczej MP3 i streaming będą przesterowane.");
+    }
+    if (masterCheck.lowSideWide)
+    {
+        status = status == Status::problem ? status : Status::warning;
+        text += pl("\nPo masteringu dół poniżej 120 Hz nie jest w mono (side ") + juce::String(after.lowSideDb, 1)
+                + pl(" dB względem mid): sprawdź poszerzanie w Ozone, klubowe systemy sumują dół.");
+    }
+    if (after.sideDb > -100.0)
+        text += pl("\nSzerokość po masteringu (side do mid od 150 Hz): ") + juce::String(after.sideDb, 1) + pl(" dB; wzorce: od −12 do −2 dB.");
+    return text;
+}
+
 bool BrainProcessor::limiterTiltKnown() const
 {
-    return previewSeconds.load() >= kMinimumSeconds;
+    return masterCheck.valid || previewSeconds.load() >= kMinimumSeconds;
 }
 
 ma::Curve BrainProcessor::limiterTilt() const
@@ -1739,6 +1831,9 @@ ma::Curve BrainProcessor::limiterTilt() const
     ma::Curve tilt {};
     if (!limiterTiltKnown())
         return tilt;
+    // Measured after the real mastering chain: that is the tone the listener gets.
+    if (masterCheck.valid)
+        return ma::cappedMasterTilt(masterCheck);
     // Only the shape counts (the level is the master target's): the mean over the range the tonal
     // balance is normalised on comes off first. Our limiter is a plain broadband one; a mastering
     // maximizer is gentler on the low end, so what is left is capped.
@@ -1797,7 +1892,7 @@ juce::StringArray BrainProcessor::ozoneCurve(const ma::TonalComparison& tonal) c
 juce::String BrainProcessor::builtinNote() const
 {
     return currentTarget.valid() ? juce::String()
-                                 : pl(" To wbudowany cel z dwóch masterów house, szeroki jak korytarz TBC; własny („Nowy cel”, "
+                                 : pl(" To wbudowany cel z 13 klubowych masterów; własny („Nowy cel”, "
                                       "2-3 referencje) zawsze ma pierwszeństwo.");
 }
 
@@ -2085,7 +2180,53 @@ void BrainProcessor::buildReport()
         {
             item.status = Status::problem;
             item.detail = pl("Szczyt ") + juce::String(peak - ceiling, 1) + pl(" dB ponad limitem ")
-                          + ma::ui::formatDb(ceiling, "dBTP") + pl(". Ścisz kanały (Agent: niższy cel) zamiast sumy.");
+                          + ma::ui::formatDb(ceiling, "dBTP")
+                          + (topPeakAtSeconds >= 0.0 && !topPeakInDrop
+                                 ? pl(". Pada poza dropem, więc „Analizuj” na dropie go nie widzi: ścisz w tym miejscu ślad, który go robi "
+                                      "(automatyka głośności w FL), albo puść cały utwór i kliknij „Analizuj” jeszcze raz.")
+                                 : pl(". Ścisz kanały (Agent: niższy cel) zamiast sumy."));
+        }
+        if (std::isfinite(peak) && topPeakAtSeconds >= 0.0)
+        {
+            const int at = juce::roundToInt(topPeakAtSeconds);
+            item.detail += pl(" Najwyższy szczyt pada w ") + juce::String(at / 60) + ":" + juce::String(at % 60).paddedLeft('0', 2)
+                           + (topPeakInDrop ? juce::String() : pl(" (poza dropem)"))
+                           + (topPeakChannel.isNotEmpty() ? pl("; najwyżej sięga wtedy „") + topPeakChannel + pl("”.") : juce::String("."));
+        }
+        report.push_back(item);
+    }
+
+    // Before and after the last "Zastosuj": the same measurements, so the change is a number and not a feeling.
+    if (scoreBefore.valid)
+    {
+        MixSnapshot::ReportItem item;
+        item.title = pl("Przed i po (ostatnie „Zastosuj”)");
+        const auto now = scoreNow();
+        if (refine.active || !now.valid)
+            item.detail = pl("Puść drop: po zmianach mierzę od nowa, wynik pojawi się za chwilę.");
+        else
+        {
+            const auto line = [](const juce::String& what, double before, double after, const char* unit) {
+                return what + juce::String(before, 1) + pl(" → ") + juce::String(after, 1) + unit;
+            };
+            juce::StringArray lines, worse;
+            lines.add(line(pl("barwa poza korytarzem celu: "), scoreBefore.outsideDb, now.outsideDb, " dB"));
+            lines.add(line(pl("odległość od środka korytarza (4 zakresy razem): "), scoreBefore.offCentreDb, now.offCentreDb, " dB"));
+            lines.add(pl("kolizje: ") + juce::String(scoreBefore.collisions) + pl(" → ") + juce::String(now.collisions));
+            lines.add(line(pl("szczyt względem głośności (PLR, mniej = gęściej): "), scoreBefore.plrDb, now.plrDb, " dB"));
+            if (now.outsideDb > scoreBefore.outsideDb + 1.0)
+                worse.add(pl("barwa poza korytarzem"));
+            if (now.offCentreDb > scoreBefore.offCentreDb + 1.0)
+                worse.add(pl("odległość od środka korytarza"));
+            if (now.collisions > scoreBefore.collisions + 1)
+                worse.add(pl("kolizje"));
+            if (now.plrDb > scoreBefore.plrDb + 1.0)
+                worse.add(pl("gęstość"));
+            item.status = worse.isEmpty() ? Status::good : Status::warning;
+            item.detail = lines.joinIntoString(pl("; ")) + "."
+                          + (worse.isEmpty() ? pl(" Nic się nie pogorszyło.")
+                                             : pl(" Pogorszyło się: ") + worse.joinIntoString(", ")
+                                                   + pl(". Porównaj na słuch („Przed / po”); „Cofnij” przywraca poprzedni stan."));
         }
         report.push_back(item);
     }
@@ -2095,6 +2236,16 @@ void BrainProcessor::buildReport()
         MixSnapshot::ReportItem item;
         item.title = pl("Gotowość do głośnego mastera");
         item.detail = previewVerdict(item.status);
+        report.push_back(item);
+    }
+
+    // "Kontrola mastera": the mix after the real mastering chain.
+    if (mix.masterCheckPresent)
+    {
+        MixSnapshot::ReportItem item;
+        item.title = pl("Po masteringu (Kontrola mastera)");
+        item.afterMastering = true;
+        item.detail = masterCheckVerdict(item.status);
         report.push_back(item);
     }
 
@@ -2262,7 +2413,7 @@ void BrainProcessor::buildReport()
                        + (noStats.isEmpty() ? pl(" (projekt sprzed fazy 23, brak szczytu)") : juce::String()))
                   + pl(" → kompresja, clipper, wyrównanie basu, rola, strój stopy"));
         lines.add((currentTarget.valid() ? yes + pl("cel tonalny ") + quoted(juce::String::fromUTF8(currentTarget.name.c_str()))
-                                         : no + pl("własny cel tonalny (do tego czasu wbudowany „Typowy house”)"))
+                                         : no + pl("własny cel tonalny (do tego czasu wbudowany „Klubowy”)"))
                   + pl(" → balans tonalny, korekcje barwy"));
         lines.add((currentStems.valid() ? yes + pl("referencje ze stemów ") + quoted(juce::String::fromUTF8(currentStems.name.c_str()))
                                         : no + pl("referencje ze stemów (proporcje grup i szkic: typowy house)"))
@@ -2414,7 +2565,9 @@ void BrainProcessor::buildReport()
                 offsets.add(zoneName(z) + " " + signedOneDecimal(zone.offsetDb));
                 offCentre = offCentre || std::abs(zone.offsetDb) > 0.75;
             }
-            const auto curveText = afterLimiterOn && limiterTiltKnown()
+            const auto curveText = afterLimiterOn && masterCheck.valid
+                                       ? pl(" Krzywa zmierzona po Ozone („Kontrola mastera”), więc porównuję to, co usłyszy słuchacz.")
+                                       : afterLimiterOn && limiterTiltKnown()
                                        ? pl(" Krzywa jak po limiterze do ") + juce::String(masterTargetLufs(), 1)
                                              + pl(" LUFS (szacunek z podglądu mastera, referencje są masterami).")
                                        : pl(" Krzywa miksu tak, jak gra (bez limitera).");
@@ -2555,9 +2708,21 @@ void BrainProcessor::buildReport()
     // Kick and bass in time: dynamic give-way and polarity, measured by Agents with a sidechain.
     {
         juce::StringArray noSignal, cancelling, ducking, keyed;
-        bool kick = false, bass = false, anySidechain = false;
+        bool kick = false, bass = false, anySidechain = false, kickPlays = false;
+        for (const auto& channel : mix.channels)
+            kickPlays = kickPlays || (channel.data.role == 1 && channel.data.inputRmsDb > -50.0f);
+        mix.bassWithoutCable.clear();
         for (const auto& channel : mix.channels)
         {
+            // The cable only shows while the kick sends signal down it, so the answer is taken then and kept.
+            if (channel.data.role == 2)
+            {
+                if (kickPlays)
+                    bassCable[channel.owner] = channel.data.sidechainConnected != 0;
+                const auto known = bassCable.find(channel.owner);
+                if (known != bassCable.end() && !known->second)
+                    mix.bassWithoutCable.add(channel.name);
+            }
             kick = kick || channel.data.role == 1;
             bass = bass || channel.data.role == 2;
             const bool connected = channel.data.sidechainConnected != 0;
@@ -2596,16 +2761,29 @@ void BrainProcessor::buildReport()
         }
         else if (!keyed.isEmpty())
         {
-            item.status = Status::good;
-            item.detail = pl("Ustępuje stopie bez kabla (Agent stopy podaje obwiednię przez wspólną pamięć): ") + joinNames(keyed)
-                          + pl(". Fazę stopa-bas sprawdzi tylko sidechain: podłącz stopę do Agenta basu, jeśli chcesz ją znać.");
-        }
-        else if (kick && bass)
-        {
-            item.detail = pl("Podłącz stopę jako sidechain do Agenta basu, żeby sprawdzić fazę i ustępować dynamicznie.");
+            item.status = Status::warning;
+            item.detail = pl("Ustępuje stopie bez kabla: ") + joinNames(keyed) + ".";
         }
         if (!keyed.isEmpty() && anySidechain && item.status == Status::good)
             item.detail += pl(" Bez kabla: ") + joinNames(keyed) + ".";
+        mix.kickAndBass = kick && bass;
+        // The cable is the proper way; without it the plugin works, but worse, and says so.
+        if (mix.kickAndBass && !mix.bassWithoutCable.isEmpty() && cancelling.isEmpty())
+        {
+            item.status = Status::warning;
+            item.title = pl("Stopa i bas: brak kabla sidechain");
+            item.detail = (item.detail.isEmpty() ? juce::String() : item.detail + pl("\n"))
+                          + pl("Bas bez kabla od stopy: ") + joinNames(mix.bassWithoutCable)
+                          + pl(". Bez kabla ustępowanie spóźnia się o jeden bufor audio (ok. 12 ms przy 512 próbkach), a fazy i "
+                               "przesunięcia stopa-bas nie da się zmierzyć.\nJak podłączyć w FL: 1) w mikserze zaznacz kanał stopy, "
+                               "2) kliknij prawym strzałkę na dole kanału basu i wybierz „Sidechain to this track”, 3) w oknie Agenta "
+                               "basu kliknij koło zębate, zakładkę „Processing” i w „Connections” przy wejściu sidechain wybierz 1. "
+                               "Potem puść drop: ta pozycja sama zmieni się na zieloną.");
+        }
+        else if (mix.kickAndBass && !anySidechain && keyed.isEmpty() && item.detail.isEmpty())
+        {
+            item.detail = pl("Puść drop, żeby Mózg sprawdził, czy bas ma kabel sidechain od stopy.");
+        }
         if (item.detail.isNotEmpty())
             report.push_back(item);
     }
@@ -2613,7 +2791,7 @@ void BrainProcessor::buildReport()
     // Phase 38: nothing lost anywhere in the song. From the song's seconds, as the mix hears them now
     // (each second's raw + trim power plus the channel's present EQ and cleanup), worked out every 2 s.
     {
-        const auto nowMs = juce::Time::getMillisecondCounter();
+        const auto nowMs = static_cast<juce::uint32>(ma::clock::nowMs());
         if (lostAtMs == 0 || nowMs - lostAtMs >= kLostRefreshMs)
         {
             lostAtMs = nowMs;
@@ -2745,6 +2923,33 @@ void BrainProcessor::buildReport()
         }
         if (item.detail.isNotEmpty() && !feeds.isEmpty())
             item.detail += " " + feeds.joinIntoString("; ") + ".";
+        // How long each send rings, against the tempo.
+        juce::StringArray tails;
+        bool longTail = false;
+        for (const auto& channel : mix.channels)
+        {
+            if (channel.data.role != static_cast<int>(ma::Role::send) || !(channel.data.tailSeconds > 0.0f))
+                continue;
+            const double seconds = channel.data.tailSeconds, bars = ma::tailBars(seconds, tempoBpm());
+            auto line = quoted(channel.name) + pl(" wybrzmiewa ok. ") + juce::String(seconds, 1) + " s";
+            if (bars > 0.0)
+            {
+                line += " (" + juce::String(bars, 1) + pl(" taktu)");
+                if (bars > ma::kLongTailBars)
+                {
+                    longTail = true;
+                    line += pl(": dłużej niż takt, ogon wchodzi w następną frazę; skróć Decay do ok. ")
+                            + juce::String(ma::depthTimes(tempoBpm()).decaySeconds, 1) + " s";
+                }
+            }
+            tails.add(line);
+        }
+        if (item.detail.isNotEmpty() && !tails.isEmpty())
+        {
+            item.detail += pl(" Zmierzony ogon (czas spadku o 60 dB): ") + tails.joinIntoString("; ") + ".";
+            if (longTail && item.status == Status::good)
+                item.status = Status::warning;
+        }
         if (item.detail.isNotEmpty() && times.isNotEmpty())
             item.detail += " " + times + ". " + delayAdviceText(tempoBpm()) + ".";
         if (item.detail.isNotEmpty())
@@ -3076,8 +3281,8 @@ void BrainProcessor::buildReport()
             blockers.add(pl("przełącz odsłuch na „Pełne pasmo”"));
         for (const auto& item : report)
         {
-            if (item.group == MixSnapshot::ReportGroup::arrangement)
-                continue;
+            if (item.group == MixSnapshot::ReportGroup::arrangement || item.afterMastering)
+                continue; // what comes after Ozone does not decide whether the mix is ready for it
             if (item.status == Status::problem)
                 blockers.add(item.title);
             else if (item.status == Status::warning)
@@ -3212,7 +3417,7 @@ BrainProcessor::IssueHandling BrainProcessor::issueHandling(const ma::MaskingIss
 double BrainProcessor::liveLevelStep(const ma::MaskingIssue& issue) const
 {
     const auto key = std::make_pair(mix.channels[static_cast<size_t>(issue.masker)].owner, mix.channels[static_cast<size_t>(issue.masked)].owner);
-    const auto now = juce::Time::getMillisecondCounter();
+    const auto now = static_cast<juce::uint32>(ma::clock::nowMs());
     const auto cached = liveSteps.find(key);
     if (cached != liveSteps.end() && now - cached->second.second < kLiveStepMs)
         return cached->second.first;
@@ -3370,7 +3575,7 @@ void BrainProcessor::planUnmask(const std::vector<ma::MaskingChannel>& masking, 
     const auto maskerRole = static_cast<ma::Role>(juce::jlimit(0, ma::kRoles - 1, static_cast<int>(masker.data.role)));
     // Agents from before phase 30 neither publish a key nor dip; a kick or percussion dipping
     // under a sustained part would lose its hit.
-    if (masked.data.keyId == 0 || masker.data.keyId == 0 || maskerRole == ma::Role::kick || maskerRole == ma::Role::percussion
+    if (masked.data.keyId == 0 || masker.data.keyId == 0 || maskerRole == ma::Role::kick || ma::isPercussion(maskerRole)
         || !inMixSums(masker) || !inMixSums(masked))
         return;
 
@@ -3569,7 +3774,7 @@ juce::String BrainProcessor::settledAdvice(const ma::MaskingIssue& issue) const
     if (role == ma::Role::kick && issue.lowHz >= 1000.0)
         return pl("W śladzie ") + quoted(masker.name) + pl(" gra też coś wysokiego (werbel, clap?): rozdziel to na osobny kanał z własnym Agentem.");
     // Hits cover only for a moment; moving them an octave says nothing about a drum.
-    if (role == ma::Role::kick || role == ma::Role::percussion)
+    if (role == ma::Role::kick || ma::isPercussion(role))
         return pl("Uderzenia zasłaniają tylko na chwilę: zostaw albo wybierz próbkę ") + quoted(masker.name) + pl(" o innym brzmieniu.");
     return pl("To ten sam rejestr: przenieś ") + quoted(masker.name) + pl(" oktawę wyżej, zmień brzmienie albo zostaw (lekkie nakładanie jest normalne).");
 }
@@ -3985,9 +4190,10 @@ juce::String cleanupText(const ma::CleanupSettings& cleanup, ma::ChainPlan::High
 void BrainProcessor::markMasterPeakCarriers(std::vector<ma::ChainChannel>& chain, ma::ChainContext& context)
 {
     const auto stats = previewStats();
-    if (stats.seconds < kMinimumPreviewSeconds)
+    if (stats.seconds < kMinimumPreviewSeconds && !masterCheck.valid)
         return;
-    context.limiterReductionDb = std::max(0.0, stats.typicalReductionDb);
+    // With the master check in place, what the real mastering chain takes off the peaks counts, not our preview.
+    context.limiterReductionDb = masterCheck.valid ? std::max(0.0, masterCheck.densityDb) : std::max(0.0, stats.typicalReductionDb);
     // Judged on the peaks as they would be without the clippers: a kick clipped for the master
     // last time must not stop counting as a carrier because of it (the plan would swing back).
     std::vector<double> unclipped(mix.channels.size(), -200.0);
@@ -4012,7 +4218,7 @@ void BrainProcessor::markMasterPeakCarriers(std::vector<ma::ChainChannel>& chain
             loudMasterPlan.loudest = mix.channels[c].name;
     for (size_t c = 0; c < mix.channels.size() && c < chain.size(); ++c)
         if (unclipped[c] > -200.0 && unclipped[c] >= highest - kPeakCarrierRangeDb
-            && (chain[c].role == ma::Role::kick || chain[c].role == ma::Role::percussion))
+            && (chain[c].role == ma::Role::kick || ma::isPercussion(chain[c].role)))
             chain[c].carriesMasterPeaks = true;
 }
 
@@ -4023,7 +4229,7 @@ void BrainProcessor::proposeWholeMix()
     {
         const auto& channel = mix.channels[c];
         auto& in = chain[c];
-        in.role = static_cast<ma::Role>(juce::jlimit(0, static_cast<int>(ma::Role::send), static_cast<int>(channel.data.role)));
+        in.role = static_cast<ma::Role>(juce::jlimit(0, ma::kRoles - 1, static_cast<int>(channel.data.role)));
         in.priority = channel.data.priority;
         in.valid = channel.spectrumValid;
         for (int b = 0; b < ma::bus::kBands; ++b)
@@ -4037,7 +4243,7 @@ void BrainProcessor::proposeWholeMix()
         in.lowNoteHz = channel.data.lowNoteHz;
         in.currentCleanup = channel.data.cleanup;
         in.intentionalDrive = channel.data.intentionalDrive != 0;
-        in.contentRole = static_cast<ma::Role>(juce::jlimit(0, static_cast<int>(ma::Role::send), static_cast<int>(channel.data.detectedRole)));
+        in.contentRole = static_cast<ma::Role>(juce::jlimit(0, ma::kRoles - 1, static_cast<int>(channel.data.detectedRole)));
         in.contentConfidence = channel.data.detectedConfidence;
         for (int r = 0; r < ma::kMaxResonances; ++r)
             in.resonances[static_cast<size_t>(r)] = channel.data.resonances[r];
@@ -4287,9 +4493,17 @@ void BrainProcessor::proposeWholeMix()
             if (plan.loudMasterClipDb > 0.0)
                 item.text = name + pl("clipper ścina ") + juce::String(plan.clipDb, 1) + pl(" dB szczytów (sufit ")
                             + juce::String(plan.clipper.ceilingDb, 1) + pl(" dBFS), z tego ") + juce::String(plan.loudMasterClipDb, 1)
-                            + pl(" dB pod głośny master: jego uderzenia to najwyższe szczyty miksu, a limiter przy ")
-                            + juce::String(masterTargetLufs(), 1) + pl(" LUFS ścina teraz ") + juce::String(previewStats().typicalReductionDb, 1)
-                            + pl(" dB. Clipper zetnie je krócej i czyściej niż limiter, uderzenie zostanie");
+                            + pl(" dB pod głośny master: jego uderzenia to najwyższe szczyty miksu, a ")
+                            + (masterCheck.valid ? pl("Ozone zabiera szczytom ") + juce::String(masterCheck.densityDb, 1)
+                                                       + pl(" dB (zmierzone „Kontrolą mastera” po masteringu)")
+                                                 : pl("limiter przy ") + juce::String(masterTargetLufs(), 1) + pl(" LUFS ścina teraz ")
+                                                       + juce::String(previewStats().typicalReductionDb, 1) + pl(" dB"))
+                            + pl(". Clipper zetnie je krócej i czyściej niż limiter, uderzenie zostanie");
+            if (plan.budgetClipDb > 0.0)
+                item.text = name + pl("clipper ścina ") + juce::String(plan.clipDb, 1) + pl(" dB szczytów (sufit ")
+                            + juce::String(plan.clipper.ceilingDb, 1) + pl(" dBFS), z tego ") + juce::String(plan.budgetClipDb, 1)
+                            + pl(" dB, żeby nie wystawał ponad stopę: szczyt miksu ma wyznaczać stopa, a te szczyty zabierały głośność "
+                                 "masterowi i nic nie dawały w zamian. Ścinane są tylko pojedyncze piki, głośna część zostaje nietknięta");
             chainItems.push_back(item);
         }
         if (plan.evener.on > 0.5f
@@ -4839,6 +5053,9 @@ juce::String BrainProcessor::saturationText(const ma::ChainPlan& plan) const
                            : juce::String();
     if (sat.on < 0.5f && plan.harmonics.on > 0.5f)
         return pl("saturacja wyłączona: sub to prawie czysty sinus, alikwoty daje enhancer harmonicznych, a sub zostaje czysty");
+    if (sat.on < 0.5f && plan.filteredOnPurpose)
+        return pl("saturacja wyłączona: partia prawie nie ma alikwotów (") + juce::String(plan.overtonesDb, 1)
+               + pl(" dB pod podstawą), czyli jest filtrowana celowo; nie dorabiam góry, którą producent wyciął");
     if (sat.on < 0.5f)
         return cover.isNotEmpty() ? pl("saturacja wyłączona: jej alikwoty zasłoniłyby ") + cover
                                   : pl("saturacja wyłączona: alikwotów dość (") + juce::String(plan.overtonesDb, 1)
@@ -5207,9 +5424,9 @@ void BrainProcessor::buildToolNotes(bool wholeMix)
         const auto chainItem = [&](Tool tool) {
             return itemFor([&](const auto& i) { return i.action == Action::chain && i.tool == tool; });
         };
-        const auto role = static_cast<ma::Role>(juce::jlimit(0, static_cast<int>(ma::Role::send), static_cast<int>(channel.data.role)));
+        const auto role = static_cast<ma::Role>(juce::jlimit(0, ma::kRoles - 1, static_cast<int>(channel.data.role)));
         const bool bus = !inMixSums(channel);
-        const bool percussive = role == ma::Role::kick || role == ma::Role::percussion;
+        const bool percussive = role == ma::Role::kick || ma::isPercussion(role);
         const bool intentional = channel.data.intentionalDrive != 0;
         // A tool switched on: by the Brain (kept unless the analysis changes it) or by hand (left alone).
         const auto runningNote = [&](int bit, bool on, const juce::String& what) {
@@ -5883,7 +6100,7 @@ void BrainProcessor::proposeHarmonics()
         }
 
         // 2. The channel's own step, by the kind of sound.
-        const bool percussive = channel.data.role == 1 || channel.data.role == 3;
+        const bool percussive = channel.data.role == 1 || channel.data.role == 3 || channel.data.role == static_cast<int>(ma::Role::clap);
         int peak = 0;
         for (int b = 1; b < ma::bus::kBands; ++b)
             if (own[static_cast<size_t>(b)] > own[static_cast<size_t>(peak)])
@@ -6222,7 +6439,8 @@ void BrainProcessor::proposeDynamics()
         const bool kickMasked = masked.data.role == 1 && masker.data.role != 1;
         if (issue.score < 0.3 || (issue.highHz > kDuckMaxHz && !kickMasked))
             continue;
-        if (masker.data.role != 1 && (masked.data.role == 1 || masker.data.role == 2))
+        // Drums never give way to the kick: hats play between its hits and the backbeat with it on purpose.
+        if (masker.data.role != 1 && !ma::isPercussion(static_cast<ma::Role>(masker.data.role)) && (masked.data.role == 1 || masker.data.role == 2))
             candidates.push_back({ issue.masker, issue.masked, issue.lowHz, issue.highHz, issue.score });
     }
     for (size_t k = 0; k < mix.channels.size(); ++k)
@@ -6322,7 +6540,7 @@ void BrainProcessor::proposeDynamics()
         if (connected)
             item.text += pl(". Sidechain podłączony");
         else if (wireless)
-            item.text += pl(". Bez kabla: Agent ") + quoted(masked.name) + pl(" podaje swoją obwiednię przez wspólną pamięć");
+            item.text += pl(". Bez kabla: Agent ") + quoted(masked.name) + pl(" podaje swoją obwiednię przez wspólną pamięć. Reakcja przychodzi o jeden bufor audio później (przy 512 próbkach ok. 12 ms), więc dla ciasnego dołu podłącz sidechain stopy do tego kanału: z kablem ustępowanie trafia w samo uderzenie");
         else
             item.text += pl(". Potrzebny sidechain: w mikserze FL na kanale ") + kickName()
                          + pl(" kliknij prawym strzałkę wysyłki pod kanałem ") + quoted(masker.name)
@@ -6671,7 +6889,7 @@ int BrainProcessor::applySelected(bool refining)
         double levelGain = gain;
         if (!inMixSums(channel))
         {
-            const int sources = ma::stemGroupForRole(static_cast<ma::Role>(juce::jlimit(0, static_cast<int>(ma::Role::send), static_cast<int>(channel.data.detectedRole))));
+            const int sources = ma::stemGroupForRole(static_cast<ma::Role>(juce::jlimit(0, ma::kRoles - 1, static_cast<int>(channel.data.detectedRole))));
             levelGain = globalGain + (sources >= 0 ? groupGain[static_cast<size_t>(sources)] : 0.0);
             gain = 0.0;
         }
@@ -6843,9 +7061,25 @@ std::array<std::int64_t, 5> BrainProcessor::itemSignature(const Proposal::Item& 
              static_cast<std::int64_t>(item.group), extra };
 }
 
+BrainProcessor::MixScore BrainProcessor::scoreNow() const
+{
+    MixScore score;
+    if (!mix.tonal.valid || mix.dropSeconds < kMinimumDropSeconds || !std::isfinite(truePeakDb()) || !std::isfinite(integratedLufs()))
+        return score;
+    score.valid = true;
+    score.outsideDb = ma::outsideCorridorDb(mix.tonal);
+    for (const auto& zone : ma::zoneOffsets(mix.tonal, activeTarget()))
+        if (zone.valid)
+            score.offCentreDb += std::abs(zone.offsetDb);
+    score.collisions = static_cast<int>(mix.masking.issues.size());
+    score.plrDb = truePeakDb() - integratedLufs();
+    return score;
+}
+
 int BrainProcessor::applyByUser()
 {
     stopRefining();
+    scoreBefore = scoreNow();
     // What the user unticked stays unticked in the rounds that follow.
     std::vector<std::array<std::int64_t, 5>> unticked;
     for (const auto& item : currentProposal.items)
@@ -6980,6 +7214,7 @@ bool BrainProcessor::canUndo() const
 
 int BrainProcessor::undoLast()
 {
+    scoreBefore = {};
     stopRefining();
     if (comparing)
         setComparing(false);
@@ -7010,8 +7245,8 @@ void BrainProcessor::setComparing(bool shouldCompare)
         stopRefining();
     comparing = shouldCompare;
     compareSwitchedMs = ma::SharedSession::nowMs();
-    if (auto* region = session->region())
-        region->header.compareBefore.store(shouldCompare ? 1u : 0u);
+    if (brainEntry != nullptr)
+        brainEntry->compareBefore.store(shouldCompare ? 1u : 0u);
     outputGainDb.store(0.0f);
     // Peaks and loudness of one version must not leak into the other's report.
     resetAtMs = compareSwitchedMs + kAgentSwitchMs;
@@ -7048,6 +7283,7 @@ void BrainProcessor::getStateInformation(juce::MemoryBlock& destData)
     parameters.state.setProperty("keyOverride", keyOverride, nullptr);
     parameters.state.setProperty("sketchMode", sketchOn, nullptr);
     parameters.state.setProperty("tonalAfterLimiter", afterLimiterOn, nullptr);
+    parameters.state.setProperty("sessionId", juce::String::toHexString(static_cast<juce::int64>(sessionId)), nullptr);
     if (auto xml = parameters.copyState().createXml())
         copyXmlToBinary(*xml, destData);
 }
@@ -7058,6 +7294,14 @@ void BrainProcessor::setStateInformation(const void* data, int sizeInBytes)
         if (xml->hasTagName(parameters.state.getType()))
         {
             parameters.replaceState(juce::ValueTree::fromXml(*xml));
+            // The project's session: its Agents saved the same id (older projects: they join this Brain).
+            if (const auto saved = static_cast<std::uint64_t>(parameters.state.getProperty("sessionId").toString().getHexValue64()); saved != 0)
+            {
+                if (brainEntry != nullptr && saved != sessionId)
+                    brainEntry->sessionId.store(0); // the entry claimed before the state arrived
+                brainEntry = nullptr;
+                sessionId = saved;
+            }
             const auto name = parameters.state.getProperty("target").toString();
             // Phase 30: a project without a target (or whose target file is gone) takes the last one used.
             if (name.isEmpty() || !selectTarget(name))
@@ -7190,6 +7434,20 @@ void BrainProcessor::updatePreview()
             if (!added)
                 it->second = std::max(it->second, channel.data.outputPeakDb);
         }
+    if (fresh && std::isfinite(truePeakDb()) && truePeakDb() > topPeakDb + 0.05)
+    {
+        topPeakDb = truePeakDb();
+        topPeakAtSeconds = songSeconds.load();
+        topPeakInDrop = std::isfinite(dropLevel) && shortTermLufs() >= dropLevel - 3.0;
+        float highest = -200.0f;
+        topPeakChannel = {};
+        for (const auto& channel : mix.channels)
+            if (inMixSums(channel) && std::isfinite(channel.data.outputPeakDb) && channel.data.outputPeakDb > highest)
+            {
+                highest = channel.data.outputPeakDb;
+                topPeakChannel = channel.name;
+            }
+    }
     const double integratedNow = integratedLufs();
     if (!std::isfinite(integratedNow) || integratedNow < -60.0)
         return;
@@ -7247,7 +7505,7 @@ juce::String BrainProcessor::previewVerdict(MixSnapshot::Status& status) const
                  + pl(" pod głośny master: kliknij „Zastosuj”, potem posłuchaj drop jeszcze raz.");
     else if (loudMasterPlan.made && loudMasterPlan.capped)
         advice = pl(" Clipper na ") + loudMasterPlan.carriers.joinIntoString(", ")
-                 + pl(" ścina już tyle, ile się da bez spłaszczenia uderzenia. Reszta to gęstość dropu (bas, pady): ścisz je trochę")
+                 + pl(" ścina już tyle, ile się da bez spłaszczenia uderzenia. Resztę robi klej: wyślij stopę, clap i perkusję na jedną szynę z Agentem w roli „Bus” (Mózg dobierze jej kompresor), a w Ozone, przed limiterem, kompresor 2:1 z wolnym atakiem (30 ms), 1–2 dB redukcji")
                  + lower;
     else if (loudMasterPlan.made && !loudMasterPlan.carriers.isEmpty())
         // Measured again with the new clipping and still too busy: the clippers have room left.
@@ -7260,6 +7518,10 @@ juce::String BrainProcessor::previewVerdict(MixSnapshot::Status& status) const
     const auto shortOf = std::isfinite(s.outputLufs) && s.outputLufs < target - 1.0
                              ? pl(" I tak nie dobije do celu: wychodzi ") + juce::String(s.outputLufs, 1) + " LUFS."
                              : juce::String();
+    // The sum is Ozone's: what the tracks cannot give is split there between a clipper and the limiter.
+    const juce::String ozone = pl(" Na śladach więcej się nie wyciśnie bez straty; resztę rozłóż w Ozone na dwa etapy: najpierw clipper "
+                                  "(albo Maximizer z „Soft Clip”) 2–3 dB, dopiero potem limiter. Jeden limiter robiący wszystko pompuje. "
+                                  "„Kontrola mastera” po Ozone pokaże, ile naprawdę zabrał.");
     if (s.typicalReductionDb <= 3.0)
     {
         status = MixSnapshot::Status::good;
@@ -7268,10 +7530,10 @@ juce::String BrainProcessor::previewVerdict(MixSnapshot::Status& status) const
     if (s.typicalReductionDb <= 6.0)
     {
         status = MixSnapshot::Status::warning;
-        return base + pl(". Stopa i perkusja stracą trochę uderzenia.") + shortOf + advice;
+        return base + pl(". Stopa i perkusja stracą trochę uderzenia.") + shortOf + advice + ozone;
     }
     status = MixSnapshot::Status::problem;
-    return base + pl(". To za dużo: master zgniecie uderzenie.") + shortOf + advice;
+    return base + pl(". To za dużo: master zgniecie uderzenie.") + shortOf + advice + ozone;
 }
 
 namespace

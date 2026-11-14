@@ -364,7 +364,8 @@ int stemGroupForRole(Role role)
     switch (role)
     {
         case Role::kick:
-        case Role::percussion: return static_cast<int>(StemGroup::drums);
+        case Role::percussion:
+        case Role::clap: return static_cast<int>(StemGroup::drums);
         case Role::bass: return static_cast<int>(StemGroup::bass);
         case Role::vocal: return static_cast<int>(StemGroup::vocals);
         case Role::lead:

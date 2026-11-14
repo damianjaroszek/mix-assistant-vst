@@ -1,10 +1,16 @@
 #pragma once
 
+#include "Clock.h"
 #include "ma/MixBus.h"
 
 #include <juce_core/juce_core.h>
 
 #include <chrono>
+#if JUCE_WINDOWS
+ #include <process.h>
+#else
+ #include <unistd.h>
+#endif
 #include <memory>
 #include <mutex>
 
@@ -36,10 +42,16 @@ public:
     bus::Region* region() const { return regionPtr; }
 
     // Milliseconds on a clock shared by all processes on the machine.
-    static std::uint64_t nowMs()
+    static std::uint64_t nowMs() { return clock::nowMs(); }
+
+    // The host process: plugins of one project run in it (or in bridges of their own).
+    static std::uint64_t processId()
     {
-        using namespace std::chrono;
-        return static_cast<std::uint64_t>(duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
+#if JUCE_WINDOWS
+        return static_cast<std::uint64_t>(::_getpid());
+#else
+        return static_cast<std::uint64_t>(::getpid());
+#endif
     }
 
     static std::uint64_t newInstanceId()

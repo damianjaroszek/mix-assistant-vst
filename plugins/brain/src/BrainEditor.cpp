@@ -478,6 +478,19 @@ void BrainEditor::updateGuide()
                                              + pl(". Ustaw właściwą w Agencie („Poziom” → „Rola”), a priorytet 1 dla najważniejszych.");
         setup.steps.push_back(step);
     }
+    if (mix.kickAndBass)
+    {
+        brain::GuideView::Step step;
+        step.title = pl("Kabel sidechain: stopa do Agenta basu");
+        step.state = mix.bassWithoutCable.isEmpty() ? State::done : State::now;
+        step.detail = mix.bassWithoutCable.isEmpty()
+                          ? pl("Bas dostaje stopę kablem: ustępuje w samo uderzenie, a Mózg mierzy fazę i przesunięcie w czasie.")
+                          : pl("Brakuje na: ") + list(mix.bassWithoutCable)
+                                + pl(". W mikserze FL zaznacz kanał stopy, kliknij prawym strzałkę na dole kanału basu i wybierz „Sidechain to "
+                                     "this track”; potem w oknie Agenta basu: koło zębate → „Processing” → „Connections”, wejście sidechain 1. "
+                                     "Bez kabla ustępowanie działa awaryjnie, o jeden bufor za późno.");
+        setup.steps.push_back(step);
+    }
     {
         brain::GuideView::Step step;
         step.title = pl("Cel brzmienia: referencje");
@@ -488,7 +501,18 @@ void BrainEditor::updateGuide()
                           ? (tonal ? pl("Cel tonalny „") + juce::String::fromUTF8(processor.target().name.c_str()) + pl("” wybrany. ") : juce::String())
                                 + (stems ? pl("Stemy referencji wczytane.") : pl("Stemy referencji (zakładka „Referencje”) dadzą jeszcze proporcje grup i szerokość."))
                           : pl("Raz na gatunek: „Balans tonalny” → „Nowy cel” → nagraj 3–10 utworów (jak Capture w TBC). Bez tego Mózg "
-                               "trzyma się typowych proporcji house'u i wbudowanego celu „Typowy house” (szerokiego jak w TBC).");
+                               "trzyma się typowych proporcji house'u i wbudowanego celu „Klubowy” (z 13 klubowych masterów).");
+        setup.steps.push_back(step);
+    }
+
+    {
+        brain::GuideView::Step step;
+        step.title = pl("Kontrola po masteringu (wtyczka po Ozone)");
+        step.state = mix.masterCheckPresent ? State::done : State::optional;
+        step.detail = mix.masterCheckPresent
+                          ? pl("„Kontrola mastera” działa: raport ma pozycję „Po masteringu”, a balans tonalny i gęstość liczą się po Ozone.")
+                          : pl("Wstaw „Mix Assistant Master Check” jako ostatni efekt na kanale Master, po Ozone. Mózg zobaczy wtedy, co "
+                               "naprawdę wychodzi po masteringu, i zaproponuje poprawki w miksie (zatwierdzasz je sam przez „Zastosuj”).");
         setup.steps.push_back(step);
     }
 
@@ -622,8 +646,8 @@ void BrainEditor::timerCallback()
         tonalStatus = pl("Nagrywam referencję do „") + targetName + pl("”: ") + juce::String(juce::roundToInt(processor.secondsAnalysed()))
                       + pl(" s. Puść cały utwór (albo drop) na masterze i kliknij „Zakończ nagrywanie”.");
     else if (!target.valid())
-        tonalStatus = (targetName.isEmpty() ? pl("Bez własnego celu: wbudowany „Typowy house” (szeroki jak TBC). Własny: „Nowy cel” i referencje")
-                                            : pl("Cel „") + targetName + pl("” nie ma referencji (do tego czasu wbudowany „Typowy house”). Kliknij „Nagraj referencję”"))
+        tonalStatus = (targetName.isEmpty() ? pl("Bez własnego celu: wbudowany „Klubowy” (z 13 klubowych masterów). Własny: „Nowy cel” i referencje")
+                                            : pl("Cel „") + targetName + pl("” nie ma referencji (do tego czasu wbudowany „Klubowy”). Kliknij „Nagraj referencję”"))
                       + (mix.tonal.valid ? juce::String()
                                          : pl(". Słucham miksu: ") + juce::String(juce::roundToInt(processor.secondsAnalysed())) + " / "
                                                + juce::String(juce::roundToInt(BrainProcessor::kMinimumSeconds)) + " s");

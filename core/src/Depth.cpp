@@ -281,4 +281,129 @@ SendSources findSendSources(const std::vector<SourceFrame>& send, const std::vec
     return out;
 }
 
+void TailMeter::prepare(double sampleRate)
+{
+    hop = std::max(1, static_cast<int>(std::lround(sampleRate * 0.01)));
+    coefficient = std::exp(-1.0 / (0.015 * sampleRate));
+    peakFallDb = 6.0 * 0.01; // the recent peak forgets 6 dB a second
+    reset();
+}
+
+void TailMeter::reset()
+{
+    falls.fill(0);
+    total = 0;
+    power = 0.0;
+    recentPeakDb = topDb = minDb = lastDb = -200.0;
+    since3 = -1.0;
+    atMin = 0.0;
+    hops = inHop = 0;
+}
+
+void TailMeter::process(const float* left, const float* right, int numSamples)
+{
+    for (int i = 0; i < numSamples; ++i)
+    {
+        const double l = left[i], r = right != nullptr ? right[i] : l;
+        power = coefficient * power + (1.0 - coefficient) * 0.5 * (l * l + r * r);
+        if (++inHop >= hop)
+        {
+            inHop = 0;
+            hopDone(10.0 * std::log10(std::max(power, 1e-20)));
+        }
+    }
+}
+
+void TailMeter::fallDone()
+{
+    // From the first 3 dB down (the hit itself is over) to the lowest point reached.
+    const double fellDb = topDb - 3.0 - minDb;
+    const double took = (atMin - since3) * 0.01;
+    if (since3 >= 0.0 && fellDb >= 4.0 && took >= 0.1 && minDb > -90.0)
+    {
+        const double seconds = 60.0 * took / fellDb;
+        if (seconds >= 0.2 && seconds <= 12.0)
+        {
+            const double position = std::log(seconds / 0.2) / std::log(12.0 / 0.2);
+            ++falls[static_cast<size_t>(std::clamp(static_cast<int>(position * kBins), 0, kBins - 1))];
+            if (++total > 400)
+            {
+                total = 0;
+                for (auto& count : falls)
+                {
+                    count /= 2;
+                    total += count;
+                }
+            }
+        }
+    }
+}
+
+void TailMeter::hopDone(double levelDb)
+{
+    recentPeakDb = std::max(recentPeakDb - peakFallDb, levelDb);
+    const bool rising = levelDb > minDb + 3.0;
+    if (rising || topDb <= -199.0)
+    {
+        if (topDb > -199.0)
+            fallDone();
+        // A new fall starts from here, if it is loud enough to be the part and not its floor.
+        topDb = levelDb >= recentPeakDb - 20.0 ? levelDb : -200.0;
+        minDb = levelDb;
+        since3 = -1.0;
+        hops = 0;
+        atMin = 0.0;
+    }
+    else
+    {
+        ++hops;
+        if (levelDb > topDb)
+        {
+            // Still climbing to its top (the smoother catching up with the hit).
+            topDb = minDb = levelDb;
+            hops = 0;
+        }
+        else
+        {
+            if (since3 < 0.0 && levelDb <= topDb - 3.0)
+            {
+                // Where between the last two readings it crossed.
+                const double span = lastDb - levelDb;
+                since3 = hops - (span > 1e-9 ? ((topDb - 3.0) - levelDb) / span : 0.0);
+            }
+            if (levelDb < minDb)
+            {
+                minDb = levelDb;
+                atMin = hops;
+            }
+            if (minDb <= topDb - 33.0)
+            {
+                // Far enough: more would only reach the floor.
+                fallDone();
+                topDb = -200.0;
+            }
+        }
+    }
+    lastDb = levelDb;
+}
+
+double TailMeter::seconds() const
+{
+    if (!valid())
+        return 0.0;
+    int seen = 0;
+    for (int b = 0; b < kBins; ++b)
+    {
+        seen += falls[static_cast<size_t>(b)];
+        if (2 * seen >= total)
+            return 0.2 * std::pow(12.0 / 0.2, (b + 0.5) / kBins);
+    }
+    return 0.0;
+}
+
+double tailBars(double tailSeconds, double bpm)
+{
+    return bpm > 20.0 && tailSeconds > 0.0 ? tailSeconds / (240.0 / bpm) : 0.0;
+}
+
 } // namespace ma

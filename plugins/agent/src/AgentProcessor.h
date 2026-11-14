@@ -321,12 +321,21 @@ private:
 
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
     void timerCallback() override;
+
+public:
+    // Offline tests (mixcheck) stop the wall-clock timer and tick by the audio they render.
+    void useTestTicks() { stopTimer(); }
+    void testTick() { timerCallback(); }
+
+private:
     void applyLearned();
     void recogniseRole();
     bool measuresLufs() const;
     void publishToBrain();
     void handleBrainCommand(ma::bus::Region& region);
     void setParam(const juce::String& id, float value);
+    void followRoleWithPriority();
+    int priorityRole = -1; // the role the priority was last matched to
     void setEqParams(const ma::EqSettings& eq);
     void setDynamics(const DynamicState& state);
     void updateDynamicMeters();
@@ -374,6 +383,8 @@ private:
     std::atomic<bool> alignValid { false };
     std::atomic<float> alignLag { 0.0f }, alignBest { 0.0f }, alignZero { 0.0f };
     ma::BalanceMeter balanceMeter; // the input's lean
+    ma::TailMeter tailMeter;       // how long the part rings (read on sends)
+    std::atomic<float> tailSeconds { 0.0f };
     std::atomic<float> inputBalance { 0.0f };
     std::atomic<bool> balanceSeen { false };
     ma::StereoAnalyzer liveStereo; // on the input, while the Brain or the editor looks
@@ -443,6 +454,9 @@ private:
     // Connection to the Brain (message thread only).
     std::shared_ptr<ma::SharedSession> session = ma::SharedSession::get();
     std::uint64_t instanceId = ma::SharedSession::newInstanceId();
+    std::atomic<std::uint64_t> sessionId { 0 }; // the Brain's session this Agent joined (saved in the project)
+    std::uint64_t brainSeenMs = 0;              // when that Brain was last alive
+    std::atomic<bool> brainComparing { false };
     int slotIndex = -1;
     std::atomic<bool> brainAlive { false };
     juce::String userName, trackName;

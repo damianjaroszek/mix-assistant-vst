@@ -22,3 +22,4 @@ endfunction()
 
 add_subdirectory(agent)
 add_subdirectory(brain)
+add_subdirectory(master)

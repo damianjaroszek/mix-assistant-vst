@@ -282,8 +282,7 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   duck under it (2 ms, 1/16 synced, depth over 200 Hz-8 kHz, <= `kSendDuckSourceMaxDb` 6), else the main voice (phase 36), else its source
   (bell 300 Hz-6 kHz, 1/8); "none" turns a Brain-made duck off. `lastSendNotes` feeds the "Głębia" report line (sources, key).
 - Phase 38 engineer's checks: without a tonal target of the user's (`currentTarget` invalid) the Brain uses `ma::builtinHouseTarget()`
-  ("Typowy house (wbudowany)": the mean of the Chardonnay remix and Galias masters from `ma-lab --make-target`, smoothed over +-2 ERB
-  bands, corridor +-2.5 dB, +-3.5 below 60 Hz / above 10 kHz) through `activeTarget()` everywhere the analysis compares (report, view,
+  (then the mean of the two test masters; since stage 1 thirteen club masters, see below) through `activeTarget()` everywhere the analysis compares (report, view,
   sketch, solver, translation `tonalOk`, HTML); `target()` stays the user's for the target list and capture. Before it, nothing balanced
   collision cuts and level moves without a target and the top rose 3-5 dB on both real songs.
   Report "Ślady w mono" (per channel 150 Hz-8 kHz mid vs mid + processed side, `processedSidePower`, against the mix's; warning 3 dB,
@@ -298,6 +297,61 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   pre-EQ so tonal cuts do not come back as trim. A hole no channel can fill names the channel playing an octave below (saturation /
   harmonics); `ozoneCurve` lists what is left (bells, +-4 dB) in the tonal report item and the HTML ("Krzywa EQ do Ozone").
   mixcheck vs the references (sum of TBC zone distances): Galias 5.6 -> 7.3, Chardonnay 6.3 -> 4.7 (the built-in curve comes from them).
+- Phase 40 engineer's review fixes. `ma::clock` (`plugins/common/Clock.h`): every timeout reads `clock::nowMs()`; mixcheck sets
+  `clock::testMs`, stops the processors' timers (`useTestTicks`) and ticks them by rendered time (`testTick`: Agents 10 Hz, Brain 5 Hz),
+  so a run is repeatable and takes ~2.5 min. `Role::clap` (index 10, "Clap / werbel", `isPercussion()` = percussion or clap; drums
+  group, priority 3, role level -5, HPF cap 150 Hz, centred; not recognised by Learn, picked by hand; mixcheck names snare/clap files).
+  The Agent's priority follows its role (`followRoleWithPriority`: while it is 5 or the last role's default); before, a role picked by
+  hand left every channel at 5 and each collision counted both ways. Planner: kick/bass HPF 30-40 Hz from the body (within
+  `kBodyDb` 12 of the peak), a drum's owned-low-end HPF never reaches its body (toms), `ChainPlan::topPercussion` (>= 60% above 5 kHz)
+  never clipped or a loud-master carrier, a vocal with overtones >= `kFilteredDb` 24 under target gets no saturation
+  (`filteredOnPurpose`). Drums never duck under the kick. Solver: a collision cut is capped by its width (`kBroadCutDb` 3 at Q <= 1,
+  full depth from Q 2) and kept only when it uncovers (`worth`: >= 0.15 and the rest <= 0.6, or >= 0.3); tonal boosts above 8 kHz
+  <= `kMaxAirBoostDb` 2 in all per channel. `compareToTarget` judges mix and corridor smoothed over +-1 ERB band (a note is not a region;
+  `mixDb` stays unsmoothed for the view). Typical drums level -10.5 (the Learn pass keeps hats 12 dB down, so the group is the kick).
+  Bus v23: `Header::brains[kMaxBrains]` (`BrainEntry`: session id saved in the Brain's state, process id, heartbeat, spectra request,
+  compare flag), `AgentData::sessionId` (saved); `chooseSession`: keep an alive one, else the Brain in the same process, else the only
+  one alive, a Brain gone `kRejoinMs` 10 s is replaced; the Brain skips Agents of another session, Agents' width plan too.
+  mixcheck (deterministic) before -> after, distance to the masters over TBC's ranges: Chardonnay 6.9 -> 5.2, Galias 7.3 -> 4.5;
+  collisions 40 -> 22 and 69 -> 33; proposal items 70 -> 47 and 59 -> 48. PLR is unchanged (14-16 dB): not compressors or ducks
+  (switched off in a trial); still open, as is a wireless kick duck predicted from the beat grid (it arrives a block late).
+- Stage 1 after the review (2026-11-14). The owner's references: 13 club masters (drop -3.9..-9.7 LUFS, drop PLR 5.2-10.7, sub below
+  45 Hz around -10 dB of the whole: far more than the two test masters, so the sub is not cut harder). `builtinHouseTarget()` now holds
+  their drops' ERB curves ("Klubowy (wbudowany)", usual `rebuild()` corridor). The master sum is never processed (Ozone's); no fixed
+  LUFS goal. The kick-to-bass sidechain cable is the supported way: `MixSnapshot::bassWithoutCable` (judged while a kick plays, kept in
+  `bassCable` while it rests) turns the report item into amber "Stopa i bas: brak kabla sidechain" with FL's steps (listed by the Ozone
+  gate), adds a guide step, and the Agent's duck status says the keyed duck is the fallback. mixcheck report "Who makes the peaks
+  (drop)": the sum's 32 highest peaks, each part's share, peak, RMS, crest, the sum's crest without it, and a what-if with every other
+  part hard-held to the kick's peak (+0/-3/-6 dB). Found: the sum peaks ~9 dB over the kick's own peak; sparse spiky parts (a hat
+  track at -10 dBFS peak with -44 RMS, bass FX, SFX) and a bass with 17-19 dB crest stand 5 dB over the kick; holding them gives
+  1-3 dB of crest, the cable none. Next: a peak budget against the kick (stage 3), "Kontrola mastera" after Ozone (stage 2).
+- Peak budget against the kick (`planChains` step 3c, `ChainPlan::budgetClipDb`, `peakBudgetOffsetDb`): a part whose Learn true peak
+  (minus its planned clip) stands over the kick's by more than its role's offset (bass, clap -1; percussion, vocal -2; pad -4; send -6;
+  hats -8; others -3 dB) is clipped down to it, never under its role's `maxCrestDb` (<= 14) over the loud level and <= `kMaxBudgetClipDb`
+  12 dB in all; hats are clipped only by this rule. Sized on pre-clipper peaks, so idempotent. mixcheck drop crest: Galias 15.4 -> 13.3
+  (level +2 dB at the same ceiling), Chardonnay 16.4 -> 15.8 (its bass is sustained and louder than a soft kick; the rest of the crest is
+  many parts adding up, no single culprit: what-ifs "others held to the kick" -0.7..-2 dB, "kick +3/+6 dB" -1.1/-1.6 dB). mixcheck's
+  16 s drop is not where Galias peaks (parts that enter later were never learned), so its whole-song peak sits over the ceiling.
+- "Kontrola mastera" (`plugins/master`, "Mix Assistant Master Check", 560x330, one page): the last effect on the master, after
+  Ozone; passes audio through and measures integrated / loudest short-term loudness, true peak, the ERB average spectrum and side
+  against mid (150 Hz up, below 120 Hz). Its timer joins a Brain like an Agent (`chooseSession`) and writes `bus::MasterReport` into
+  that `BrainEntry` (`publishMaster` / `readMaster`, own sequence lock, `bus::kVersion` 24); it restarts when `BrainEntry::resetEpoch`
+  moves (the Brain's `requestReset`), so both sides cover the same stretch. `ma/MasterCheck.h` `compareMaster(before, after)`: gain,
+  PLR before/after, `densityDb` (what mastering took off the peaks), tilt per band (mean over 60 Hz-8 kHz removed) and per TBC range,
+  overs (> -0.1 dBTP), wide low end (side > -12 dB of mid). The Brain (`updateMasterCheck` in the timer; invalid while the playback
+  simulator or ghosts sound, or the two sides' seconds differ): `limiterTilt()` is the measured tilt capped +-3 dB (so the tonal
+  comparison and the solver work on the mastered tone), the loud-master rule gets `densityDb` instead of the preview limiter's
+  reduction, report item "Po masteringu (Kontrola mastera)" (`ReportItem::afterMastering`: never counted by the Ozone gate), a guide
+  step. Everything it leads to is an ordinary proposal item the user applies. mixcheck `--master-check` runs a stand-in chain (+14 dB,
+  top lift, hard ceiling) with the plugin after it. Never tested with Ozone itself.
+- After that: report "Przed i po (ostatnie „Zastosuj”)" (`MixScore` from `scoreNow()`: dB outside the tonal corridor, distance from
+  its centre over the four ranges, collisions, PLR; `scoreBefore` taken in `applyByUser`, dropped by undo). `previewVerdict` adds the
+  Ozone advice over 3 dB of limiting (clip or soft-clip 2-3 dB before the limiter, glue there too): mixcheck what-ifs showed a pump
+  under the kick (<= 0.7 dB) and clipping every part (<= 1.5 dB) do not buy density on the channels. "Zapas na mastering" names where
+  the highest peak fell (`topPeakAtSeconds`, in the drop or not, the channel peaking highest then; reset with `requestReset`).
+  `ma::TailMeter` (Depth.h; 15 ms level every 10 ms, each fall >= 7 dB timed from its first 3 dB down, median as time to fall 60 dB,
+  >= 4 falls) runs on every Agent's input, `AgentData::tailSeconds` (`bus::kVersion` 25); the "Głębia" item lists each send's tail in
+  seconds and bars and goes amber over `kLongTailBars` 1. Tested on synthetic decays only (the test songs have no reverb returns).
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 
@@ -307,8 +361,8 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
 - Everything: `cmake -S . -B build && cmake --build build --config Release`
 - Offline check on real stems: `-DMA_BUILD_MIXCHECK=ON`, target `MixCheck` (`tools/mixcheck`): the real Agents and Brain
   on a stems folder (learn on the loudest 16 s, Brain window flagged open so Agents send spectra, `analyse(1)`, `applyByUser`,
-  refine), renders `ours.wav` and compares with `--reference` at matched loudness (TBC zones, LUFS, PLR, width). Runs at
-  about real time (Brain timers use the wall clock); run it with HOME pointed at a scratch folder.
+  refine), renders `ours.wav` and compares with `--reference` at matched loudness (TBC zones, LUFS, PLR, width). Runs on a test
+  clock (repeatable, ~2.5 min a song); run it with HOME and TMPDIR pointed at scratch folders.
 - CI (`.github/workflows/build.yml`) builds the Windows VST3s and uploads them as an artifact.
 
 ## Design reference

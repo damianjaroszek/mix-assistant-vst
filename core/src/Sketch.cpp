@@ -159,7 +159,10 @@ Arrangement typicalArrangement()
     // own stems (Mixing Secrets: Chardonnay Lektrix Remix, Galias Horizon) put drums at -9.0 / -8.1,
     // bass -5.9 / -9.9 and the rest -2.8 / -1.3 dB against their sum; the first guess (-4, -5.5, -5)
     // held the rest ~3 dB down and the drums ~4.5 dB up, so after "Analizuj" the kick stood out.
-    constexpr std::array<double, kStemGroups> levels { -8.5, -7.9, -5.0, -2.0 };
+    // Drums 2 dB under what the stems measure: the Learn pass keeps hats 12 dB under the kick, so
+    // the drums' level is nearly the kick alone, and at -8.5 it stood over the mix (deterministic
+    // mixcheck: the distance to both masters over TBC's ranges fell from 7.0 to 4.8 and 8.2 to 6.7).
+    constexpr std::array<double, kStemGroups> levels { -10.5, -7.9, -5.0, -2.0 };
     constexpr std::array<bool, kStemGroups> expected { true, true, false, true };
     for (int g = 0; g < kStemGroups; ++g)
     {

@@ -44,7 +44,8 @@ jobs:
           Invoke-WebRequest https://github.com/Tracktion/pluginval/releases/download/v1.0.4/pluginval_Windows.zip -OutFile pluginval.zip
           Expand-Archive pluginval.zip -DestinationPath pluginval
           foreach ($plugin in "build/plugins/agent/MixAssistantAgent_artefacts/Release/VST3/Mix Assistant Agent.vst3",
-                              "build/plugins/brain/MixAssistantBrain_artefacts/Release/VST3/Mix Assistant Brain.vst3") {
+                              "build/plugins/brain/MixAssistantBrain_artefacts/Release/VST3/Mix Assistant Brain.vst3",
+                              "build/plugins/master/MixAssistantMaster_artefacts/Release/VST3/Mix Assistant Master Check.vst3") {
             ./pluginval/pluginval.exe --strictness-level 5 --skip-gui-tests --validate "$plugin"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
@@ -54,6 +55,7 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item -Recurse "build/plugins/agent/MixAssistantAgent_artefacts/Release/VST3/Mix Assistant Agent.vst3" dist/
           Copy-Item -Recurse "build/plugins/brain/MixAssistantBrain_artefacts/Release/VST3/Mix Assistant Brain.vst3" dist/
+          Copy-Item -Recurse "build/plugins/master/MixAssistantMaster_artefacts/Release/VST3/Mix Assistant Master Check.vst3" dist/
           Copy-Item build/lab/Release/ma-lab.exe dist/
       - uses: actions/upload-artifact@v4
         with:

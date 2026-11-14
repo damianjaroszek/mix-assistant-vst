@@ -14,6 +14,10 @@ constexpr int kBands = 40;
 constexpr double kJunkDb = 24.0;      // content this far under the channel's own peak is not its sound
 constexpr double kOwnedDb = 6.0;      // the kick and bass this much louder in a band own it
 constexpr double kMonoBelowHz = 120.0;
+constexpr double kBodyDb = 12.0;      // within this of the channel's own peak is its body: no high-pass reaches into it
+constexpr double kLowEndFloorHz = 30.0; // the kick's and the bass's high-pass never sits lower
+constexpr double kTopHz = 5000.0;     // hats, shakers and rides live above this ...
+constexpr double kTopShare = 0.6;     // ... with at least this share of their power
 constexpr double kLostMarginDb = -12.0; // quiet parts this far under the rest in their own bands are lost
 constexpr double kMudLowHz = 200.0, kMudHighHz = 500.0;
 constexpr double kMudShare = 0.15;    // a channel with this share of the mix there crowds it
@@ -22,6 +26,7 @@ constexpr double kMaxNotchDb = 6.0;      // drums, effects: a ringing shell can 
 constexpr double kMaxTonalNotchDb = 4.0; // ... a tonal part loses its character sooner
 constexpr double kMaxTonalResonanceQ = 8.0;
 constexpr double kBuriedResonanceDb = -15.0; // this far under the rest in its band, nobody hears it ring
+constexpr double kFilteredDb = 24.0;           // overtones this far under the target: filtered on purpose, left alone
 constexpr double kThinMarginDb = 3.0;         // overtones this far under the role's target ask for saturation
 constexpr double kMinDynamicSpikeDb = 6.0;    // phase 32: a probe this far over its usual share at moments
 constexpr double kMinSibilanceSpikeDb = 8.0;  // esses stick out a lot by nature; a dull voice's s does not need a de-esser
@@ -57,6 +62,7 @@ SaturationProfile saturationFor(Role role)
     case Role::other: return { true, SaturationMode::tape, -14.0 };
     case Role::kick:
     case Role::percussion:
+    case Role::clap:
     case Role::effects:
     case Role::bus:
     case Role::send: break;
@@ -79,14 +85,37 @@ struct RoleProfile
     double maxReductionDb; // most the compressor takes off the loud parts; past it the part sounds squashed
 };
 
+} // namespace
+
+double peakBudgetOffsetDb(Role role, bool topPercussion)
+{
+    if (topPercussion)
+        return -8.0; // hats and shakers sit far under the kick
+    switch (role)
+    {
+    case Role::bass:
+    case Role::clap: return -1.0;
+    case Role::percussion:
+    case Role::vocal: return -2.0;
+    case Role::send: return -6.0;
+    case Role::pad: return -4.0;
+    default: break;
+    }
+    return -3.0;
+}
+
+namespace
+{
 RoleProfile profileFor(Role role)
 {
     switch (role)
     {
-    case Role::kick: return { 30.0, false, 0.0, 25.0, 1.0 / 16.0, 3.0, 10.0, 3.0, 0.3, 6.0, 0.0 };
+    case Role::kick: return { 40.0, false, 0.0, 25.0, 1.0 / 16.0, 3.0, 10.0, 3.0, 0.3, 6.0, 0.0 };
     // A sine sub has a 3 dB crest by nature, so a low crest says nothing about a bass's compression.
-    case Role::bass: return { 30.0, true, 4.0, 10.0, 1.0 / 16.0, 4.0, 10.0, 2.0, 0.6, 0.0, 6.0 };
+    case Role::bass: return { 40.0, true, 4.0, 10.0, 1.0 / 16.0, 4.0, 10.0, 2.0, 0.6, 0.0, 6.0 };
     case Role::percussion: return { 500.0, false, 0.0, 15.0, 1.0 / 16.0, 3.0, 13.0, 4.0, 0.3, 7.0, 0.0 };
+    // The backbeat keeps its body (a snare's sits at 150-250 Hz): the high-pass stays under it.
+    case Role::clap: return { 150.0, false, 0.0, 15.0, 1.0 / 16.0, 3.0, 13.0, 3.0, 0.3, 7.0, 0.0 };
     case Role::vocal: return { 150.0, true, 5.0, 5.0, 1.0 / 8.0, 4.0, 14.0, 2.0, 0.8, 6.0, 8.0 };
     case Role::lead: return { 250.0, true, 5.0, 10.0, 1.0 / 16.0, 4.0, 13.0, 2.0, 0.8, 5.0, 6.0 };
     case Role::pad: return { 250.0, true, 4.0, 30.0, 1.0 / 8.0, 3.0, 12.0, 0.0, 0.8, 4.0, 4.0 };
@@ -126,7 +155,7 @@ ChainPlan::BusContent busContentOf(const ChainChannel& c)
 {
     if (c.contentConfidence >= 0.5)
     {
-        if (c.contentRole == Role::kick || c.contentRole == Role::percussion)
+        if (c.contentRole == Role::kick || isPercussion(c.contentRole))
             return ChainPlan::BusContent::drums;
         if (c.contentRole == Role::vocal)
             return ChainPlan::BusContent::vocals;
@@ -235,7 +264,13 @@ std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& input, const 
         if (ownsLowEnd(c.role))
         {
             // Only what nobody hears: rumble under the lowest note or the kick's body.
-            plan.cleanup.hpfHz = static_cast<float>(std::clamp(belowContent(edgeHz), 20.0, profile.highPassCapHz));
+            // A club system plays down to about 35 Hz; what sits under the lowest note or the
+            // kick's body only eats the master's headroom (both real mixes ended 6-12 dB over their
+            // masters under 40 Hz with the old 20 Hz floor). From the body, not from the skirt.
+            int body = 0;
+            while (body < kBands - 1 && c.bandsDb[static_cast<size_t>(body)] < peak - kBodyDb)
+                ++body;
+            plan.cleanup.hpfHz = static_cast<float>(std::clamp(belowContent(SpectrumAnalyzer::bandEdgeHz(BandScale::erb, body)), kLowEndFloorHz, profile.highPassCapHz));
             plan.highPassReason = ChainPlan::HighPass::subsonic;
             continue;
         }
@@ -251,7 +286,9 @@ std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& input, const 
         if (anyOwner && c.role != Role::other && !lowWanted)
         {
             int owned = 0;
+            // Never into a drum's own body: a tom under a loud bass still is a tom.
             while (owned < kBands && centre(owned) < profile.highPassCapHz
+                   && (!isPercussion(c.role) || c.bandsDb[static_cast<size_t>(owned)] < peak - kBodyDb)
                    && toDb(owners[static_cast<size_t>(owned)]) - c.bandsDb[static_cast<size_t>(owned)] >= kOwnedDb)
                 ++owned;
             const double ownedHz = belowContent(SpectrumAnalyzer::bandEdgeHz(BandScale::erb, owned));
@@ -352,7 +389,7 @@ std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& input, const 
         const bool tonal = c.role == Role::bass || c.role == Role::lead || c.role == Role::pad || c.role == Role::vocal;
         const double maxDepth = tonal ? kMaxTonalNotchDb : kMaxNotchDb;
         double lowest = std::max(kMinResonanceHz, 1.5 * plan.cleanup.hpfHz);
-        if (c.role == Role::bass || c.role == Role::kick || c.role == Role::percussion)
+        if (c.role == Role::bass || c.role == Role::kick || isPercussion(c.role))
             lowest = std::max(lowest, 300.0); // below that the peaks are its notes or a drum's tuned body: its tone
         size_t slot = 0;
         for (const auto& r : c.resonances)
@@ -413,7 +450,7 @@ std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& input, const 
         plan.peakKnown = c.truePeakDb > -100.0;
         plan.crestDb = plan.peakKnown ? c.truePeakDb - c.levelP95 : 0.0;
         plan.maxCrestDb = profile.maxCrestDb;
-        plan.percussive = c.role == Role::kick || c.role == Role::percussion;
+        plan.percussive = c.role == Role::kick || isPercussion(c.role);
         plan.overCompressed = plan.peakKnown && !c.intentionalDrive && profile.minCrestDb > 0.0 && plan.crestDb < profile.minCrestDb;
 
         // In the mix: do its quiet moments sink under everything else in its own best bands?
@@ -476,6 +513,11 @@ std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& input, const 
         double maxClip = profile.maxClipDb;
         if (plan.percussive && context.headroomShortDb > 0.0)
             maxClip += 1.0;
+        // Hats and shakers: their peaks are short and carry little power, so they cost the master
+        // no headroom, and clipping them only takes the air off the top.
+        plan.topPercussion = isPercussion(c.role) && powerShareAbove(c.bandsDb, kTopHz) >= kTopShare;
+        if (plan.topPercussion)
+            maxClip = 0.0;
         if (plan.peakKnown && !c.intentionalDrive && !plan.overCompressed && maxClip > 0.0 && excess >= 1.0)
         {
             plan.clipDb = std::min(excess, maxClip);
@@ -504,8 +546,8 @@ std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& input, const 
         {
             const auto& c = channels[i];
             const auto& plan = plans[i];
-            if (!c.valid || !c.carriesMasterPeaks || !plan.dynamicsKnown || !plan.peakKnown || c.intentionalDrive || plan.overCompressed
-                || (c.role != Role::kick && c.role != Role::percussion))
+            if (!c.valid || !c.carriesMasterPeaks || plan.topPercussion || !plan.dynamicsKnown || !plan.peakKnown || c.intentionalDrive || plan.overCompressed
+                || (c.role != Role::kick && !isPercussion(c.role)))
                 continue;
             carriers.push_back(i);
             applied = std::max(applied, c.currentClipDb - plan.clipDb);
@@ -527,6 +569,35 @@ std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& input, const 
             plan.clipper.on = 1.0f;
             plan.clipper.ceilingDb = static_cast<float>(std::round((channels[i].truePeakDb - total) * 10.0) / 10.0);
             plan.clipper.softness = static_cast<float>(profileFor(channels[i].role).softness);
+        }
+    }
+
+    // 3c. Peak budget against the kick: nothing stands over the kick's hits. Sized on the Learn pass's true
+    // peaks (before every clipper), so planning again lands on the same clipping.
+    {
+        double kickTop = -200.0;
+        for (size_t i = 0; i < count; ++i)
+            if (channels[i].valid && channels[i].role == Role::kick && plans[i].peakKnown)
+                kickTop = std::max(kickTop, channels[i].truePeakDb - plans[i].clipDb);
+        for (size_t i = 0; i < count && kickTop > -100.0; ++i)
+        {
+            const auto& c = channels[i];
+            auto& plan = plans[i];
+            if (!c.valid || c.role == Role::kick || c.role == Role::bus || !plan.peakKnown || !plan.dynamicsKnown || c.intentionalDrive
+                || plan.overCompressed)
+                continue;
+            const auto profile = profileFor(c.role);
+            const double keepCrest = std::min(profile.maxCrestDb, 14.0);
+            const double over = c.truePeakDb - plan.clipDb - (kickTop + peakBudgetOffsetDb(c.role, plan.topPercussion));
+            const double room = plan.crestDb - plan.clipDb - keepCrest;
+            const double extra = std::floor(std::min({ over, room, kMaxBudgetClipDb - plan.clipDb }) * 2.0) / 2.0;
+            if (extra < 1.0)
+                continue;
+            plan.budgetClipDb = extra;
+            plan.clipDb += extra;
+            plan.clipper.on = 1.0f;
+            plan.clipper.ceilingDb = static_cast<float>(std::round((c.truePeakDb - plan.clipDb) * 10.0) / 10.0);
+            plan.clipper.softness = static_cast<float>(profile.softness);
         }
     }
 
@@ -601,6 +672,14 @@ std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& input, const 
         plan.overtonesTargetDb = profile.targetDb;
         if (plan.overtonesDb >= profile.targetDb - kThinMarginDb)
             continue;
+        // A natural voice always has overtones: one this bare is a filtered chop, made that way, and
+        // saturation would build the top the producer took out (a real mix: +35 dB above 2 kHz).
+        // A dull synth may just be dull, and a bass's overtones are what small speakers play.
+        if (c.role == Role::vocal && plan.overtonesDb < profile.targetDb - kFilteredDb)
+        {
+            plan.filteredOnPurpose = true;
+            continue;
+        }
 
         // Phase 31: the harmonic enhancer, sized like the saturation: the gentlest amount that reaches
         // the target, stepped down while its overtones would cover a more important channel.

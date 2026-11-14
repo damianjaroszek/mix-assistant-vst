@@ -22,7 +22,7 @@ inline juce::String pl(const char* utf8)
 inline juce::StringArray roleNames()
 {
     return { pl("Inny"), pl("Stopa"), pl("Bas"), pl("Perkusja"), pl("Wokal"), pl("Lead"),
-             pl("Pad"), pl("Efekty"), pl("Bus"), pl("Wysyłka (pogłos, delay)") };
+             pl("Pad"), pl("Efekty"), pl("Bus"), pl("Wysyłka (pogłos, delay)"), pl("Clap / werbel") };
 }
 
 // Phase 31: the Agent's tools in ma::bus::ToolBit order, and the Brain's decisions (ma::bus::ToolDecision).

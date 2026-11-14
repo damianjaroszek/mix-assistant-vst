@@ -59,6 +59,14 @@ constexpr double kLoudMasterLimitDb = 3.0;   // above this the limiter costs the
 constexpr double kLoudMasterAimDb = 2.5;
 constexpr double kMaxLoudMasterClipDb = 6.0; // a clipper on a kick or percussion, in all
 
+// Peak budget against the kick. In a club mix the kick sets the peak of the sum; a part whose peaks stand over
+// the kick's (a sparse spiky track, a bass with a hard attack) costs the master its loudness and gives nothing
+// back. Such a part is clipped down to the kick's peak plus its role's offset, never further than its own
+// crest allows (the clipper stays over the loud parts' level by the role's usual crest) and never by more than
+// kMaxBudgetClipDb in all.
+constexpr double kMaxBudgetClipDb = 12.0;
+double peakBudgetOffsetDb(Role role, bool topPercussion);
+
 struct ChainContext
 {
     double bpm = 0.0;            // releases follow the tempo when known
@@ -100,11 +108,14 @@ struct ChainPlan
     double arrangementDb = 0.0;     // spread left on purpose (quiet bars, breakdowns): volume automation, not compression
     bool lostInQuietParts = false;  // its quiet parts sink under the rest of the mix
     bool percussive = false;        // compression left to the clipper: hits are kept
+    bool topPercussion = false;     // hats, shakers: never clipped (their peaks cost the master nothing)
     bool overCompressed = false;    // already squashed before the Agent: nothing more
     double crestDb = 0.0;           // true peak over the loud parts' RMS
     bool peakKnown = false;         // phase 23: the learn pass's true peak is there; without it crest and clipping are unknown
     double maxCrestDb = 0.0;
     double clipDb = 0.0;
+    // Peak budget: the part of clipDb that keeps this part's peaks under the kick's (beyond the crest rule).
+    double budgetClipDb = 0.0;
     // Phase 28: the part of clipDb that is there for a loud master (beyond the crest rule).
     double loudMasterClipDb = 0.0;
     bool loudMasterCapped = false;  // at kMaxLoudMasterClipDb: more has to come from elsewhere
@@ -115,6 +126,7 @@ struct ChainPlan
     // overtones would cover a more important channel.
     SaturationSettings saturation {}; // off unless planned
     bool saturationConsidered = false; // a role that may take it, with a measurable fundamental
+    bool filteredOnPurpose = false;    // a voice with overtones far under the target: no saturation
     double fundamentalHz = 0.0;
     bool overtonesAboveSub = false;    // bass: what it has above 150 Hz against its sub, not harmonics of one note
     double overtonesDb = -200.0;       // 2nd-8th harmonic region against the fundamental, now

@@ -585,6 +585,7 @@ void AgentProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     alignMeter.prepare(sampleRate);
     alignDelay.prepare(sampleRate, std::max(2, getTotalNumInputChannels()));
     balanceMeter.prepare(sampleRate);
+    tailMeter.prepare(sampleRate);
     liveStereo.prepare(sampleRate);
     learnFeatures.prepare(sampleRate);
     outputSpectrum.prepare(sampleRate, ma::BandScale::erb);
@@ -648,6 +649,11 @@ void AgentProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     inputRms.store(ma::powerToDb(displayRmsMeanSquare));
 
     liveLoudness.process(input, numChannels, numSamples);
+    if (numChannels >= 1)
+    {
+        tailMeter.process(input[0], numChannels >= 2 ? input[1] : nullptr, numSamples);
+        tailSeconds.store(static_cast<float>(tailMeter.seconds()));
+    }
     inputLufs.store(liveLoudness.shortTermLufs());
 
     if (spectrumVisible.load() || brainWantsSpectra.load() || widthWanted.load())
@@ -915,8 +921,23 @@ void AgentProcessor::timerCallback()
     auto state = LearnState::finished;
     if (learnState.compare_exchange_strong(state, LearnState::idle))
         applyLearned();
+    followRoleWithPriority();
     updateDynamicMeters();
     publishToBrain();
+}
+
+// The priority follows the role until the user gives the channel one of their own: a role picked
+// by hand used to leave every channel at the default 5, and then the kick got cut for the bass
+// as readily as the bass for the kick (every collision counted both ways).
+void AgentProcessor::followRoleWithPriority()
+{
+    const auto role = static_cast<ma::Role>(juce::jlimit(0, ma::kRoles - 1, juce::roundToInt(parameters.getRawParameterValue(roleId)->load())));
+    const int priority = juce::roundToInt(parameters.getRawParameterValue(priorityId)->load());
+    const int wanted = ma::defaultPriority(role);
+    const bool untouched = priority == 5 || (priorityRole >= 0 && priority == ma::defaultPriority(static_cast<ma::Role>(priorityRole)));
+    if (untouched && priority != wanted)
+        setParam(priorityId, static_cast<float>(wanted));
+    priorityRole = static_cast<int>(role);
 }
 
 ma::WidthSettings AgentProcessor::liveWidth() const
@@ -951,6 +972,8 @@ void AgentProcessor::planWidthNow(ma::bus::Region& region, std::uint64_t now)
     {
         if (!ma::bus::read(region.slots[s], other, now))
             continue;
+        if (other.sessionId != 0 && sessionId.load() != 0 && other.sessionId != sessionId.load())
+            continue; // another project's channel is not in this mix's width
         anyRequest = anyRequest || ma::widthRequested(other.widthRequest);
         ma::WidthInput in;
         in.valid = other.stereoValid != 0;
@@ -1018,7 +1041,7 @@ void AgentProcessor::planWidthNow(ma::bus::Region& region, std::uint64_t now)
 
 void AgentProcessor::updateDynamicMeters()
 {
-    const auto now = juce::Time::getMillisecondCounterHiRes();
+    const auto now = static_cast<double>(ma::clock::nowMs());
     const float peak = sidechainPeakHold.exchange(0.0f);
     const double peakDb = ma::gainToDb(peak);
     if (peakDb > -80.0)
@@ -1058,8 +1081,23 @@ void AgentProcessor::publishToBrain()
         return;
 
     const auto now = ma::SharedSession::nowMs();
-    brainAlive.store(ma::bus::isAlive(region->header.brainHeartbeatMs.load(), now));
-    brainWantsSpectra.store(now < region->header.spectraWantedUntil.load());
+    // Which Brain this Agent belongs to (two projects can be open at once).
+    {
+        if (ma::bus::findBrain(*region, sessionId.load(), now) != nullptr && sessionId.load() != 0)
+            brainSeenMs = now;
+        else if (brainSeenMs == 0)
+            brainSeenMs = now; // counted from the first look
+        const auto chosen = ma::bus::chooseSession(*region, sessionId.load(), ma::SharedSession::processId(), now, now - brainSeenMs);
+        if (chosen != sessionId.load())
+        {
+            sessionId.store(chosen);
+            brainSeenMs = now;
+        }
+    }
+    const auto* brain = ma::bus::findBrain(*region, sessionId.load(), now);
+    brainAlive.store(brain != nullptr);
+    brainWantsSpectra.store(brain != nullptr && now < brain->spectraWantedUntil.load());
+    brainComparing.store(brain != nullptr && brain->compareBefore.load() != 0);
 
     if (slotIndex < 0 || region->slots[slotIndex].owner.load() != instanceId)
         slotIndex = ma::bus::claimSlot(*region, instanceId, now);
@@ -1175,6 +1213,7 @@ void AgentProcessor::publishToBrain()
     data.alignZero = alignZero.load();
     data.balanceValid = balanceSeen.load() ? 1 : 0;
     data.inputBalanceDb = inputBalance.load();
+    data.tailSeconds = tailSeconds.load();
     for (int r = 0; r < ma::kMaxResonances; ++r)
         data.resonances[r] = result.resonances[static_cast<size_t>(r)];
     data.sidechainConnected = sidechainSeen ? 1 : 0;
@@ -1183,6 +1222,7 @@ void AgentProcessor::publishToBrain()
     data.sidechainLowCorrelation = static_cast<float>(lowCorrelation.load());
     data.correlationValid = correlationValid() ? 1 : 0;
     data.keyId = keyId.load();
+    data.sessionId = sessionId.load();
     data.duckKey = dynamics.duckKey;
     data.duckKeyFound = !sidechainSeen && duckSlot.load() >= 0 ? 1 : 0;
     data.keySinceMs = keySinceMs;
@@ -1212,7 +1252,8 @@ void AgentProcessor::readBrainNotes(ma::bus::Region& region)
 
 void AgentProcessor::handleBrainCommand(ma::bus::Region& region)
 {
-    useBackup.store(backupValid && brainAlive.load() && region.header.compareBefore.load() != 0);
+    juce::ignoreUnused(region);
+    useBackup.store(backupValid && brainAlive.load() && brainComparing.load());
 
     ma::bus::Command command {};
     if (slotIndex < 0 || !ma::bus::readCommand(region.slots[slotIndex], command))
@@ -1841,6 +1882,7 @@ void AgentProcessor::getStateInformation(juce::MemoryBlock& destData)
                            + juce::String(r.persistence, 2));
     state.setProperty(resonancesProperty, resonances.joinIntoString(" "), nullptr);
     state.setProperty(keyIdProperty, juce::String::toHexString(static_cast<juce::int64>(keyId.load())), nullptr);
+    state.setProperty("sessionId", juce::String::toHexString(static_cast<juce::int64>(sessionId.load())), nullptr);
     juce::StringArray keys;
     for (const auto& key : unmaskKeyNow)
         keys.add(juce::String::toHexString(static_cast<juce::int64>(key.load())));
@@ -1965,6 +2007,8 @@ void AgentProcessor::setStateInformation(const void* data, int sizeInBytes)
                                                       found[r * 4 + 2].getFloatValue(), found[r * 4 + 3].getFloatValue() };
     // Phase 30: the id other Agents know this channel by (a clone that loads it while the original
     // runs takes a new one in updateKeys), and the channels its dips give way to.
+    sessionId.store(static_cast<std::uint64_t>(state.getProperty("sessionId").toString().getHexValue64()));
+    brainSeenMs = 0;
     const auto savedKey = static_cast<std::uint64_t>(state.getProperty(keyIdProperty).toString().getHexValue64());
     if (savedKey != 0)
     {

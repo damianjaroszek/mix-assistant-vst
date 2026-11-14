@@ -706,21 +706,24 @@ void AgentEditor::updateDuckStatus()
     if (!processor.sidechainConnected() && on && processor.duckKeyChannel().isNotEmpty())
     {
         // Phase 30: no cable, the key comes over the bus.
-        text = pl("Bez kabla: słucha „") + processor.duckKeyChannel() + pl("” przez wspólną pamięć, ustępuje o ")
-               + juce::String(processor.duckReductionDb(), 1) + " dB";
-        colour = colours::good;
+        text = pl("KABEL OD STOPY: BRAK. Tryb awaryjny: słucha „") + processor.duckKeyChannel() + pl("” przez wspólną pamięć, ustępuje o ")
+               + juce::String(processor.duckReductionDb(), 1)
+               + pl(" dB, ale o jeden bufor za późno. Podłącz kabel: w mikserze FL zaznacz kanał stopy, kliknij prawym strzałkę na dole "
+                    "tego kanału, „Sidechain to this track”, potem tutaj koło zębate → „Processing” → wejście sidechain 1.");
+        colour = colours::warning;
     }
     else if (!processor.sidechainConnected())
     {
-        text = on ? pl("Brak sygnału na wejściu sidechain. W mikserze FL: na kanale stopy kliknij prawym strzałkę "
+        text = on ? pl("KABEL SIDECHAIN: BRAK SYGNAŁU. W mikserze FL: na kanale stopy kliknij prawym strzałkę "
                        "wysyłki do tego kanału, wybierz „Sidechain to this track”, potem w oknie wtyczki (ikona "
                        "wtyczki, Processing) ustaw wejście sidechain.")
-                  : pl("Wyłączone. Mózg może je zaproponować dla basu pod stopą.");
+                  : pl("Wyłączone, kabla sidechain nie widać. Na basie podłącz kabel od stopy (kroki w Mózgu, zakładka „Jak zacząć”): "
+                       "Mózg zaproponuje wtedy ustępowanie i zmierzy fazę.");
         colour = on ? colours::warning : colours::quiet;
     }
     else
     {
-        text = "Sidechain " + ma::ui::formatDb(processor.sidechainLevelDb(), "dBFS");
+        text = pl("Kabel sidechain: jest, ") + ma::ui::formatDb(processor.sidechainLevelDb(), "dBFS");
         if (on)
             text += pl(", ustępuje o ") + juce::String(processor.duckReductionDb(), 1) + " dB";
         if (synced && processor.hostTempo() > 0.0)

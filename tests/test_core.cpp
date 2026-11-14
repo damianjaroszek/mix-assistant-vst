@@ -32,6 +32,7 @@
 #include "ma/GainStaging.h"
 #include "ma/LevelStats.h"
 #include "ma/Masking.h"
+#include "ma/MasterCheck.h"
 #include "ma/MixBus.h"
 #include "ma/CorrelationMeter.h"
 #include "ma/LoudnessMeter.h"
@@ -1380,7 +1381,7 @@ void testChainPlanner()
     std::printf("      pad hpf %.0f Hz, bass comp %.1f dB %.1f:1 makeup %.1f (spread %.1f -> %.1f), evener %.0f Hz\n",
                 pad.cleanup.hpfHz, bass.compressor.thresholdDb, bass.compressor.ratio, bass.compressor.makeupDb, bass.spreadDb,
                 bass.spreadAfterDb, bass.evener.referenceHz);
-    check(kick.cleanup.hpfHz <= 30.0f && bass.cleanup.hpfHz <= 30.0f, "kick and bass only lose rumble");
+    check(kick.cleanup.hpfHz >= 30.0f && kick.cleanup.hpfHz <= 40.0f && bass.cleanup.hpfHz >= 30.0f && bass.cleanup.hpfHz <= 40.0f, "kick and bass only lose what a club system cannot play");
     check(pad.highPassReason != ma::ChainPlan::HighPass::none && pad.cleanup.hpfHz >= 60.0f && pad.cleanup.hpfHz <= 250.0f,
           "the pad loses what is under its notes");
     // A lead with real content down low, where the kick and bass are far louder: it gives way.
@@ -1431,9 +1432,44 @@ void testChainPlanner()
           "an unknown peak does not read as over-compressed");
     check(unknownPlans[4].clipper.on < 0.5f, "and plans no clipper");
 
-    // Spiky percussion: the clipper shaves only the excess.
+    // Spiky percussion: the clipper shaves only the excess. Hats (most of their power above
+    // 5 kHz) are left alone: their peaks cost the master nothing.
     auto spiky = mix;
     spiky[4].truePeakDb = spiky[4].levelP95 + 16.0;
+    spiky[0].truePeakDb = spiky[4].truePeakDb + 12.0; // far under the kick's hits
+    check(ma::planChains(spiky)[4].clipper.on < 0.5f && ma::planChains(spiky)[4].topPercussion, "hats under the kick are never clipped");
+
+    // Peak budget: hats whose spikes stand over the kick's hits are held to 8 dB under them, a bass with a
+    // hard attack to 1 dB under, neither further than its crest allows; planning again changes nothing.
+    {
+        auto budget = mix;
+        const int kick = 0;
+        int bass = -1;
+        for (size_t i = 0; i < budget.size(); ++i)
+            if (budget[i].role == ma::Role::bass)
+                bass = static_cast<int>(i);
+        budget[4].truePeakDb = budget[4].levelP95 + 30.0;
+        budget[static_cast<size_t>(kick)].truePeakDb = budget[4].truePeakDb - 2.0;
+        if (bass >= 0)
+            budget[static_cast<size_t>(bass)].truePeakDb = budget[static_cast<size_t>(kick)].truePeakDb + 4.0;
+        const auto plans = ma::planChains(budget);
+        const double kickTop = budget[static_cast<size_t>(kick)].truePeakDb - plans[static_cast<size_t>(kick)].clipDb;
+        check(plans[4].budgetClipDb >= 1.0 && plans[4].clipper.on > 0.5f && plans[4].clipper.ceilingDb <= kickTop - 6.9
+                  && plans[4].clipper.ceilingDb >= budget[4].levelP95 + 12.9 && plans[4].clipDb <= ma::kMaxBudgetClipDb + 1e-6,
+              "hats standing over the kick are held under it (" + std::to_string(plans[4].clipDb).substr(0, 4) + " dB)");
+        if (bass >= 0 && budget[static_cast<size_t>(bass)].truePeakDb - budget[static_cast<size_t>(bass)].levelP95 > 12.0)
+            check(plans[static_cast<size_t>(bass)].budgetClipDb >= 1.0
+                      && plans[static_cast<size_t>(bass)].clipper.ceilingDb <= kickTop - 0.4,
+                  "a bass peaking over the kick is held just under it");
+        const auto again = ma::planChains(budget);
+        check(std::abs(again[4].clipper.ceilingDb - plans[4].clipper.ceilingDb) < 0.01, "the budget is the same on a second plan");
+        auto noKick = budget;
+        noKick[static_cast<size_t>(kick)].role = ma::Role::percussion;
+        check(ma::planChains(noKick)[4].budgetClipDb == 0.0, "without a kick there is no budget");
+    }
+    for (int b = 0; b < ma::SpectrumAnalyzer::numBandsFor(ma::BandScale::erb); ++b) // a clap or tom: body under the top
+        if (ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b) > 5000.0)
+            spiky[4].bandsDb[static_cast<size_t>(b)] -= 25.0;
     const auto spikyPlan = ma::planChains(spiky)[4];
     check(spikyPlan.clipper.on > 0.5f && spikyPlan.clipDb >= 1.0 && spikyPlan.clipDb <= 4.0,
           "spiky percussion gets a clipper (" + std::to_string(spikyPlan.clipDb).substr(0, 4) + " dB)");
@@ -3537,6 +3573,9 @@ void testLoudMasterClip()
     };
     mix[0].carriesMasterPeaks = mix[2].carriesMasterPeaks = true;
     mix[1].carriesMasterPeaks = true; // not percussion: never clipped for it
+    for (int b = 0; b < ma::SpectrumAnalyzer::numBandsFor(ma::BandScale::erb); ++b) // a clap, not a hat (hats are never clipped)
+        if (ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b) > 5000.0)
+            mix[2].bandsDb[static_cast<size_t>(b)] -= 25.0;
     ma::ChainContext context { 124.0, 0.0 };
     const auto base = ma::planChains(mix, context);
     check(base[0].loudMasterClipDb == 0.0, "no preview, no extra clipping");
@@ -4081,6 +4120,164 @@ void testAlignment()
     }
 }
 
+// "Kontrola mastera": what mastering added, took off the peaks and did to the tone.
+void testTailMeter()
+{
+    // Noise bursts that die away at a known rate: the meter reads the time to fall 60 dB.
+    const double rate = 48000.0;
+    auto measure = [&](double rt60, double everySeconds, double seconds)
+    {
+        ma::TailMeter meter;
+        meter.prepare(rate);
+        std::uint32_t seed = 12345u;
+        std::vector<float> block(512);
+        const double perSample = std::pow(10.0, -60.0 / (20.0 * rt60 * rate));
+        double gain = 0.0;
+        long long n = 0;
+        const long long every = static_cast<long long>(everySeconds * rate), total = static_cast<long long>(seconds * rate);
+        while (n < total)
+        {
+            for (auto& sample : block)
+            {
+                if (n % every == 0)
+                    gain = 0.5;
+                seed = seed * 1664525u + 1013904223u;
+                sample = static_cast<float>(gain * (static_cast<double>(seed >> 8) / 8388608.0 - 1.0));
+                gain *= perSample;
+                ++n;
+            }
+            meter.process(block.data(), nullptr, static_cast<int>(block.size()));
+        }
+        return meter;
+    };
+    {
+        const auto meter = measure(1.0, 2.0, 30.0);
+        check(meter.valid(), "a one-second tail with room to fall is measured");
+        check(std::abs(meter.seconds() - 1.0) < 0.25, "and reads about a second");
+    }
+    {
+        const auto meter = measure(2.5, 0.48, 30.0); // a hit every beat at 125 BPM
+        check(meter.valid(), "a long tail under a hit every beat is still measured");
+        check(std::abs(meter.seconds() - 2.5) < 0.7, "and reads about 2.5 s");
+    }
+    {
+        const auto meter = measure(0.4, 1.0, 20.0);
+        check(meter.valid() && meter.seconds() < 0.6, "a short tail reads short");
+    }
+    {
+        ma::TailMeter meter;
+        meter.prepare(rate);
+        std::vector<float> block(512, 0.25f);
+        for (int i = 0; i < 2000; ++i)
+            meter.process(block.data(), nullptr, 512);
+        check(!meter.valid() && meter.seconds() == 0.0, "a steady signal has no tail to measure");
+    }
+    check(std::abs(ma::tailBars(1.92, 125.0) - 1.0) < 1e-9 && ma::tailBars(1.0, 0.0) == 0.0, "a tail in bars at the tempo");
+}
+
+void testMasterCheck()
+{
+    const int bands = ma::SpectrumAnalyzer::numBandsFor(ma::BandScale::erb);
+    ma::MasterSide before, after;
+    before.valid = after.valid = true;
+    before.seconds = 30.0;
+    after.seconds = 29.5;
+    before.integratedLufs = -20.0;
+    before.truePeakDb = -6.0;
+    after.integratedLufs = -7.0;
+    after.truePeakDb = -1.0;
+    after.lowSideDb = -30.0;
+    for (int b = 0; b < bands; ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        before.bandsDb[static_cast<size_t>(b)] = -30.0;
+        after.bandsDb[static_cast<size_t>(b)] = -17.0 + (hz >= 9000.0 ? 4.0 : 0.0); // mastering lifts the top 4 dB
+    }
+    const auto result = ma::compareMaster(before, after);
+    check(result.valid, "master check: both sides measured the same stretch");
+    checkNear(result.gainDb, 13.0, 0.01, "master check: loudness added");
+    checkNear(result.densityDb, 8.0, 0.01, "master check: what came off the peaks");
+    check(result.largestZone == 3 && result.zoneChangeDb[3] > 3.5 && std::abs(result.zoneChangeDb[1]) < 0.5,
+          "master check: the top is the range mastering moved");
+    check(!result.overs && !result.lowSideWide, "master check: peak and low end fine");
+    const auto tilt = ma::cappedMasterTilt(result);
+    check(tilt[static_cast<size_t>(bands - 1)] <= ma::kMasterTiltCapDb + 1e-9 && tilt[static_cast<size_t>(bands - 1)] > 2.5,
+          "master check: the tilt is capped");
+    auto hot = after;
+    hot.truePeakDb = 0.4;
+    hot.lowSideDb = -8.0;
+    check(ma::compareMaster(before, hot).overs && ma::compareMaster(before, hot).lowSideWide, "master check: overs and a wide low end are flagged");
+    auto other = after;
+    other.seconds = 12.0;
+    check(!ma::compareMaster(before, other).valid, "master check: different stretches do not compare");
+
+    auto region = std::make_unique<ma::bus::Region>();
+    ma::bus::initialise(*region);
+    auto* entry = ma::bus::claimBrain(*region, 77, 1, 1000);
+    ma::bus::MasterValues values, read;
+    check(entry != nullptr && !ma::bus::readMaster(*entry, read, 1000), "master check: nothing on the bus before the plugin writes");
+    values.seconds = 12.0f;
+    values.integratedLufs = -7.5f;
+    values.bandsDb[5] = -21.0f;
+    ma::bus::publishMaster(*entry, values, 1000);
+    check(ma::bus::readMaster(*entry, read, 1500) && read.integratedLufs == -7.5f && read.bandsDb[5] == -21.0f, "master check: the report crosses the bus");
+    check(!ma::bus::readMaster(*entry, read, 60000), "master check: a stale report is not read");
+}
+
+// Engineer's review: a note is not a tonal problem, a tom keeps its body, the clap its place.
+void testReviewFixes()
+{
+    // One band 6 dB over the corridor's edge (a bass note) is not flagged; three bands are.
+    const auto target = ma::builtinHouseTarget();
+    const int bands = ma::SpectrumAnalyzer::numBandsFor(ma::BandScale::erb);
+    int at = 0;
+    while (ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, at) < 400.0)
+        ++at;
+    auto note = target.centre;
+    note[static_cast<size_t>(at)] = target.high[static_cast<size_t>(at)] + 3.0;
+    check(ma::compareToTarget(note, target).regions.empty(), "a single band standing out (a note) is not a tonal region");
+    auto bump = target.centre;
+    for (int b = at - 1; b <= at + 1; ++b)
+        bump[static_cast<size_t>(b)] = target.high[static_cast<size_t>(b)] + 4.0;
+    check(!ma::compareToTarget(bump, target).regions.empty(), "a bump three bands wide still is");
+
+    // A tom under a loud kick and bass keeps its body; the clap role keeps the centre and its level.
+    constexpr double sr = 48000.0;
+    std::vector<ma::ChainChannel> mix = { measuredChannel(ma::Role::kick, 1, 0.0, sr), measuredChannel(ma::Role::bass, 2, 0.0, sr),
+                                          measuredChannel(ma::Role::percussion, 4, -12.0, sr) };
+    for (int b = 0; b < bands; ++b)
+    {
+        const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+        mix[2].bandsDb[static_cast<size_t>(b)] = -40.0 - 12.0 * std::abs(std::log2(hz / 150.0)); // body at 150 Hz
+    }
+    const auto tom = ma::planChains(mix)[2];
+    check(tom.cleanup.hpfHz <= 100.0f, "a tom keeps its body under the kick and bass (" + std::to_string(static_cast<int>(tom.cleanup.hpfHz)) + " Hz)");
+    check(ma::stemGroupForRole(ma::Role::clap) == static_cast<int>(ma::StemGroup::drums) && ma::defaultPriority(ma::Role::clap) < ma::defaultPriority(ma::Role::percussion)
+              && ma::roleLevelOffsetDb(ma::Role::clap, nullptr) > ma::roleLevelOffsetDb(ma::Role::percussion, nullptr),
+          "the clap is a drum, ahead of the other percussion and louder");
+
+    // Two projects open at once: each Agent stays with its own Brain.
+    auto region = std::make_unique<ma::bus::Region>();
+    ma::bus::initialise(*region);
+    const std::uint64_t now = 100000;
+    auto* first = ma::bus::claimBrain(*region, 11, 500, now);
+    check(first != nullptr && ma::bus::claimBrain(*region, 11, 500, now) == first, "a Brain keeps its entry");
+    first->heartbeatMs.store(now);
+    check(ma::bus::chooseSession(*region, 0, 500, now, 0) == 11, "a new Agent joins the Brain in its process");
+    check(ma::bus::chooseSession(*region, 0, 777, now, 0) == 11, "or the only Brain alive (a bridged plugin)");
+    auto* second = ma::bus::claimBrain(*region, 22, 600, now);
+    second->heartbeatMs.store(now);
+    check(second != first && ma::bus::chooseSession(*region, 11, 500, now, 0) == 11 && ma::bus::chooseSession(*region, 22, 600, now, 0) == 22,
+          "with two Brains alive each Agent keeps its own");
+    check(ma::bus::chooseSession(*region, 0, 600, now, 0) == 22 && ma::bus::chooseSession(*region, 0, 777, now, 0) == 0,
+          "a new Agent joins the one in its process, and none when it cannot tell");
+    check(ma::bus::chooseSession(*region, 11, 600, now, 0) == 22, "an Agent that joined the other project's Brain first comes home");
+    check(ma::bus::chooseSession(*region, 33, 600, now, 2000) == 33, "a Brain missing for a moment (still loading) is waited for");
+    check(ma::bus::chooseSession(*region, 33, 600, now, ma::bus::kRejoinMs) == 22, "a Brain that was replaced: its Agents join the new one");
+    first->heartbeatMs.store(1); // long gone
+    check(ma::bus::findBrain(*region, 11, now) == nullptr && ma::bus::findBrain(*region, 0, now) == second, "a dead Brain is not found");
+}
+
 int main()
 {
     testLoudness();
@@ -4132,6 +4329,9 @@ int main()
     testWidthSlider();
     testStereoHysteresis();
     testLoudMasterClip();
+    testReviewFixes();
+    testTailMeter();
+    testMasterCheck();
     testSectionAutomation();
     testEnergyMap();
     testGhostNoise();
