@@ -505,6 +505,17 @@ void BrainEditor::updateGuide()
         setup.steps.push_back(step);
     }
 
+    {
+        brain::GuideView::Step step;
+        step.title = pl("Kontrola po masteringu (wtyczka po Ozone)");
+        step.state = mix.masterCheckPresent ? State::done : State::optional;
+        step.detail = mix.masterCheckPresent
+                          ? pl("„Kontrola mastera” działa: raport ma pozycję „Po masteringu”, a balans tonalny i gęstość liczą się po Ozone.")
+                          : pl("Wstaw „Mix Assistant Master Check” jako ostatni efekt na kanale Master, po Ozone. Mózg zobaczy wtedy, co "
+                               "naprawdę wychodzi po masteringu, i zaproponuje poprawki w miksie (zatwierdzasz je sam przez „Zastosuj”).");
+        setup.steps.push_back(step);
+    }
+
     // The loop the user comes back to.
     auto& loop = sections[1];
     loop.title = pl("Miks (powtarzaj po każdej większej zmianie)");

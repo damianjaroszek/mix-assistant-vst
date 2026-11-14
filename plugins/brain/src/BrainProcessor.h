@@ -13,6 +13,7 @@
 #include "ma/EnergyMap.h"
 #include "ma/GhostNoise.h"
 #include "ma/LoudnessMeter.h"
+#include "ma/MasterCheck.h"
 #include "ma/MasterPreview.h"
 #include "ma/KickTuning.h"
 #include "ma/Masking.h"
@@ -44,6 +45,7 @@ struct MixSnapshot
         unknown
     };
 
+    bool masterCheckPresent = false; // the plugin after the mastering chain reports
     // Kick-to-bass sidechain cable: bass Agents without one (judged while a kick plays, kept while it rests).
     juce::StringArray bassWithoutCable;
     bool kickAndBass = false;
@@ -85,6 +87,7 @@ struct MixSnapshot
         juce::String title;
         juce::String detail;
         bool gate = false; // phase 35: the "ready for Ozone?" summary of the others
+        bool afterMastering = false; // the master check's item: never counted by the gate
     };
 
     std::vector<Channel> channels;
@@ -283,6 +286,7 @@ public:
     void requestReset()
     {
         resetRequested.store(true);
+        ++resetEpoch; // the master check after the mastering chain starts over with us
         mix.master.valid = false; // the stereo picture starts over too
         dropResetPending = true;  // and so does the drop
         previewResetRequested.store(true);
@@ -299,6 +303,7 @@ public:
     static int numMasterBands() { return ma::SpectrumAnalyzer::numBandsFor(ma::kTonalScale); }
     ma::Curve averageSpectrum() const;
     double secondsAnalysed() const { return analysedSeconds.load(); }
+    const ma::MasterCheck& masterChecked() const { return masterCheck; }
     float peakCeilingDb() const { return peakCeiling->load(); }
     double lowCorrelation() const { return correlationLow.load(); }
     double fullCorrelation() const { return correlationFull.load(); }
@@ -809,6 +814,12 @@ private:
     std::vector<ma::LostSpan> lostSpans;
     std::vector<juce::String> lostNames;
     std::uint32_t lostAtMs = 0;
+    // "Kontrola mastera": the plugin after the mastering chain, read in the timer.
+    std::uint32_t resetEpoch = 0;
+    ma::MasterSide masterAfter;
+    ma::MasterCheck masterCheck;
+    void updateMasterCheck(const ma::bus::BrainEntry* entry, std::uint64_t nowMs);
+    juce::String masterCheckVerdict(MixSnapshot::Status& status) const;
     std::map<std::uint64_t, bool> bassCable; // bass Agent -> its kick cable brought signal the last time a kick played
     double firstDropSecond = INFINITY; // where the drop came in, in the song
     std::atomic<double> songSeconds { -1.0 }; // the host's position while playing, else -1

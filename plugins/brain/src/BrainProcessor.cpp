@@ -775,6 +775,9 @@ void BrainProcessor::timerCallback()
     if (editorOpen && !useProfiles && brainEntry != nullptr)
         brainEntry->spectraWantedUntil.store(now + kSpectraRequestMs);
 
+    if (brainEntry != nullptr)
+        brainEntry->resetEpoch.store(resetEpoch);
+    updateMasterCheck(brainEntry, now);
     collectChannels(*region, now);
     accumulateDrop();
     updateKey();
@@ -1734,9 +1737,93 @@ void BrainProcessor::setTonalAfterLimiter(bool on)
     parameters.state.setProperty("tonalAfterLimiter", on, nullptr);
 }
 
+// "Kontrola mastera": what the plugin after the mastering chain measures against our own master
+// measurements since the same reset.
+void BrainProcessor::updateMasterCheck(const ma::bus::BrainEntry* entry, std::uint64_t nowMs)
+{
+    masterAfter = {};
+    masterCheck = {};
+    ma::bus::MasterValues values;
+    mix.masterCheckPresent = entry != nullptr && ma::bus::readMaster(*entry, values, nowMs);
+    if (!mix.masterCheckPresent)
+        return;
+    masterAfter.valid = true;
+    masterAfter.seconds = values.seconds;
+    masterAfter.integratedLufs = values.integratedLufs;
+    masterAfter.maxShortTermLufs = values.maxShortTermLufs;
+    masterAfter.truePeakDb = values.truePeakDb;
+    masterAfter.sideDb = values.sideDb;
+    masterAfter.lowSideDb = values.lowSideDb;
+    for (size_t b = 0; b < masterAfter.bandsDb.size() && b < static_cast<size_t>(ma::bus::kBands); ++b)
+        masterAfter.bandsDb[b] = values.bandsDb[b];
+    ma::MasterSide before;
+    // The playback simulator and the audible ghosts sit in our output: what comes after them is not the mix.
+    before.valid = !capturing && !comparing && previewSystem.load() == 0 && !ghostAudible.load();
+    before.seconds = secondsAnalysed();
+    before.integratedLufs = std::isfinite(integratedLufs()) ? integratedLufs() : -200.0;
+    before.truePeakDb = std::isfinite(truePeakDb()) ? truePeakDb() : -200.0;
+    before.bandsDb = averageSpectrum();
+    masterCheck = ma::compareMaster(before, masterAfter);
+}
+
+juce::String BrainProcessor::masterCheckVerdict(MixSnapshot::Status& status) const
+{
+    using Status = MixSnapshot::Status;
+    status = Status::unknown;
+    const auto& after = masterAfter;
+    if (after.seconds < ma::kMasterMinimumSeconds || after.integratedLufs < -100.0)
+        return pl("Wtyczka po Ozone jest podłączona. Puść drop (albo cały utwór): zbieram pomiar po masteringu.");
+    juce::String text = pl("Master: ") + juce::String(after.integratedLufs, 1) + " LUFS"
+                        + (after.maxShortTermLufs > -100.0 ? pl(" (najgłośniejsze 3 s ") + juce::String(after.maxShortTermLufs, 1) + ")" : juce::String())
+                        + pl(", szczyt ") + juce::String(after.truePeakDb, 1) + pl(" dBTP, PLR ") + juce::String(after.truePeakDb - after.integratedLufs, 1)
+                        + pl(" dB. Twoje wzorce klubowe: drop od −4 do −10 LUFS, PLR od 5 do 10 dB.");
+    if (!masterCheck.valid)
+        return text + pl(" Porównanie z miksem przed Ozone pojawi się, gdy oba pomiary obejmą ten sam fragment (wyłącz symulację odsłuchu, "
+                         "kliknij „Od nowa” i puść drop).");
+    status = Status::good;
+    text += pl("\nOzone dodał ") + juce::String(masterCheck.gainDb, 1) + pl(" dB głośności i zabrał szczytom ") + juce::String(masterCheck.densityDb, 1)
+            + pl(" dB (miks miał PLR ") + juce::String(masterCheck.plrBeforeDb, 1) + " dB).";
+    if (masterCheck.densityDb > 6.0)
+    {
+        status = Status::warning;
+        text += pl(" To dużo pracy dla limitera: uderzenia tracą kształt")
+                + (loudMasterPlan.loudest.isNotEmpty() ? pl(". Najwyższe szczyty miksu robi „") + loudMasterPlan.loudest + pl("”") : juce::String())
+                + pl(". Kliknij „Analizuj” (cały łańcuch): propozycja przytnie szczyty na śladach, zanim trafią do Ozone.");
+    }
+    static const char* const zoneNames[] = { "dół (40–250 Hz)", "niski środek (250 Hz–2 kHz)", "wysoki środek (2–9 kHz)", "góra (9–16 kHz)" };
+    juce::StringArray moved;
+    for (int z = 0; z < ma::kTonalZones; ++z)
+        if (std::abs(masterCheck.zoneChangeDb[static_cast<size_t>(z)]) >= ma::kMasterToneChangeDb)
+            moved.add(pl(zoneNames[z]) + " " + (masterCheck.zoneChangeDb[static_cast<size_t>(z)] > 0 ? "+" : "")
+                      + juce::String(masterCheck.zoneChangeDb[static_cast<size_t>(z)], 1) + " dB");
+    if (!moved.isEmpty())
+    {
+        status = Status::warning;
+        text += pl("\nOzone zmienia barwę: ") + moved.joinIntoString(", ")
+                + pl(". Tak duża korekta na masterze to znak, że miks powinien to mieć sam. Balans tonalny liczę teraz po Ozone, "
+                     "więc „Analizuj” zaproponuje poprawkę w miksie, a Ozone będzie miał mniej do roboty.");
+    }
+    else
+        text += pl("\nBarwa: Ozone nie zmienia żadnego zakresu o więcej niż 2 dB. Balans tonalny liczę po Ozone.");
+    if (masterCheck.overs)
+    {
+        status = Status::problem;
+        text += pl("\nSzczyt po masteringu przekracza −0.1 dBTP: ustaw sufit limitera w Ozone na −1 dBTP, inaczej MP3 i streaming będą przesterowane.");
+    }
+    if (masterCheck.lowSideWide)
+    {
+        status = status == Status::problem ? status : Status::warning;
+        text += pl("\nPo masteringu dół poniżej 120 Hz nie jest w mono (side ") + juce::String(after.lowSideDb, 1)
+                + pl(" dB względem mid): sprawdź poszerzanie w Ozone, klubowe systemy sumują dół.");
+    }
+    if (after.sideDb > -100.0)
+        text += pl("\nSzerokość po masteringu (side do mid od 150 Hz): ") + juce::String(after.sideDb, 1) + pl(" dB; wzorce: od −12 do −2 dB.");
+    return text;
+}
+
 bool BrainProcessor::limiterTiltKnown() const
 {
-    return previewSeconds.load() >= kMinimumSeconds;
+    return masterCheck.valid || previewSeconds.load() >= kMinimumSeconds;
 }
 
 ma::Curve BrainProcessor::limiterTilt() const
@@ -1744,6 +1831,9 @@ ma::Curve BrainProcessor::limiterTilt() const
     ma::Curve tilt {};
     if (!limiterTiltKnown())
         return tilt;
+    // Measured after the real mastering chain: that is the tone the listener gets.
+    if (masterCheck.valid)
+        return ma::cappedMasterTilt(masterCheck);
     // Only the shape counts (the level is the master target's): the mean over the range the tonal
     // balance is normalised on comes off first. Our limiter is a plain broadband one; a mastering
     // maximizer is gentler on the low end, so what is left is capped.
@@ -1802,7 +1892,7 @@ juce::StringArray BrainProcessor::ozoneCurve(const ma::TonalComparison& tonal) c
 juce::String BrainProcessor::builtinNote() const
 {
     return currentTarget.valid() ? juce::String()
-                                 : pl(" To wbudowany cel z dwóch masterów house, szeroki jak korytarz TBC; własny („Nowy cel”, "
+                                 : pl(" To wbudowany cel z 13 klubowych masterów; własny („Nowy cel”, "
                                       "2-3 referencje) zawsze ma pierwszeństwo.");
 }
 
@@ -2100,6 +2190,16 @@ void BrainProcessor::buildReport()
         MixSnapshot::ReportItem item;
         item.title = pl("Gotowość do głośnego mastera");
         item.detail = previewVerdict(item.status);
+        report.push_back(item);
+    }
+
+    // "Kontrola mastera": the mix after the real mastering chain.
+    if (mix.masterCheckPresent)
+    {
+        MixSnapshot::ReportItem item;
+        item.title = pl("Po masteringu (Kontrola mastera)");
+        item.afterMastering = true;
+        item.detail = masterCheckVerdict(item.status);
         report.push_back(item);
     }
 
@@ -2419,7 +2519,9 @@ void BrainProcessor::buildReport()
                 offsets.add(zoneName(z) + " " + signedOneDecimal(zone.offsetDb));
                 offCentre = offCentre || std::abs(zone.offsetDb) > 0.75;
             }
-            const auto curveText = afterLimiterOn && limiterTiltKnown()
+            const auto curveText = afterLimiterOn && masterCheck.valid
+                                       ? pl(" Krzywa zmierzona po Ozone („Kontrola mastera”), więc porównuję to, co usłyszy słuchacz.")
+                                       : afterLimiterOn && limiterTiltKnown()
                                        ? pl(" Krzywa jak po limiterze do ") + juce::String(masterTargetLufs(), 1)
                                              + pl(" LUFS (szacunek z podglądu mastera, referencje są masterami).")
                                        : pl(" Krzywa miksu tak, jak gra (bez limitera).");
@@ -3106,8 +3208,8 @@ void BrainProcessor::buildReport()
             blockers.add(pl("przełącz odsłuch na „Pełne pasmo”"));
         for (const auto& item : report)
         {
-            if (item.group == MixSnapshot::ReportGroup::arrangement)
-                continue;
+            if (item.group == MixSnapshot::ReportGroup::arrangement || item.afterMastering)
+                continue; // what comes after Ozone does not decide whether the mix is ready for it
             if (item.status == Status::problem)
                 blockers.add(item.title);
             else if (item.status == Status::warning)
@@ -4015,9 +4117,10 @@ juce::String cleanupText(const ma::CleanupSettings& cleanup, ma::ChainPlan::High
 void BrainProcessor::markMasterPeakCarriers(std::vector<ma::ChainChannel>& chain, ma::ChainContext& context)
 {
     const auto stats = previewStats();
-    if (stats.seconds < kMinimumPreviewSeconds)
+    if (stats.seconds < kMinimumPreviewSeconds && !masterCheck.valid)
         return;
-    context.limiterReductionDb = std::max(0.0, stats.typicalReductionDb);
+    // With the master check in place, what the real mastering chain takes off the peaks counts, not our preview.
+    context.limiterReductionDb = masterCheck.valid ? std::max(0.0, masterCheck.densityDb) : std::max(0.0, stats.typicalReductionDb);
     // Judged on the peaks as they would be without the clippers: a kick clipped for the master
     // last time must not stop counting as a carrier because of it (the plan would swing back).
     std::vector<double> unclipped(mix.channels.size(), -200.0);
@@ -4317,9 +4420,12 @@ void BrainProcessor::proposeWholeMix()
             if (plan.loudMasterClipDb > 0.0)
                 item.text = name + pl("clipper ścina ") + juce::String(plan.clipDb, 1) + pl(" dB szczytów (sufit ")
                             + juce::String(plan.clipper.ceilingDb, 1) + pl(" dBFS), z tego ") + juce::String(plan.loudMasterClipDb, 1)
-                            + pl(" dB pod głośny master: jego uderzenia to najwyższe szczyty miksu, a limiter przy ")
-                            + juce::String(masterTargetLufs(), 1) + pl(" LUFS ścina teraz ") + juce::String(previewStats().typicalReductionDb, 1)
-                            + pl(" dB. Clipper zetnie je krócej i czyściej niż limiter, uderzenie zostanie");
+                            + pl(" dB pod głośny master: jego uderzenia to najwyższe szczyty miksu, a ")
+                            + (masterCheck.valid ? pl("Ozone zabiera szczytom ") + juce::String(masterCheck.densityDb, 1)
+                                                       + pl(" dB (zmierzone „Kontrolą mastera” po masteringu)")
+                                                 : pl("limiter przy ") + juce::String(masterTargetLufs(), 1) + pl(" LUFS ścina teraz ")
+                                                       + juce::String(previewStats().typicalReductionDb, 1) + pl(" dB"))
+                            + pl(". Clipper zetnie je krócej i czyściej niż limiter, uderzenie zostanie");
             if (plan.budgetClipDb > 0.0)
                 item.text = name + pl("clipper ścina ") + juce::String(plan.clipDb, 1) + pl(" dB szczytów (sufit ")
                             + juce::String(plan.clipper.ceilingDb, 1) + pl(" dBFS), z tego ") + juce::String(plan.budgetClipDb, 1)

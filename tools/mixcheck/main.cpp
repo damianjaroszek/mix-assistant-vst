@@ -15,6 +15,7 @@
 
 #include "AgentProcessor.h"
 #include "BrainProcessor.h"
+#include "MasterProcessor.h"
 #include "Clock.h"
 #include "MaUi.h"
 
@@ -310,6 +311,7 @@ int main(int argc, char** argv)
     Array<File> targetRefs;
     double bpm = 124.0;
     String name;
+    bool masterCheck = false; // a stand-in mastering chain (gain, clip, top lift) and the master check plugin after it
     bool kickCable = false;  // the kick on each bass Agent's sidechain input, as a cable in FL
     double shiftBassMs = 0.0; // move the bass stems in time (> 0 later), to check the alignment
     for (int i = 1; i < argc; ++i)
@@ -326,6 +328,8 @@ int main(int argc, char** argv)
             outDir = File(next());
         else if (arg == "--name")
             name = next();
+        else if (arg == "--master-check")
+            masterCheck = true;
         else if (arg == "--kick-cable")
             kickCable = true;
         else if (arg == "--shift-bass")
@@ -493,6 +497,15 @@ int main(int argc, char** argv)
     for (auto& agent : agents)
         agent->useTestTicks();
     brain->useTestTicks();
+    std::unique_ptr<MasterProcessor> master;
+    if (masterCheck)
+    {
+        master = std::make_unique<MasterProcessor>();
+        master->prepareToPlay(rate, kBlock);
+        master->useTestTicks();
+    }
+    AudioBuffer<float> mastered(2, kBlock);
+    float shelfState[2] = { 0.0f, 0.0f };
     double clockMs = 1000.0;
     int64 ticks = 0;
     ma::clock::testMs.store(static_cast<std::int64_t>(clockMs));
@@ -507,6 +520,8 @@ int main(int argc, char** argv)
                 agent->testTick();
             if (ticks % 2 == 0)
                 brain->testTick();
+            if (master != nullptr)
+                master->testTick();
             if (ticks % 10 == 0)
                 MessageManager::getInstance()->runDispatchLoopUntil(1); // async updates, if any
         }
@@ -579,6 +594,24 @@ int main(int argc, char** argv)
             }
             AudioBuffer<float> sumView(sum.getArrayOfWritePointers(), 2, n);
             brain->processBlock(sumView, midi);
+            if (master != nullptr)
+            {
+                // The stand-in for Ozone: +14 dB, the top lifted 3 dB from about 6 kHz, hard ceiling at -1 dBFS.
+                const float gain = 5.0f, ceiling = 0.891f, k = static_cast<float>(1.0 - std::exp(-2.0 * 3.14159265 * 6000.0 / rate));
+                for (int c = 0; c < 2; ++c)
+                {
+                    const float* in = sum.getReadPointer(c);
+                    float* out = mastered.getWritePointer(c);
+                    for (int i = 0; i < n; ++i)
+                    {
+                        shelfState[c] += k * (in[i] - shelfState[c]);
+                        const float lifted = in[i] + 0.41f * (in[i] - shelfState[c]);
+                        out[i] = jlimit(-ceiling, ceiling, gain * lifted);
+                    }
+                }
+                AudioBuffer<float> masteredView(mastered.getArrayOfWritePointers(), 2, n);
+                master->processBlock(masteredView, midi);
+            }
             if (render != nullptr && position < render->getNumSamples())
                 for (int c = 0; c < 2; ++c)
                     render->copyFrom(c, static_cast<int>(position), sum, c, 0, std::min<int>(n, render->getNumSamples() - static_cast<int>(position)));

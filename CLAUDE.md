@@ -332,6 +332,18 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   (level +2 dB at the same ceiling), Chardonnay 16.4 -> 15.8 (its bass is sustained and louder than a soft kick; the rest of the crest is
   many parts adding up, no single culprit: what-ifs "others held to the kick" -0.7..-2 dB, "kick +3/+6 dB" -1.1/-1.6 dB). mixcheck's
   16 s drop is not where Galias peaks (parts that enter later were never learned), so its whole-song peak sits over the ceiling.
+- "Kontrola mastera" (`plugins/master`, "Mix Assistant Master Check", 560x330, one page): the last effect on the master, after
+  Ozone; passes audio through and measures integrated / loudest short-term loudness, true peak, the ERB average spectrum and side
+  against mid (150 Hz up, below 120 Hz). Its timer joins a Brain like an Agent (`chooseSession`) and writes `bus::MasterReport` into
+  that `BrainEntry` (`publishMaster` / `readMaster`, own sequence lock, `bus::kVersion` 24); it restarts when `BrainEntry::resetEpoch`
+  moves (the Brain's `requestReset`), so both sides cover the same stretch. `ma/MasterCheck.h` `compareMaster(before, after)`: gain,
+  PLR before/after, `densityDb` (what mastering took off the peaks), tilt per band (mean over 60 Hz-8 kHz removed) and per TBC range,
+  overs (> -0.1 dBTP), wide low end (side > -12 dB of mid). The Brain (`updateMasterCheck` in the timer; invalid while the playback
+  simulator or ghosts sound, or the two sides' seconds differ): `limiterTilt()` is the measured tilt capped +-3 dB (so the tonal
+  comparison and the solver work on the mastered tone), the loud-master rule gets `densityDb` instead of the preview limiter's
+  reduction, report item "Po masteringu (Kontrola mastera)" (`ReportItem::afterMastering`: never counted by the Ozone gate), a guide
+  step. Everything it leads to is an ordinary proposal item the user applies. mixcheck `--master-check` runs a stand-in chain (+14 dB,
+  top lift, hard ceiling) with the plugin after it. Never tested with Ozone itself.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

@@ -333,6 +333,10 @@ void initialise(Region& region);
 BrainEntry* claimBrain(Region& region, std::uint64_t sessionId, std::uint64_t processId, std::uint64_t nowMs);
 // Agent side: the alive Brain of `sessionId`; with 0 (not joined yet) any alive Brain. Null if none.
 const BrainEntry* findBrain(const Region& region, std::uint64_t sessionId, std::uint64_t nowMs);
+inline BrainEntry* findBrain(Region& region, std::uint64_t sessionId, std::uint64_t nowMs)
+{
+    return const_cast<BrainEntry*>(findBrain(static_cast<const Region&>(region), sessionId, nowMs));
+}
 // Master check side: writes its report into the entry; the Brain reads a consistent copy (false: none yet,
 // stale, or it kept changing).
 struct MasterValues
