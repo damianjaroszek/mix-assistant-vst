@@ -408,7 +408,7 @@ int main(int argc, char** argv)
             raw.addFrom(c, 0, t.audio, c, 0, length);
     }
     int kickTrack = -1;
-    for (size_t t = 0; t < tracks.size() && kickCable; ++t)
+    for (size_t t = 0; t < tracks.size(); ++t)
         if (tracks[t].role == static_cast<int>(ma::Role::kick))
         {
             kickTrack = static_cast<int>(t);
@@ -462,7 +462,7 @@ int main(int argc, char** argv)
     {
         auto agent = std::make_unique<AgentProcessor>();
         auto layout = agent->getBusesLayout();
-        const bool cable = kickTrack >= 0 && t.role == static_cast<int>(ma::Role::bass);
+        const bool cable = kickCable && kickTrack >= 0 && t.role == static_cast<int>(ma::Role::bass);
         cabled.push_back(cable);
         if (layout.inputBuses.size() > 1)
             layout.inputBuses.getReference(1) = cable ? AudioChannelSet::stereo()
@@ -527,6 +527,13 @@ int main(int argc, char** argv)
     for (auto& a : outAnalysers)
         a.prepare(rate, ma::BandScale::erb);
     bool measureOut = false;
+    // Each part's output over the drop, kept to see which of them make the peaks of the sum.
+    std::vector<AudioBuffer<float>> dropOut(tracks.size());
+    for (auto& b : dropOut)
+    {
+        b.setSize(2, static_cast<int>(dropLength));
+        b.clear();
+    }
     const auto play = [&](int64 from, double seconds, bool loop, AudioBuffer<float>* render) {
         const auto total = static_cast<int64>(seconds * rate);
         int64 done = 0;
@@ -564,6 +571,8 @@ int main(int argc, char** argv)
                 {
                     const float* ch[] = { block.getReadPointer(0), block.getReadPointer(1) };
                     outAnalysers[t].process(ch, 2, n);
+                    for (int c = 0; c < 2; ++c)
+                        dropOut[t].copyFrom(c, static_cast<int>(position - dropStart), block, c, 0, n);
                 }
                 for (int c = 0; c < 2; ++c)
                     sum.addFrom(c, 0, block, c, 0, n);
@@ -721,6 +730,119 @@ int main(int argc, char** argv)
             md << " | " << (in > -120.0 && o > -120.0 ? signedDb(o - in) : String("-"));
         }
         md << " |\n";
+    }
+
+    // Who makes the peaks of the sum: the 32 highest peaks of the drop (at least 100 ms apart), each part's
+    // share of the sample there, its own level and crest, and what leaving it out would do to the sum's
+    // crest (peak minus RMS): a part that only brings peaks lowers it a lot when it goes.
+    {
+        const int n = static_cast<int>(dropLength);
+        AudioBuffer<float> total(2, n);
+        total.clear();
+        for (const auto& b : dropOut)
+            for (int c = 0; c < 2; ++c)
+                total.addFrom(c, 0, b, c, 0, n);
+        const auto crestOf = [n](const AudioBuffer<float>& b, double& peakDb, double& rmsDb) {
+            double peak = 0.0, square = 0.0;
+            for (int c = 0; c < 2; ++c)
+            {
+                const float* x = b.getReadPointer(c);
+                for (int i = 0; i < n; ++i)
+                {
+                    peak = std::max(peak, static_cast<double>(std::abs(x[i])));
+                    square += static_cast<double>(x[i]) * x[i];
+                }
+            }
+            peakDb = 20.0 * std::log10(std::max(peak, 1e-9));
+            rmsDb = 10.0 * std::log10(std::max(square / (2.0 * n), 1e-18));
+        };
+        double sumPeak = 0.0, sumRms = 0.0;
+        crestOf(total, sumPeak, sumRms);
+        struct Peak
+        {
+            int at = 0, channel = 0;
+            float value = 0.0f;
+        };
+        std::vector<Peak> peaks;
+        std::vector<char> taken(static_cast<size_t>(n), 0);
+        const int apart = static_cast<int>(0.1 * rate);
+        for (int k = 0; k < 32; ++k)
+        {
+            Peak best;
+            for (int c = 0; c < 2; ++c)
+            {
+                const float* x = total.getReadPointer(c);
+                for (int i = 0; i < n; ++i)
+                    if (!taken[static_cast<size_t>(i)] && std::abs(x[i]) > std::abs(best.value))
+                        best = { i, c, x[i] };
+            }
+            if (best.value == 0.0f)
+                break;
+            peaks.push_back(best);
+            for (int i = std::max(0, best.at - apart); i < std::min(n, best.at + apart); ++i)
+                taken[static_cast<size_t>(i)] = 1;
+        }
+        md << "\n## Who makes the peaks (drop)\n\nSum: peak " << db(sumPeak) << " dBFS, RMS " << db(sumRms) << ", crest " << db(sumPeak - sumRms)
+           << " dB; the lowest of the 32 peaks is " << db(peaks.empty() ? 0.0 : 20.0 * std::log10(std::abs(peaks.back().value)) - sumPeak)
+           << " dB under the highest.\n\n| channel | share of the peaks | peak dBFS | RMS dBFS | crest | sum's crest without it |\n|---|---|---|---|---|---|\n";
+        struct Row
+        {
+            String name;
+            double share = 0.0, peakDb = 0.0, rmsDb = 0.0, without = 0.0;
+        };
+        std::vector<Row> rows;
+        AudioBuffer<float> rest(2, n);
+        for (size_t t = 0; t < tracks.size(); ++t)
+        {
+            Row row;
+            row.name = tracks[t].name;
+            for (const auto& peak : peaks)
+                row.share += dropOut[t].getSample(peak.channel, peak.at) / peak.value;
+            row.share /= std::max<size_t>(1, peaks.size());
+            crestOf(dropOut[t], row.peakDb, row.rmsDb);
+            for (int c = 0; c < 2; ++c)
+            {
+                rest.copyFrom(c, 0, total, c, 0, n);
+                rest.addFrom(c, 0, dropOut[t], c, 0, n, -1.0f);
+            }
+            double restPeak = 0.0, restRms = 0.0;
+            crestOf(rest, restPeak, restRms);
+            row.without = (restPeak - restRms) - (sumPeak - sumRms);
+            rows.push_back(row);
+        }
+        // What if: nothing but the kick may peak higher than the kick's peak plus this (hard-clipped here, the
+        // crudest tool): how far the sum's peak comes down and what it costs in level.
+        double kickPeakDb = -200.0;
+        for (size_t t = 0; t < tracks.size(); ++t)
+            if (static_cast<int>(t) == kickTrack)
+                kickPeakDb = rows[t].peakDb;
+        String whatIf;
+        if (kickPeakDb > -100.0)
+            for (const double over : { 0.0, -3.0, -6.0 })
+            {
+                const float ceiling = static_cast<float>(std::pow(10.0, (kickPeakDb + over) / 20.0));
+                rest.clear();
+                for (size_t t = 0; t < tracks.size(); ++t)
+                    for (int c = 0; c < 2; ++c)
+                    {
+                        const float* x = dropOut[t].getReadPointer(c);
+                        float* y = rest.getWritePointer(c);
+                        const bool kick = static_cast<int>(t) == kickTrack;
+                        for (int i = 0; i < n; ++i)
+                            y[i] += kick ? x[i] : jlimit(-ceiling, ceiling, x[i]);
+                    }
+                double p = 0.0, r = 0.0;
+                crestOf(rest, p, r);
+                whatIf << "- other parts held to the kick's peak " << signedDb(over) << " dB: sum peak " << signedDb(p - sumPeak) << " dB, RMS "
+                       << signedDb(r - sumRms) << " dB, crest " << db(p - r) << " dB\n";
+            }
+        std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.share > b.share; });
+        for (const auto& row : rows)
+            if (row.rmsDb > -90.0)
+                md << "| " << row.name << " | " << String(roundToInt(row.share * 100.0)) << "% | " << db(row.peakDb) << " | " << db(row.rmsDb) << " | "
+                   << db(row.peakDb - row.rmsDb) << " | " << signedDb(row.without) << " |\n";
+        if (whatIf.isNotEmpty())
+            md << "\nKick peak " << db(kickPeakDb) << " dBFS.\n" << whatIf;
     }
 
     md << "\n## Collisions\n\nBefore: " << String(static_cast<int>(before.masking.issues.size())) << ", after: "

@@ -282,8 +282,7 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   duck under it (2 ms, 1/16 synced, depth over 200 Hz-8 kHz, <= `kSendDuckSourceMaxDb` 6), else the main voice (phase 36), else its source
   (bell 300 Hz-6 kHz, 1/8); "none" turns a Brain-made duck off. `lastSendNotes` feeds the "Głębia" report line (sources, key).
 - Phase 38 engineer's checks: without a tonal target of the user's (`currentTarget` invalid) the Brain uses `ma::builtinHouseTarget()`
-  ("Typowy house (wbudowany)": the mean of the Chardonnay remix and Galias masters from `ma-lab --make-target`, smoothed over +-2 ERB
-  bands, corridor +-2.5 dB, +-3.5 below 60 Hz / above 10 kHz) through `activeTarget()` everywhere the analysis compares (report, view,
+  (then the mean of the two test masters; since stage 1 thirteen club masters, see below) through `activeTarget()` everywhere the analysis compares (report, view,
   sketch, solver, translation `tonalOk`, HTML); `target()` stays the user's for the target list and capture. Before it, nothing balanced
   collision cuts and level moves without a target and the top rose 3-5 dB on both real songs.
   Report "Ślady w mono" (per channel 150 Hz-8 kHz mid vs mid + processed side, `processedSidePower`, against the mix's; warning 3 dB,
@@ -316,6 +315,16 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   mixcheck (deterministic) before -> after, distance to the masters over TBC's ranges: Chardonnay 6.9 -> 5.2, Galias 7.3 -> 4.5;
   collisions 40 -> 22 and 69 -> 33; proposal items 70 -> 47 and 59 -> 48. PLR is unchanged (14-16 dB): not compressors or ducks
   (switched off in a trial); still open, as is a wireless kick duck predicted from the beat grid (it arrives a block late).
+- Stage 1 after the review (2026-11-14). The owner's references: 13 club masters (drop -3.9..-9.7 LUFS, drop PLR 5.2-10.7, sub below
+  45 Hz around -10 dB of the whole: far more than the two test masters, so the sub is not cut harder). `builtinHouseTarget()` now holds
+  their drops' ERB curves ("Klubowy (wbudowany)", usual `rebuild()` corridor). The master sum is never processed (Ozone's); no fixed
+  LUFS goal. The kick-to-bass sidechain cable is the supported way: `MixSnapshot::bassWithoutCable` (judged while a kick plays, kept in
+  `bassCable` while it rests) turns the report item into amber "Stopa i bas: brak kabla sidechain" with FL's steps (listed by the Ozone
+  gate), adds a guide step, and the Agent's duck status says the keyed duck is the fallback. mixcheck report "Who makes the peaks
+  (drop)": the sum's 32 highest peaks, each part's share, peak, RMS, crest, the sum's crest without it, and a what-if with every other
+  part hard-held to the kick's peak (+0/-3/-6 dB). Found: the sum peaks ~9 dB over the kick's own peak; sparse spiky parts (a hat
+  track at -10 dBFS peak with -44 RMS, bass FX, SFX) and a bass with 17-19 dB crest stand 5 dB over the kick; holding them gives
+  1-3 dB of crest, the cable none. Next: a peak budget against the kick (stage 3), "Kontrola mastera" after Ozone (stage 2).
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 
