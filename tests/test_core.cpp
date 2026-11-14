@@ -4121,6 +4121,60 @@ void testAlignment()
 }
 
 // "Kontrola mastera": what mastering added, took off the peaks and did to the tone.
+void testTailMeter()
+{
+    // Noise bursts that die away at a known rate: the meter reads the time to fall 60 dB.
+    const double rate = 48000.0;
+    auto measure = [&](double rt60, double everySeconds, double seconds)
+    {
+        ma::TailMeter meter;
+        meter.prepare(rate);
+        std::uint32_t seed = 12345u;
+        std::vector<float> block(512);
+        const double perSample = std::pow(10.0, -60.0 / (20.0 * rt60 * rate));
+        double gain = 0.0;
+        long long n = 0;
+        const long long every = static_cast<long long>(everySeconds * rate), total = static_cast<long long>(seconds * rate);
+        while (n < total)
+        {
+            for (auto& sample : block)
+            {
+                if (n % every == 0)
+                    gain = 0.5;
+                seed = seed * 1664525u + 1013904223u;
+                sample = static_cast<float>(gain * (static_cast<double>(seed >> 8) / 8388608.0 - 1.0));
+                gain *= perSample;
+                ++n;
+            }
+            meter.process(block.data(), nullptr, static_cast<int>(block.size()));
+        }
+        return meter;
+    };
+    {
+        const auto meter = measure(1.0, 2.0, 30.0);
+        check(meter.valid(), "a one-second tail with room to fall is measured");
+        check(std::abs(meter.seconds() - 1.0) < 0.25, "and reads about a second");
+    }
+    {
+        const auto meter = measure(2.5, 0.48, 30.0); // a hit every beat at 125 BPM
+        check(meter.valid(), "a long tail under a hit every beat is still measured");
+        check(std::abs(meter.seconds() - 2.5) < 0.7, "and reads about 2.5 s");
+    }
+    {
+        const auto meter = measure(0.4, 1.0, 20.0);
+        check(meter.valid() && meter.seconds() < 0.6, "a short tail reads short");
+    }
+    {
+        ma::TailMeter meter;
+        meter.prepare(rate);
+        std::vector<float> block(512, 0.25f);
+        for (int i = 0; i < 2000; ++i)
+            meter.process(block.data(), nullptr, 512);
+        check(!meter.valid() && meter.seconds() == 0.0, "a steady signal has no tail to measure");
+    }
+    check(std::abs(ma::tailBars(1.92, 125.0) - 1.0) < 1e-9 && ma::tailBars(1.0, 0.0) == 0.0, "a tail in bars at the tempo");
+}
+
 void testMasterCheck()
 {
     const int bands = ma::SpectrumAnalyzer::numBandsFor(ma::BandScale::erb);
@@ -4276,6 +4330,7 @@ int main()
     testStereoHysteresis();
     testLoudMasterClip();
     testReviewFixes();
+    testTailMeter();
     testMasterCheck();
     testSectionAutomation();
     testEnergyMap();

@@ -344,6 +344,14 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   reduction, report item "Po masteringu (Kontrola mastera)" (`ReportItem::afterMastering`: never counted by the Ozone gate), a guide
   step. Everything it leads to is an ordinary proposal item the user applies. mixcheck `--master-check` runs a stand-in chain (+14 dB,
   top lift, hard ceiling) with the plugin after it. Never tested with Ozone itself.
+- After that: report "Przed i po (ostatnie „Zastosuj”)" (`MixScore` from `scoreNow()`: dB outside the tonal corridor, distance from
+  its centre over the four ranges, collisions, PLR; `scoreBefore` taken in `applyByUser`, dropped by undo). `previewVerdict` adds the
+  Ozone advice over 3 dB of limiting (clip or soft-clip 2-3 dB before the limiter, glue there too): mixcheck what-ifs showed a pump
+  under the kick (<= 0.7 dB) and clipping every part (<= 1.5 dB) do not buy density on the channels. "Zapas na mastering" names where
+  the highest peak fell (`topPeakAtSeconds`, in the drop or not, the channel peaking highest then; reset with `requestReset`).
+  `ma::TailMeter` (Depth.h; 15 ms level every 10 ms, each fall >= 7 dB timed from its first 3 dB down, median as time to fall 60 dB,
+  >= 4 falls) runs on every Agent's input, `AgentData::tailSeconds` (`bus::kVersion` 25); the "Głębia" item lists each send's tail in
+  seconds and bars and goes amber over `kLongTailBars` 1. Tested on synthetic decays only (the test songs have no reverb returns).
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

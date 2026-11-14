@@ -32,7 +32,7 @@ namespace ma::bus
 {
 
 constexpr std::uint32_t kMagic = 0x4D414255; // "MABU"
-constexpr std::uint32_t kVersion = 24; // a session per project: Brain entries in the header, AgentData::sessionId
+constexpr std::uint32_t kVersion = 25; // a session per project: Brain entries in the header, AgentData::sessionId
 constexpr int kMaxSlots = 128;
 constexpr int kNameLength = 48;
 constexpr int kBands = 40;            // ERB bands, as SpectrumAnalyzer with BandScale::erb
@@ -143,6 +143,7 @@ struct AgentData
     float alignBest;   // low-band correlation at that lag
     float alignZero;   // and as it plays now
     std::int32_t sendDuckTo; // phase 37: a send's choice (SendDuckTo), the user's
+    float tailSeconds;       // how long its tail rings (TailMeter, time to fall 60 dB); 0 = not measured
     std::int32_t reservedSession;
     // The Brain this Agent belongs to (saved in the project): two projects open at once share the
     // file, and each Brain only takes its own Agents. 0 = not joined yet, seen by every Brain.

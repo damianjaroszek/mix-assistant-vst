@@ -383,6 +383,8 @@ private:
     std::atomic<bool> alignValid { false };
     std::atomic<float> alignLag { 0.0f }, alignBest { 0.0f }, alignZero { 0.0f };
     ma::BalanceMeter balanceMeter; // the input's lean
+    ma::TailMeter tailMeter;       // how long the part rings (read on sends)
+    std::atomic<float> tailSeconds { 0.0f };
     std::atomic<float> inputBalance { 0.0f };
     std::atomic<bool> balanceSeen { false };
     ma::StereoAnalyzer liveStereo; // on the input, while the Brain or the editor looks

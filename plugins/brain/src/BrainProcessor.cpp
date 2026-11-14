@@ -2923,6 +2923,33 @@ void BrainProcessor::buildReport()
         }
         if (item.detail.isNotEmpty() && !feeds.isEmpty())
             item.detail += " " + feeds.joinIntoString("; ") + ".";
+        // How long each send rings, against the tempo.
+        juce::StringArray tails;
+        bool longTail = false;
+        for (const auto& channel : mix.channels)
+        {
+            if (channel.data.role != static_cast<int>(ma::Role::send) || !(channel.data.tailSeconds > 0.0f))
+                continue;
+            const double seconds = channel.data.tailSeconds, bars = ma::tailBars(seconds, tempoBpm());
+            auto line = quoted(channel.name) + pl(" wybrzmiewa ok. ") + juce::String(seconds, 1) + " s";
+            if (bars > 0.0)
+            {
+                line += " (" + juce::String(bars, 1) + pl(" taktu)");
+                if (bars > ma::kLongTailBars)
+                {
+                    longTail = true;
+                    line += pl(": dłużej niż takt, ogon wchodzi w następną frazę; skróć Decay do ok. ")
+                            + juce::String(ma::depthTimes(tempoBpm()).decaySeconds, 1) + " s";
+                }
+            }
+            tails.add(line);
+        }
+        if (item.detail.isNotEmpty() && !tails.isEmpty())
+        {
+            item.detail += pl(" Zmierzony ogon (czas spadku o 60 dB): ") + tails.joinIntoString("; ") + ".";
+            if (longTail && item.status == Status::good)
+                item.status = Status::warning;
+        }
         if (item.detail.isNotEmpty() && times.isNotEmpty())
             item.detail += " " + times + ". " + delayAdviceText(tempoBpm()) + ".";
         if (item.detail.isNotEmpty())

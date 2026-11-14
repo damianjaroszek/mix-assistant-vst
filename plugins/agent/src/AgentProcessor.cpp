@@ -585,6 +585,7 @@ void AgentProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     alignMeter.prepare(sampleRate);
     alignDelay.prepare(sampleRate, std::max(2, getTotalNumInputChannels()));
     balanceMeter.prepare(sampleRate);
+    tailMeter.prepare(sampleRate);
     liveStereo.prepare(sampleRate);
     learnFeatures.prepare(sampleRate);
     outputSpectrum.prepare(sampleRate, ma::BandScale::erb);
@@ -648,6 +649,11 @@ void AgentProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     inputRms.store(ma::powerToDb(displayRmsMeanSquare));
 
     liveLoudness.process(input, numChannels, numSamples);
+    if (numChannels >= 1)
+    {
+        tailMeter.process(input[0], numChannels >= 2 ? input[1] : nullptr, numSamples);
+        tailSeconds.store(static_cast<float>(tailMeter.seconds()));
+    }
     inputLufs.store(liveLoudness.shortTermLufs());
 
     if (spectrumVisible.load() || brainWantsSpectra.load() || widthWanted.load())
@@ -1207,6 +1213,7 @@ void AgentProcessor::publishToBrain()
     data.alignZero = alignZero.load();
     data.balanceValid = balanceSeen.load() ? 1 : 0;
     data.inputBalanceDb = inputBalance.load();
+    data.tailSeconds = tailSeconds.load();
     for (int r = 0; r < ma::kMaxResonances; ++r)
         data.resonances[r] = result.resonances[static_cast<size_t>(r)];
     data.sidechainConnected = sidechainSeen ? 1 : 0;

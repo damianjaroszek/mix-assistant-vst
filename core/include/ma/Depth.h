@@ -36,6 +36,38 @@ private:
     DepthSettings settings {};
 };
 
+// How long a send's tail rings: the level (15 ms mean square, read every 10 ms) is followed down every
+// time it falls; a fall of at least 7 dB that lasts 100 ms past its first 3 dB gives a decay rate, read as
+// the time to fall 60 dB. The median of the falls is the answer (at least `kMinTailFalls`). Falls start
+// within 20 dB of the recent peak, so the noise floor is not a tail. A tail that never gets to fall (the
+// next hit comes first) stays unmeasured rather than guessed.
+constexpr int kMinTailFalls = 4;
+class TailMeter
+{
+public:
+    void prepare(double sampleRate);
+    void reset();
+    void process(const float* left, const float* right, int numSamples); // right may be null
+    bool valid() const { return total >= kMinTailFalls; }
+    double seconds() const; // 0 while not valid
+
+private:
+    void hopDone(double levelDb);
+    void fallDone();
+
+    static constexpr int kBins = 48;
+    std::array<int, kBins> falls {};
+    int total = 0;
+    double coefficient = 0.0, power = 0.0, recentPeakDb = -200.0, peakFallDb = 0.0;
+    int hop = 480, inHop = 0;
+    double topDb = -200.0, minDb = -200.0, lastDb = -200.0, since3 = -1.0, atMin = 0.0;
+    int hops = 0;
+};
+
+// A tail against the tempo: longer than a bar it runs into the next phrase.
+constexpr double kLongTailBars = 1.0;
+double tailBars(double tailSeconds, double bpm); // 0 without a tempo
+
 // Times that sit on the groove, for the user's reverb and delay (ms, at `bpm`).
 struct DepthTimes
 {
