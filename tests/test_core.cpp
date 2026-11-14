@@ -1435,7 +1435,37 @@ void testChainPlanner()
     // 5 kHz) are left alone: their peaks cost the master nothing.
     auto spiky = mix;
     spiky[4].truePeakDb = spiky[4].levelP95 + 16.0;
-    check(ma::planChains(spiky)[4].clipper.on < 0.5f && ma::planChains(spiky)[4].topPercussion, "hats are never clipped");
+    spiky[0].truePeakDb = spiky[4].truePeakDb + 12.0; // far under the kick's hits
+    check(ma::planChains(spiky)[4].clipper.on < 0.5f && ma::planChains(spiky)[4].topPercussion, "hats under the kick are never clipped");
+
+    // Peak budget: hats whose spikes stand over the kick's hits are held to 8 dB under them, a bass with a
+    // hard attack to 1 dB under, neither further than its crest allows; planning again changes nothing.
+    {
+        auto budget = mix;
+        const int kick = 0;
+        int bass = -1;
+        for (size_t i = 0; i < budget.size(); ++i)
+            if (budget[i].role == ma::Role::bass)
+                bass = static_cast<int>(i);
+        budget[4].truePeakDb = budget[4].levelP95 + 30.0;
+        budget[static_cast<size_t>(kick)].truePeakDb = budget[4].truePeakDb - 2.0;
+        if (bass >= 0)
+            budget[static_cast<size_t>(bass)].truePeakDb = budget[static_cast<size_t>(kick)].truePeakDb + 4.0;
+        const auto plans = ma::planChains(budget);
+        const double kickTop = budget[static_cast<size_t>(kick)].truePeakDb - plans[static_cast<size_t>(kick)].clipDb;
+        check(plans[4].budgetClipDb >= 1.0 && plans[4].clipper.on > 0.5f && plans[4].clipper.ceilingDb <= kickTop - 6.9
+                  && plans[4].clipper.ceilingDb >= budget[4].levelP95 + 12.9 && plans[4].clipDb <= ma::kMaxBudgetClipDb + 1e-6,
+              "hats standing over the kick are held under it (" + std::to_string(plans[4].clipDb).substr(0, 4) + " dB)");
+        if (bass >= 0 && budget[static_cast<size_t>(bass)].truePeakDb - budget[static_cast<size_t>(bass)].levelP95 > 12.0)
+            check(plans[static_cast<size_t>(bass)].budgetClipDb >= 1.0
+                      && plans[static_cast<size_t>(bass)].clipper.ceilingDb <= kickTop - 0.4,
+                  "a bass peaking over the kick is held just under it");
+        const auto again = ma::planChains(budget);
+        check(std::abs(again[4].clipper.ceilingDb - plans[4].clipper.ceilingDb) < 0.01, "the budget is the same on a second plan");
+        auto noKick = budget;
+        noKick[static_cast<size_t>(kick)].role = ma::Role::percussion;
+        check(ma::planChains(noKick)[4].budgetClipDb == 0.0, "without a kick there is no budget");
+    }
     for (int b = 0; b < ma::SpectrumAnalyzer::numBandsFor(ma::BandScale::erb); ++b) // a clap or tom: body under the top
         if (ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b) > 5000.0)
             spiky[4].bandsDb[static_cast<size_t>(b)] -= 25.0;

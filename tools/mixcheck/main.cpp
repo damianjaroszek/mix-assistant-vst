@@ -836,6 +836,21 @@ int main(int argc, char** argv)
                 whatIf << "- other parts held to the kick's peak " << signedDb(over) << " dB: sum peak " << signedDb(p - sumPeak) << " dB, RMS "
                        << signedDb(r - sumRms) << " dB, crest " << db(p - r) << " dB\n";
             }
+        // What if the kick were louder (the anchor of a club mix): the sum's crest with the kick up 3 and 6 dB.
+        if (kickPeakDb > -100.0)
+            for (const double up : { 3.0, 6.0 })
+            {
+                const float g = static_cast<float>(std::pow(10.0, up / 20.0)) - 1.0f;
+                for (int c = 0; c < 2; ++c)
+                {
+                    rest.copyFrom(c, 0, total, c, 0, n);
+                    rest.addFrom(c, 0, dropOut[static_cast<size_t>(kickTrack)], c, 0, n, g);
+                }
+                double p = 0.0, r = 0.0;
+                crestOf(rest, p, r);
+                whatIf << "- kick " << signedDb(up) << " dB: sum peak " << signedDb(p - sumPeak) << " dB, RMS " << signedDb(r - sumRms) << " dB, crest "
+                       << db(p - r) << " dB\n";
+            }
         std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.share > b.share; });
         for (const auto& row : rows)
             if (row.rmsDb > -90.0)

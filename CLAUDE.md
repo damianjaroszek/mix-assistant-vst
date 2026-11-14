@@ -325,6 +325,13 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   part hard-held to the kick's peak (+0/-3/-6 dB). Found: the sum peaks ~9 dB over the kick's own peak; sparse spiky parts (a hat
   track at -10 dBFS peak with -44 RMS, bass FX, SFX) and a bass with 17-19 dB crest stand 5 dB over the kick; holding them gives
   1-3 dB of crest, the cable none. Next: a peak budget against the kick (stage 3), "Kontrola mastera" after Ozone (stage 2).
+- Peak budget against the kick (`planChains` step 3c, `ChainPlan::budgetClipDb`, `peakBudgetOffsetDb`): a part whose Learn true peak
+  (minus its planned clip) stands over the kick's by more than its role's offset (bass, clap -1; percussion, vocal -2; pad -4; send -6;
+  hats -8; others -3 dB) is clipped down to it, never under its role's `maxCrestDb` (<= 14) over the loud level and <= `kMaxBudgetClipDb`
+  12 dB in all; hats are clipped only by this rule. Sized on pre-clipper peaks, so idempotent. mixcheck drop crest: Galias 15.4 -> 13.3
+  (level +2 dB at the same ceiling), Chardonnay 16.4 -> 15.8 (its bass is sustained and louder than a soft kick; the rest of the crest is
+  many parts adding up, no single culprit: what-ifs "others held to the kick" -0.7..-2 dB, "kick +3/+6 dB" -1.1/-1.6 dB). mixcheck's
+  16 s drop is not where Galias peaks (parts that enter later were never learned), so its whole-song peak sits over the ceiling.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

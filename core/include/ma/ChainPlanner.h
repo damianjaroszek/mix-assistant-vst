@@ -59,6 +59,14 @@ constexpr double kLoudMasterLimitDb = 3.0;   // above this the limiter costs the
 constexpr double kLoudMasterAimDb = 2.5;
 constexpr double kMaxLoudMasterClipDb = 6.0; // a clipper on a kick or percussion, in all
 
+// Peak budget against the kick. In a club mix the kick sets the peak of the sum; a part whose peaks stand over
+// the kick's (a sparse spiky track, a bass with a hard attack) costs the master its loudness and gives nothing
+// back. Such a part is clipped down to the kick's peak plus its role's offset, never further than its own
+// crest allows (the clipper stays over the loud parts' level by the role's usual crest) and never by more than
+// kMaxBudgetClipDb in all.
+constexpr double kMaxBudgetClipDb = 12.0;
+double peakBudgetOffsetDb(Role role, bool topPercussion);
+
 struct ChainContext
 {
     double bpm = 0.0;            // releases follow the tempo when known
@@ -106,6 +114,8 @@ struct ChainPlan
     bool peakKnown = false;         // phase 23: the learn pass's true peak is there; without it crest and clipping are unknown
     double maxCrestDb = 0.0;
     double clipDb = 0.0;
+    // Peak budget: the part of clipDb that keeps this part's peaks under the kick's (beyond the crest rule).
+    double budgetClipDb = 0.0;
     // Phase 28: the part of clipDb that is there for a loud master (beyond the crest rule).
     double loudMasterClipDb = 0.0;
     bool loudMasterCapped = false;  // at kMaxLoudMasterClipDb: more has to come from elsewhere

@@ -85,6 +85,27 @@ struct RoleProfile
     double maxReductionDb; // most the compressor takes off the loud parts; past it the part sounds squashed
 };
 
+} // namespace
+
+double peakBudgetOffsetDb(Role role, bool topPercussion)
+{
+    if (topPercussion)
+        return -8.0; // hats and shakers sit far under the kick
+    switch (role)
+    {
+    case Role::bass:
+    case Role::clap: return -1.0;
+    case Role::percussion:
+    case Role::vocal: return -2.0;
+    case Role::send: return -6.0;
+    case Role::pad: return -4.0;
+    default: break;
+    }
+    return -3.0;
+}
+
+namespace
+{
 RoleProfile profileFor(Role role)
 {
     switch (role)
@@ -548,6 +569,35 @@ std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& input, const 
             plan.clipper.on = 1.0f;
             plan.clipper.ceilingDb = static_cast<float>(std::round((channels[i].truePeakDb - total) * 10.0) / 10.0);
             plan.clipper.softness = static_cast<float>(profileFor(channels[i].role).softness);
+        }
+    }
+
+    // 3c. Peak budget against the kick: nothing stands over the kick's hits. Sized on the Learn pass's true
+    // peaks (before every clipper), so planning again lands on the same clipping.
+    {
+        double kickTop = -200.0;
+        for (size_t i = 0; i < count; ++i)
+            if (channels[i].valid && channels[i].role == Role::kick && plans[i].peakKnown)
+                kickTop = std::max(kickTop, channels[i].truePeakDb - plans[i].clipDb);
+        for (size_t i = 0; i < count && kickTop > -100.0; ++i)
+        {
+            const auto& c = channels[i];
+            auto& plan = plans[i];
+            if (!c.valid || c.role == Role::kick || c.role == Role::bus || !plan.peakKnown || !plan.dynamicsKnown || c.intentionalDrive
+                || plan.overCompressed)
+                continue;
+            const auto profile = profileFor(c.role);
+            const double keepCrest = std::min(profile.maxCrestDb, 14.0);
+            const double over = c.truePeakDb - plan.clipDb - (kickTop + peakBudgetOffsetDb(c.role, plan.topPercussion));
+            const double room = plan.crestDb - plan.clipDb - keepCrest;
+            const double extra = std::floor(std::min({ over, room, kMaxBudgetClipDb - plan.clipDb }) * 2.0) / 2.0;
+            if (extra < 1.0)
+                continue;
+            plan.budgetClipDb = extra;
+            plan.clipDb += extra;
+            plan.clipper.on = 1.0f;
+            plan.clipper.ceilingDb = static_cast<float>(std::round((c.truePeakDb - plan.clipDb) * 10.0) / 10.0);
+            plan.clipper.softness = static_cast<float>(profile.softness);
         }
     }
 

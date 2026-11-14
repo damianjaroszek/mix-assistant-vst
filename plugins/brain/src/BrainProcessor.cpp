@@ -4320,6 +4320,11 @@ void BrainProcessor::proposeWholeMix()
                             + pl(" dB pod głośny master: jego uderzenia to najwyższe szczyty miksu, a limiter przy ")
                             + juce::String(masterTargetLufs(), 1) + pl(" LUFS ścina teraz ") + juce::String(previewStats().typicalReductionDb, 1)
                             + pl(" dB. Clipper zetnie je krócej i czyściej niż limiter, uderzenie zostanie");
+            if (plan.budgetClipDb > 0.0)
+                item.text = name + pl("clipper ścina ") + juce::String(plan.clipDb, 1) + pl(" dB szczytów (sufit ")
+                            + juce::String(plan.clipper.ceilingDb, 1) + pl(" dBFS), z tego ") + juce::String(plan.budgetClipDb, 1)
+                            + pl(" dB, żeby nie wystawał ponad stopę: szczyt miksu ma wyznaczać stopa, a te szczyty zabierały głośność "
+                                 "masterowi i nic nie dawały w zamian. Ścinane są tylko pojedyncze piki, głośna część zostaje nietknięta");
             chainItems.push_back(item);
         }
         if (plan.evener.on > 0.5f
