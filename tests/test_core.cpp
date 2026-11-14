@@ -3572,7 +3572,7 @@ void testLoudMasterClip()
         measuredChannel(ma::Role::percussion, 4, 0.0, sr), measuredChannel(ma::Role::pad, 6, 0.0, sr),
     };
     mix[0].carriesMasterPeaks = mix[2].carriesMasterPeaks = true;
-    mix[1].carriesMasterPeaks = true; // not percussion: never clipped for it
+    mix[1].carriesMasterPeaks = true; // a tonal part making the peaks: clipped only while it keeps its crest
     for (int b = 0; b < ma::SpectrumAnalyzer::numBandsFor(ma::BandScale::erb); ++b) // a clap, not a hat (hats are never clipped)
         if (ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b) > 5000.0)
             mix[2].bandsDb[static_cast<size_t>(b)] -= 25.0;
@@ -3586,7 +3586,20 @@ void testLoudMasterClip()
                 plans[2].clipDb, plans[2].loudMasterClipDb, plans[1].loudMasterClipDb);
     checkNear(plans[0].loudMasterClipDb, std::min(2.5, ma::kMaxLoudMasterClipDb - base[0].clipDb), 0.01, "the kick takes 2.5 dB more");
     check(plans[0].clipper.on > 0.5f && plans[2].clipper.on > 0.5f && plans[2].loudMasterClipDb > 0.0, "kick and percussion both clipped");
-    check(plans[1].loudMasterClipDb == 0.0 && plans[3].loudMasterClipDb == 0.0, "bass and pad left alone");
+    check(plans[3].loudMasterClipDb == 0.0, "a pad that does not make the peaks is left alone");
+    std::printf("      loud master, bass as carrier: crest %.1f, clip %.1f\n", plans[1].crestDb, plans[1].clipDb);
+    check(plans[1].loudMasterClipDb == 0.0 || plans[1].crestDb - plans[1].clipDb >= ma::kTonalKeepCrestDb - 1e-9,
+          "a tonal part clipped for the loud master keeps its crest");
+    {
+        // A spiky lead that makes the mix's peaks: clipped for the master, down to the crest it keeps.
+        auto withLead = mix;
+        withLead[3] = measuredChannel(ma::Role::lead, 3, 0.0, sr);
+        withLead[3].carriesMasterPeaks = true;
+        withLead[3].truePeakDb += 6.0;
+        const auto led = ma::planChains(withLead, context);
+        std::printf("      loud master, lead as carrier: +%.1f dB (crest %.1f, clip %.1f)\n", led[3].loudMasterClipDb, led[3].crestDb, led[3].clipDb);
+        check(led[3].loudMasterClipDb == 0.0 || led[3].crestDb - led[3].clipDb >= ma::kTonalKeepCrestDb - 1e-9, "the lead keeps its crest too");
+    }
     check(plans[0].clipDb <= ma::kMaxLoudMasterClipDb + 1e-9, "within the cap");
 
     // Applied: the Agents carry it and the limiter now works 2.6 dB. Same plan again.

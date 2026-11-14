@@ -58,6 +58,7 @@ struct ChainChannel
 constexpr double kLoudMasterLimitDb = 3.0;   // above this the limiter costs the hits their punch
 constexpr double kLoudMasterAimDb = 2.5;
 constexpr double kMaxLoudMasterClipDb = 6.0; // a clipper on a kick or percussion, in all
+constexpr double kTonalKeepCrestDb = 8.0;    // a tonal part clipped for the loud master keeps this much crest
 
 // Peak budget against the kick. In a club mix the kick sets the peak of the sum; a part whose peaks stand over
 // the kick's (a sparse spiky track, a bass with a hard attack) costs the master its loudness and gives nothing

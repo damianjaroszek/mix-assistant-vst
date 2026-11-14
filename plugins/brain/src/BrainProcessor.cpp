@@ -4217,9 +4217,14 @@ void BrainProcessor::markMasterPeakCarriers(std::vector<ma::ChainChannel>& chain
         if (unclipped[c] >= highest - 1e-9 && highest > -200.0)
             loudMasterPlan.loudest = mix.channels[c].name;
     for (size_t c = 0; c < mix.channels.size() && c < chain.size(); ++c)
-        if (unclipped[c] > -200.0 && unclipped[c] >= highest - kPeakCarrierRangeDb
-            && (chain[c].role == ma::Role::kick || ma::isPercussion(chain[c].role)))
+    {
+        // Drums within the range of the highest peak, and whichever other part makes that peak itself
+        // (within 1 dB): a lead or bass standing over the drums is what the limiter flattens first.
+        const bool drum = chain[c].role == ma::Role::kick || ma::isPercussion(chain[c].role);
+        const bool tonal = chain[c].role != ma::Role::vocal && chain[c].role != ma::Role::send && chain[c].role != ma::Role::bus;
+        if (unclipped[c] > -200.0 && ((drum && unclipped[c] >= highest - kPeakCarrierRangeDb) || (!drum && tonal && unclipped[c] >= highest - 1.0)))
             chain[c].carriesMasterPeaks = true;
+    }
 }
 
 void BrainProcessor::proposeWholeMix()
@@ -4493,7 +4498,7 @@ void BrainProcessor::proposeWholeMix()
             if (plan.loudMasterClipDb > 0.0)
                 item.text = name + pl("clipper ścina ") + juce::String(plan.clipDb, 1) + pl(" dB szczytów (sufit ")
                             + juce::String(plan.clipper.ceilingDb, 1) + pl(" dBFS), z tego ") + juce::String(plan.loudMasterClipDb, 1)
-                            + pl(" dB pod głośny master: jego uderzenia to najwyższe szczyty miksu, a ")
+                            + pl(" dB pod głośny master: jego szczyty to najwyższe szczyty miksu, a ")
                             + (masterCheck.valid ? pl("Ozone zabiera szczytom ") + juce::String(masterCheck.densityDb, 1)
                                                        + pl(" dB (zmierzone „Kontrolą mastera” po masteringu)")
                                                  : pl("limiter przy ") + juce::String(masterTargetLufs(), 1) + pl(" LUFS ścina teraz ")
@@ -5159,7 +5164,7 @@ Proposal::Verdict BrainProcessor::judge(size_t index, const ma::ChainPlan& plan,
                             + (plan.loudMasterClipDb > 0.0 ? pl(", z tego ") + juce::String(plan.loudMasterClipDb, 1)
                                                                  + pl(" dB pod głośny master (to on daje najwyższe szczyty miksu)")
                                                            : juce::String())
-                            + (plan.loudMasterCapped ? pl("; więcej clippera nie dam, bo uderzenie by się spłaszczyło") : juce::String()) + ".");
+                            + (plan.loudMasterCapped ? pl("; więcej clippera nie dam, bo ślad by się spłaszczył") : juce::String()) + ".");
     else if (plan.dynamicsKnown && plan.peakKnown && plan.crestDb > 0.0 && channel.data.intentionalDrive == 0)
         verdict.reasons.add(pl("Szczyty w normie (") + juce::String(plan.crestDb, 1) + pl(" dB nad głośną częścią)."));
     else if (plan.dynamicsKnown && !plan.peakKnown && channel.data.intentionalDrive == 0)
@@ -7513,7 +7518,7 @@ juce::String BrainProcessor::previewVerdict(MixSnapshot::Status& status) const
                  + pl(" już pomaga, a ma jeszcze zapas: kliknij „Analizuj”, dobierze go do tego, co limiter ścina teraz") + lower;
     else if (loudMasterPlan.made && loudMasterPlan.loudest.isNotEmpty())
         advice = pl(" Najwyższe szczyty daje ") + quoted(loudMasterPlan.loudest)
-                 + pl(", a to nie perkusja, więc Mózg nie clipuje go sam: clipper albo kompresor na nim ustaw ręcznie") + lower;
+                 + pl(", a Mózg nie clipuje go sam (wokal, wysyłka albo ślad bez „Naucz poziom”): kompresor albo clipper na nim ustaw ręcznie") + lower;
     // A limiter working that hard does not even get there.
     const auto shortOf = std::isfinite(s.outputLufs) && s.outputLufs < target - 1.0
                              ? pl(" I tak nie dobije do celu: wychodzi ") + juce::String(s.outputLufs, 1) + " LUFS."

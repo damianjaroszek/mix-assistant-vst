@@ -547,7 +547,7 @@ std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& input, const 
             const auto& c = channels[i];
             const auto& plan = plans[i];
             if (!c.valid || !c.carriesMasterPeaks || plan.topPercussion || !plan.dynamicsKnown || !plan.peakKnown || c.intentionalDrive || plan.overCompressed
-                || (c.role != Role::kick && !isPercussion(c.role)))
+                || c.role == Role::vocal || c.role == Role::bus || c.role == Role::send)
                 continue;
             carriers.push_back(i);
             applied = std::max(applied, c.currentClipDb - plan.clipDb);
@@ -560,8 +560,13 @@ std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& input, const 
         for (const auto i : carriers)
         {
             auto& plan = plans[i];
-            const double total = std::min(kMaxLoudMasterClipDb, std::max(plan.clipDb, plan.clipDb + extra));
-            plan.loudMasterCapped = plan.clipDb + extra >= kMaxLoudMasterClipDb - 0.25;
+            // A drum's hit may lose up to kMaxLoudMasterClipDb; a tonal part (a lead, a bass, a pad that makes
+            // the mix's peaks) only what leaves kTonalKeepCrestDb over its loud level, so it is never squashed.
+            const bool drum = channels[i].role == Role::kick || isPercussion(channels[i].role);
+            const double most = drum ? kMaxLoudMasterClipDb
+                                     : std::max(plan.clipDb, std::min(kMaxLoudMasterClipDb, std::floor((plan.crestDb - kTonalKeepCrestDb) * 2.0) / 2.0));
+            const double total = std::min(most, std::max(plan.clipDb, plan.clipDb + extra));
+            plan.loudMasterCapped = plan.clipDb + extra >= most - 0.25;
             if (total - plan.clipDb < 0.5)
                 continue;
             plan.loudMasterClipDb = total - plan.clipDb;
