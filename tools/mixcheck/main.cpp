@@ -884,13 +884,69 @@ int main(int argc, char** argv)
                 whatIf << "- kick " << signedDb(up) << " dB: sum peak " << signedDb(p - sumPeak) << " dB, RMS " << signedDb(r - sumRms) << " dB, crest "
                        << db(p - r) << " dB\n";
             }
+        // More what-ifs: everything but the drums pumping under the kick (a whole-signal duck following the
+        // kick's envelope), and each part's own peaks clipped a little.
+        if (kickPeakDb > -100.0)
+        {
+            std::vector<float> envelope(static_cast<size_t>(n), 0.0f);
+            const float* kl = dropOut[static_cast<size_t>(kickTrack)].getReadPointer(0);
+            const float* kr = dropOut[static_cast<size_t>(kickTrack)].getReadPointer(1);
+            const float release = static_cast<float>(std::exp(-1.0 / (0.12 * rate)));
+            float e = 0.0f, top = 1e-9f;
+            for (int i = 0; i < n; ++i)
+            {
+                e = std::max(std::max(std::abs(kl[i]), std::abs(kr[i])), e * release);
+                envelope[static_cast<size_t>(i)] = e;
+                top = std::max(top, e);
+            }
+            for (const double depth : { 3.0, 6.0 })
+            {
+                rest.clear();
+                for (size_t t = 0; t < tracks.size(); ++t)
+                {
+                    const bool drums = tracks[t].role == static_cast<int>(ma::Role::kick) || ma::isPercussion(static_cast<ma::Role>(tracks[t].role));
+                    for (int c = 0; c < 2; ++c)
+                    {
+                        const float* x = dropOut[t].getReadPointer(c);
+                        float* y = rest.getWritePointer(c);
+                        for (int i = 0; i < n; ++i)
+                            y[i] += drums ? x[i] : x[i] * static_cast<float>(std::pow(10.0, -depth * std::min(1.0f, envelope[static_cast<size_t>(i)] / top) / 20.0));
+                    }
+                }
+                double p = 0.0, r = 0.0;
+                crestOf(rest, p, r);
+                whatIf << "- everything but the drums ducks " << db(depth) << " dB under the kick: sum peak " << signedDb(p - sumPeak) << " dB, RMS "
+                       << signedDb(r - sumRms) << " dB, crest " << db(p - r) << " dB\n";
+            }
+        }
+        for (const double clip : { 3.0, 6.0 })
+            for (const bool bassOnly : { true, false })
+            {
+                rest.clear();
+                for (size_t t = 0; t < tracks.size(); ++t)
+                {
+                    const bool held = bassOnly ? tracks[t].role == static_cast<int>(ma::Role::bass) : static_cast<int>(t) != kickTrack;
+                    const float ceiling = static_cast<float>(std::pow(10.0, (rows[t].peakDb - (held ? clip : 0.0)) / 20.0));
+                    for (int c = 0; c < 2; ++c)
+                    {
+                        const float* x = dropOut[t].getReadPointer(c);
+                        float* y = rest.getWritePointer(c);
+                        for (int i = 0; i < n; ++i)
+                            y[i] += jlimit(-ceiling, ceiling, x[i]);
+                    }
+                }
+                double p = 0.0, r = 0.0;
+                crestOf(rest, p, r);
+                whatIf << "- " << (bassOnly ? "bass parts" : "every part but the kick") << " clipped " << db(clip) << " dB under their own peak: sum peak "
+                       << signedDb(p - sumPeak) << " dB, RMS " << signedDb(r - sumRms) << " dB, crest " << db(p - r) << " dB\n";
+            }
         std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.share > b.share; });
         for (const auto& row : rows)
             if (row.rmsDb > -90.0)
                 md << "| " << row.name << " | " << String(roundToInt(row.share * 100.0)) << "% | " << db(row.peakDb) << " | " << db(row.rmsDb) << " | "
                    << db(row.peakDb - row.rmsDb) << " | " << signedDb(row.without) << " |\n";
         if (whatIf.isNotEmpty())
-            md << "\nKick peak " << db(kickPeakDb) << " dBFS.\n" << whatIf;
+            md << "\nKick peak " << db(kickPeakDb) << " dBFS. What if:\n" << whatIf;
     }
 
     md << "\n## Collisions\n\nBefore: " << String(static_cast<int>(before.masking.issues.size())) << ", after: "
