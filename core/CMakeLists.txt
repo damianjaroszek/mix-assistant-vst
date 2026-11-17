@@ -25,6 +25,8 @@ add_library(ma_core STATIC
     src/DynamicEq.cpp
     src/Pan.cpp
     src/Depth.cpp
+    src/Layers.cpp
+    src/LowEnd.cpp
     src/Alignment.cpp
     src/ChainPlanner.cpp
     src/Resonance.cpp

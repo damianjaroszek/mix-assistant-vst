@@ -570,6 +570,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout BrainProcessor::createLayout
         juce::AudioParameterFloatAttributes().withLabel("LUFS")));
     // Phase 30: after "Zastosuj", measure again and finish what is left by itself.
     layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { autoRefineId, 4 }, "Auto refine", true));
+    // Phase 42: parts stacked in the same register. Off: the report and the proposal still say
+    // exactly what to set, and the user does it in their own EQ.
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { autoLayersId, 5 }, "Auto layers", true));
 
     return layout;
 }
@@ -2197,6 +2200,14 @@ void BrainProcessor::buildReport()
     }
 
     // Before and after the last "Zastosuj": the same measurements, so the change is a number and not a feeling.
+    if (autoUndone.isNotEmpty() && !scoreBefore.valid)
+    {
+        MixSnapshot::ReportItem item;
+        item.title = pl("Przed i po (ostatnie „Zastosuj”)");
+        item.status = Status::warning;
+        item.detail = autoUndone;
+        report.push_back(item);
+    }
     if (scoreBefore.valid)
     {
         MixSnapshot::ReportItem item;
@@ -2214,16 +2225,10 @@ void BrainProcessor::buildReport()
             lines.add(line(pl("odległość od środka korytarza (4 zakresy razem): "), scoreBefore.offCentreDb, now.offCentreDb, " dB"));
             lines.add(pl("kolizje: ") + juce::String(scoreBefore.collisions) + pl(" → ") + juce::String(now.collisions));
             lines.add(line(pl("szczyt względem głośności (PLR, mniej = gęściej): "), scoreBefore.plrDb, now.plrDb, " dB"));
-            if (now.outsideDb > scoreBefore.outsideDb + 1.0)
-                worse.add(pl("barwa poza korytarzem"));
-            if (now.offCentreDb > scoreBefore.offCentreDb + 1.0)
-                worse.add(pl("odległość od środka korytarza"));
-            if (now.collisions > scoreBefore.collisions + 1)
-                worse.add(pl("kolizje"));
-            if (now.plrDb > scoreBefore.plrDb + 1.0)
-                worse.add(pl("gęstość"));
+            juce::StringArray better;
+            scoreChange(now, worse, better);
             item.status = worse.isEmpty() ? Status::good : Status::warning;
-            item.detail = lines.joinIntoString(pl("; ")) + "."
+            item.detail = lines.joinIntoString(pl("; ")) + "." + (droppedFamilyText.isEmpty() ? juce::String() : " " + droppedFamilyText)
                           + (worse.isEmpty() ? pl(" Nic się nie pogorszyło.")
                                              : pl(" Pogorszyło się: ") + worse.joinIntoString(", ")
                                                    + pl(". Porównaj na słuch („Przed / po”); „Cofnij” przywraca poprzedni stan."));
@@ -2788,6 +2793,143 @@ void BrainProcessor::buildReport()
             report.push_back(item);
     }
 
+    // Phase 41: the low end as one thing. Four parts have to work together for a club low end, and
+    // until now each was judged on its own: the sub under the bass body, how even the line's notes are
+    // for the ear, how the bass comes back from the kick's duck, and the room over the bass.
+    {
+        ma::LowEndInput in;
+        in.bpm = tempoBpm();
+        in.tonalValid = mix.tonal.valid && activeTarget().valid();
+        if (in.tonalValid)
+        {
+            in.mixDb = mix.tonal.mixDb;
+            in.targetDb = activeTarget().centre;
+        }
+        std::vector<const MixSnapshot::Channel*> rows;
+        for (const auto& channel : mix.channels)
+        {
+            ma::LowEndInput::Channel row;
+            row.bass = channel.data.role == static_cast<int>(ma::Role::bass);
+            row.notesKnown = channel.data.statsValid != 0 && channel.data.noteCount >= ma::kMinEvenNotes;
+            row.noteSpreadDb = channel.data.noteSpreadDb;
+            row.evenerAmount = channel.data.evener.on > 0.5f ? channel.data.evener.amount : 0.0;
+            row.duck = channel.data.duck;
+            row.duckKeyed = channel.data.duckKeyFound != 0;
+            row.levelDb = channel.data.statsValid != 0 ? channel.data.levelP50 + channel.data.trimDb : channel.data.inputRmsDb;
+            in.channels.push_back(row);
+            rows.push_back(&channel);
+        }
+        const auto low = ma::analyseLowEnd(in);
+        lastLowEnd = low;
+        if (low.valid)
+        {
+            using Part = ma::LowPart;
+            using Low = ma::LowStatus;
+            const auto statusOf = [](Low status) {
+                return status == Low::problem ? Status::problem : status == Low::warning ? Status::warning : Status::good;
+            };
+            const auto named = [&](const ma::LowFinding& finding) {
+                return finding.channel >= 0 && finding.channel < static_cast<int>(rows.size())
+                           ? quoted(rows[static_cast<size_t>(finding.channel)]->name)
+                           : juce::String();
+            };
+            MixSnapshot::ReportItem item;
+            item.title = pl("Dół miksu (sub, bas, pompa)");
+            juce::StringArray lines;
+            Status worst = Status::good;
+            const auto add = [&](const ma::LowFinding& finding, const juce::String& text) {
+                if (finding.status == Low::unknown)
+                    return;
+                lines.add(text);
+                if (static_cast<int>(statusOf(finding.status)) > static_cast<int>(worst))
+                    worst = statusOf(finding.status);
+            };
+
+            const auto& sub = low.parts[static_cast<size_t>(Part::subVsBody)];
+            add(sub, pl("Sub pod basem: ") + juce::String(sub.measured, 1) + pl(" dB względem korpusu basu (60–150 Hz), wzorce klubowe mają ")
+                         + juce::String(sub.target, 1) + " dB"
+                         + (sub.status == Low::good
+                                ? pl(", czyli tak jak trzeba.")
+                                : (sub.delta > 0.0 ? pl(". Sub jest o ") + juce::String(sub.delta, 1)
+                                                         + pl(" dB za mocny względem korpusu: dół dudni zamiast nieść. Ścisz warstwę suba albo "
+                                                              "podnieś 60–150 Hz na basie.")
+                                                   : pl(". Sub jest o ") + juce::String(-sub.delta, 1)
+                                                         + pl(" dB za słaby: na klubowym systemie zabraknie fundamentu. Zejdź niżej filtrem na "
+                                                              "basie albo dołóż warstwę suba."))));
+
+            const auto& notes = low.parts[static_cast<size_t>(Part::notes)];
+            const bool evened = notes.extra > notes.measured + 0.2;
+            add(notes, pl("Równość nut: ") + named(notes) + pl(" gra nuty, które dla ucha różnią się o ")
+                           + juce::String(notes.extra, 1) + " dB"
+                           + (evened ? pl(", a wyrównywacz w Agencie zdejmuje z tego tyle, że zostaje ok. ")
+                                           + juce::String(notes.measured, 1) + " dB"
+                                     : juce::String())
+                           + (notes.status == Low::good
+                                  ? pl(", czyli linia gra równo.")
+                                  : pl(". Niższe nuty giną, wyższe wyskakują, i to słychać jako zamulenie. „Analizuj” (cały łańcuch) ustawi "
+                                       "wyrównywacz nut w Agencie tak, żeby każda nuta ważyła tyle samo.")));
+
+            const auto& duck = low.parts[static_cast<size_t>(Part::duckReturn)];
+            const double eighth = in.bpm > 20.0 ? 60000.0 / in.bpm / 2.0 : 0.0;
+            add(duck, pl("Powrót po stopie: ") + named(duck) + pl(" wraca po ") + juce::String(juce::roundToInt(duck.measured))
+                          + pl(" ms, uderzenie trwa ") + juce::String(juce::roundToInt(duck.extra)) + pl(" ms")
+                          + (duck.status == Low::good
+                                 ? pl(", czyli bas wraca w rytmie.")
+                                 : (duck.delta > 0.0 ? pl(". Bas wraca dopiero po następnym uderzeniu i traci energię: skróć Release ducka do ok. ")
+                                                           + juce::String(juce::roundToInt(eighth / 2.2)) + pl(" ms (ósemka).")
+                                                     : pl(". Dziura jest tak krótka, że słychać kliknięcie zamiast pompy: wydłuż Release ducka do ok. ")
+                                                           + juce::String(juce::roundToInt(eighth / 2.2)) + pl(" ms (ósemka)."))));
+
+            const auto& space = low.parts[static_cast<size_t>(Part::space)];
+            add(space, pl("Miejsce nad basem (150–400 Hz): ") + juce::String(space.delta, 1) + pl(" dB względem wzorców")
+                           + (space.status == Low::good
+                                  ? pl(", bas ma gdzie stanąć.")
+                                  : (space.delta > 0.0 ? pl(". To pasmo jest zatłoczone i zjada separację basu: w propozycji szukaj cięć w 150–400 Hz "
+                                                            "na kanałach, które tego pasma nie potrzebują (pady, tła, pętle).")
+                                                       : pl(". Tu jest pusto, więc miks może brzmieć cienko między basem a średnicą."))));
+
+            if (!lines.isEmpty())
+            {
+                item.status = worst;
+                item.detail = lines.joinIntoString(" ");
+                report.push_back(item);
+            }
+        }
+    }
+
+    // Phase 42: parts stacked in the same register, from the last analysis.
+    if (!lastLayers.empty())
+    {
+        MixSnapshot::ReportItem item;
+        item.title = pl("Warstwy w tym samym paśmie");
+        juce::StringArray stacks;
+        for (const auto& group : lastLayers)
+        {
+            const auto name = [&](int channel) {
+                return channel >= 0 && channel < static_cast<int>(mix.channels.size()) ? quoted(mix.channels[static_cast<size_t>(channel)].name)
+                                                                                       : juce::String();
+            };
+            juce::StringArray cuts;
+            for (const auto& cut : group.cuts)
+                cuts.add(name(cut.channel) + " " + juce::String(cut.gainDb, 1) + pl(" dB przy ") + hzText(cut.hz) + " (Q "
+                         + juce::String(cut.q, 1) + ")");
+            juce::StringArray members;
+            for (const int member : group.members)
+                members.add(name(member));
+            stacks.add(hzText(group.lowHz) + pl("–") + hzText(group.highHz) + ": " + joinNames(members) + pl(" niosą to samo (każda ma co najmniej ")
+                       + juce::String(juce::roundToInt(group.overlap * 100.0)) + pl("% kształtu wspólnego z głównym). Rejestr zostaje przy ")
+                       + name(group.members.front()) + pl(", reszta robi miejsce: ") + cuts.joinIntoString("; "));
+        }
+        item.status = layersResolved ? Status::good : Status::warning;
+        item.detail = (layersResolved ? pl("Rejestr jest już podzielony. Tak to wyglądało przy ostatniej analizie, która jeszcze coś znalazła: ")
+                                      : juce::String())
+                      + stacks.joinIntoString(" ")
+                      + (layersResolved ? juce::String()
+                         : autoLayersOn() ? pl(" Te cięcia są w propozycji; jeśli wolisz zrobić to sam, wyłącz „Warstwy sam” i zostaną samą radą.")
+                                          : pl(" „Warstwy sam” jest wyłączone, więc to tylko rada: ustaw te pasma w swoim EQ."));
+        report.push_back(item);
+    }
+
     // Phase 38: nothing lost anywhere in the song. From the song's seconds, as the mix hears them now
     // (each second's raw + trim power plus the channel's present EQ and cleanup), worked out every 2 s.
     {
@@ -2935,11 +3077,14 @@ void BrainProcessor::buildReport()
             if (bars > 0.0)
             {
                 line += " (" + juce::String(bars, 1) + pl(" taktu)");
-                if (bars > ma::kLongTailBars)
+                if (ma::tailOn(channel.data.depth))
+                    line += pl(": Agent skraca go ") + juce::String(channel.data.depth.tailRatio, 1) + pl("×, do ok. taktu");
+                else if (bars > 1.1 * ma::kLongTailBars)
                 {
                     longTail = true;
-                    line += pl(": dłużej niż takt, ogon wchodzi w następną frazę; skróć Decay do ok. ")
-                            + juce::String(ma::depthTimes(tempoBpm()).decaySeconds, 1) + " s";
+                    line += pl(": dłużej niż takt, ogon wchodzi w następną frazę; kliknij „Analizuj”, Agent skróci go sam "
+                               "(albo skróć Decay / Feedback do ok. ")
+                            + juce::String(ma::depthTimes(tempoBpm()).decaySeconds, 1) + " s)";
                 }
             }
             tails.add(line);
@@ -3978,6 +4123,100 @@ void BrainProcessor::proposeOnce(const std::array<double, ma::kStemGroups>* grou
             }
         currentProposal.items.push_back(item);
     }
+    // Phase 42: parts stacked in the same register (three leads, two pads). The most important one
+    // keeps the register and the others get one broad bell, with the numbers written out so the user
+    // can set them by hand instead. Measured before the Brain's EQ, so a second analysis proposes the
+    // same bell (kept as "already running") rather than another one on top.
+    {
+        std::vector<ma::LayerChannel> rows(mix.channels.size());
+        for (size_t c = 0; c < mix.channels.size(); ++c)
+        {
+            const auto& channel = mix.channels[c];
+            if (!channel.spectrumValid || !inMixSums(channel))
+                continue;
+            auto& row = rows[c];
+            row.valid = true;
+            row.bandsDb = channel.bandsDb;
+            row.role = static_cast<ma::Role>(juce::jlimit(0, ma::kRoles - 1, static_cast<int>(channel.data.role)));
+            row.priority = channel.data.priority;
+        }
+        const auto layers = ma::findLayers(rows);
+        // When the last analysis cleared the stack (the cuts and the level moves did their work),
+        // the report still shows what it was and says it is sorted, instead of the item vanishing.
+        layersResolved = !lastLayers.empty() && layers.empty();
+        if (!layers.empty())
+            lastLayers = layers;
+        const bool autoLayers = autoLayersOn();
+        for (const auto& group : layers)
+        {
+            const auto& leader = mix.channels[static_cast<size_t>(group.members.front())];
+            for (const auto& cut : group.cuts)
+            {
+                const auto& follower = mix.channels[static_cast<size_t>(cut.channel)];
+                ma::EqBand band;
+                band.hz = static_cast<float>(cut.hz);
+                band.q = static_cast<float>(cut.q);
+                band.gainDb = static_cast<float>(cut.gainDb);
+                auto proposedEq = std::find_if(currentProposal.eq.begin(), currentProposal.eq.end(),
+                                               [&](const auto& e) { return e.first == follower.owner; });
+                // Where the proposal already takes that register down, one correction is enough.
+                bool covered = false;
+                int slot = -1;
+                if (proposedEq != currentProposal.eq.end())
+                    for (int b = 0; b < ma::kEqBands; ++b)
+                    {
+                        const auto& have = proposedEq->second[static_cast<size_t>(b)];
+                        if (std::abs(have.gainDb) < 0.05f)
+                        {
+                            slot = slot < 0 ? b : slot;
+                            continue;
+                        }
+                        if (have.gainDb <= -1.0f && have.hz > 0.0f && std::abs(std::log2(have.hz / band.hz)) < 0.5)
+                            covered = true;
+                    }
+                if (covered)
+                    continue;
+
+                Proposal::Item item;
+                item.change.kind = ma::SolverChange::Kind::eqCut;
+                item.change.channel = cut.channel;
+                item.change.maskedChannel = group.members.front();
+                item.change.lowHz = group.lowHz;
+                item.change.highHz = group.highHz;
+                item.owner = follower.owner;
+                item.maskedOwner = leader.owner;
+                item.band = band;
+                juce::StringArray others;
+                for (const int member : group.members)
+                    if (member != cut.channel)
+                        others.add(quoted(mix.channels[static_cast<size_t>(member)].name));
+                item.text = quoted(follower.name) + ": " + juce::String(band.gainDb, 1) + pl(" dB przy ") + hzText(band.hz) + " (Q "
+                            + juce::String(band.q, 1) + pl("), bo ") + hzText(group.lowHz) + pl("–") + hzText(group.highHz)
+                            + pl(" niesie razem z nim ") + joinNames(others) + pl(", a ten rejestr ma należeć do ") + quoted(leader.name)
+                            + (cut.underLeaderDb < 0.0 ? pl(" (gra tam o ") + juce::String(-cut.underLeaderDb, 1) + pl(" dB głośniej od niego)")
+                                                       : pl(" (jest tam tylko ") + juce::String(cut.underLeaderDb, 1) + pl(" dB pod nim)"));
+                if (autoLayers && slot >= 0 && proposedEq != currentProposal.eq.end())
+                {
+                    item.change.eqSlot = slot;
+                    proposedEq->second[static_cast<size_t>(slot)] = band;
+                    if (eqHasBand(follower, band))
+                    {
+                        item.inPlace = true;
+                        item.text = pl("Już działa: ") + item.text;
+                    }
+                }
+                else
+                {
+                    item.advisory = true;
+                    item.selected = false;
+                    item.text += autoLayers ? pl(". Wszystkie pasma EQ tego kanału są zajęte, więc ustaw to w swoim EQ")
+                                            : pl(". Ustaw to w swoim EQ (albo włącz „Warstwy sam”)");
+                }
+                currentProposal.items.push_back(item);
+            }
+        }
+    }
+
     // Phase 17: what the sketch lacks, first, as advice: the plan above already counts with it.
     if (mix.sketch.active())
     {
@@ -4217,9 +4456,14 @@ void BrainProcessor::markMasterPeakCarriers(std::vector<ma::ChainChannel>& chain
         if (unclipped[c] >= highest - 1e-9 && highest > -200.0)
             loudMasterPlan.loudest = mix.channels[c].name;
     for (size_t c = 0; c < mix.channels.size() && c < chain.size(); ++c)
-        if (unclipped[c] > -200.0 && unclipped[c] >= highest - kPeakCarrierRangeDb
-            && (chain[c].role == ma::Role::kick || ma::isPercussion(chain[c].role)))
+    {
+        // Drums within the range of the highest peak, and whichever other part makes that peak itself
+        // (within 1 dB): a lead or bass standing over the drums is what the limiter flattens first.
+        const bool drum = chain[c].role == ma::Role::kick || ma::isPercussion(chain[c].role);
+        const bool tonal = chain[c].role != ma::Role::vocal && chain[c].role != ma::Role::send && chain[c].role != ma::Role::bus;
+        if (unclipped[c] > -200.0 && ((drum && unclipped[c] >= highest - kPeakCarrierRangeDb) || (!drum && tonal && unclipped[c] >= highest - 1.0)))
             chain[c].carriesMasterPeaks = true;
+    }
 }
 
 void BrainProcessor::proposeWholeMix()
@@ -4241,6 +4485,8 @@ void BrainProcessor::proposeWholeMix()
         in.levelP95 = channel.data.levelP95 + channel.data.trimDb;
         in.truePeakDb = channel.data.learnedTruePeakDb + channel.data.trimDb;
         in.lowNoteHz = channel.data.lowNoteHz;
+        in.noteSpreadDb = channel.data.noteSpreadDb;
+        in.notesKnown = channel.data.statsValid != 0 && channel.data.noteCount >= ma::kMinEvenNotes;
         in.currentCleanup = channel.data.cleanup;
         in.intentionalDrive = channel.data.intentionalDrive != 0;
         in.contentRole = static_cast<ma::Role>(juce::jlimit(0, ma::kRoles - 1, static_cast<int>(channel.data.detectedRole)));
@@ -4493,7 +4739,7 @@ void BrainProcessor::proposeWholeMix()
             if (plan.loudMasterClipDb > 0.0)
                 item.text = name + pl("clipper ścina ") + juce::String(plan.clipDb, 1) + pl(" dB szczytów (sufit ")
                             + juce::String(plan.clipper.ceilingDb, 1) + pl(" dBFS), z tego ") + juce::String(plan.loudMasterClipDb, 1)
-                            + pl(" dB pod głośny master: jego uderzenia to najwyższe szczyty miksu, a ")
+                            + pl(" dB pod głośny master: jego szczyty to najwyższe szczyty miksu, a ")
                             + (masterCheck.valid ? pl("Ozone zabiera szczytom ") + juce::String(masterCheck.densityDb, 1)
                                                        + pl(" dB (zmierzone „Kontrolą mastera” po masteringu)")
                                                  : pl("limiter przy ") + juce::String(masterTargetLufs(), 1) + pl(" LUFS ścina teraz ")
@@ -4513,7 +4759,11 @@ void BrainProcessor::proposeWholeMix()
             item.evener = plan.evener;
             item.text = name + pl("wyrównanie nut basu względem ") + noteName(plan.evener.referenceHz) + " ("
                         + hzText(plan.evener.referenceHz) + pl(", ") + juce::String(juce::roundToInt(plan.evener.amount * 100.0f))
-                        + pl("%): niższe nuty ucho słyszy ciszej, więc dostają więcej, wyższe mniej. Linia gra równo");
+                        + pl("%): ")
+                        + (channel.data.statsValid != 0 && channel.data.noteCount >= ma::kMinEvenNotes
+                               ? pl("nuty tej linii różnią się dla ucha o ") + juce::String(channel.data.noteSpreadDb, 1) + pl(" dB, bo ")
+                               : pl("nuty tej linii nie były jeszcze mierzone („Naucz poziom” przy grającej linii), a "))
+                        + pl("niższe nuty ucho słyszy ciszej. Po wyrównaniu każda waży tyle samo");
             chainItems.push_back(item);
         }
 
@@ -4540,12 +4790,19 @@ void BrainProcessor::proposeWholeMix()
             item.text = name + pl("clipper wyłączony: szczyty w normie (") + juce::String(plan.crestDb, 1) + pl(" dB nad głośną częścią)");
             chainItems.push_back(item);
         }
-        if (plan.evener.on < 0.5f && channel.data.evener.on > 0.5f && channel.data.role != static_cast<int>(ma::Role::bass))
+        const bool bassNotesKnown = channel.data.statsValid != 0 && channel.data.noteCount >= ma::kMinEvenNotes;
+        const bool evenerBrainMade = (channel.data.brainTools & ma::bus::toolEvener) != 0;
+        if (plan.evener.on < 0.5f && channel.data.evener.on > 0.5f
+            && (channel.data.role != static_cast<int>(ma::Role::bass) || (bassNotesKnown && evenerBrainMade)))
         {
             item.tool = Proposal::Item::ChainTool::evener;
             item.evener = channel.data.evener;
             item.evener.on = 0.0f;
-            item.text = name + pl("wyrównanie nut wyłączone: jest tylko dla basu");
+            item.text = name
+                        + (channel.data.role == static_cast<int>(ma::Role::bass)
+                               ? pl("wyrównanie nut wyłączone: linia jest już równa (nuty różnią się o ")
+                                     + juce::String(channel.data.noteSpreadDb, 1) + pl(" dB dla ucha)")
+                               : pl("wyrównanie nut wyłączone: jest tylko dla basu"));
             chainItems.push_back(item);
         }
 
@@ -4667,17 +4924,47 @@ void BrainProcessor::proposeWholeMix()
         anySend = true;
         const auto name = quoted(channel.name);
         const bool brainMade = (channel.data.brainTools & ma::bus::toolDepth) != 0;
-        if (plan.depthConsidered
-            && ((ma::depthOn(plan.depth) && std::abs(plan.depth.highCutHz - channel.data.depth.highCutHz) > 50.0f)
-                || (!ma::depthOn(plan.depth) && ma::depthOn(channel.data.depth) && brainMade)))
         {
-            Proposal::Item item;
-            item.action = Proposal::Item::Action::chain;
-            item.tool = Proposal::Item::ChainTool::depth;
-            item.owner = channel.owner;
-            item.depth = plan.depth;
-            item.text = name + ": " + depthText(plan);
-            chainItems.push_back(item);
+            // The high cut and the tail are one tool: what the plan does not touch stays as the Agent has it.
+            ma::DepthSettings wanted = channel.data.depth;
+            juce::StringArray texts;
+            if (plan.depthConsidered
+                && ((ma::depthOn(plan.depth) && std::abs(plan.depth.highCutHz - channel.data.depth.highCutHz) > 50.0f)
+                    || (!ma::depthOn(plan.depth) && ma::depthOn(channel.data.depth) && brainMade)))
+            {
+                wanted.highCutHz = plan.depth.highCutHz;
+                texts.add(depthText(plan));
+            }
+            // The tail against the tempo: measured on the Agent's input (before its own shortening, so
+            // planning again lands on the same ratio); longer than a bar it is shortened to a bar.
+            const double bar = tempoBpm() > 20.0 ? 240.0 / tempoBpm() : 0.0, tail = channel.data.tailSeconds;
+            if (bar > 0.0 && tail > 0.0)
+            {
+                const float ratio = tail > 1.1 * bar ? ma::tailRatioFor(tail, bar) : 1.0f;
+                const float current = std::max(1.0f, channel.data.depth.tailRatio);
+                if (ratio > 1.05f && std::abs(ratio - current) > 0.1f * ratio)
+                {
+                    wanted.tailRatio = ratio;
+                    texts.add(pl("ogon skrócony do taktu: wybrzmiewa ok. ") + juce::String(tail, 1) + " s (" + juce::String(tail / bar, 1)
+                              + pl(" taktu) i wchodzi w następną frazę, więc Agent ścisza jego koniec ") + juce::String(ratio, 1)
+                              + pl("× szybciej, do ok. ") + juce::String(bar, 1) + pl(" s. Pogłos i delay zostają, jak je ustawiłeś"));
+                }
+                else if (ratio <= 1.05f && current > 1.05f && brainMade)
+                {
+                    wanted.tailRatio = 1.0f;
+                    texts.add(pl("skracanie ogona wyłączone: ogon (") + juce::String(tail, 1) + pl(" s) mieści się już w takcie"));
+                }
+            }
+            if (!texts.isEmpty())
+            {
+                Proposal::Item item;
+                item.action = Proposal::Item::Action::chain;
+                item.tool = Proposal::Item::ChainTool::depth;
+                item.owner = channel.owner;
+                item.depth = wanted;
+                item.text = name + ": " + texts.joinIntoString("; ");
+                chainItems.push_back(item);
+            }
         }
 
         // Phase 36/37: what the send gives way to, and how.
@@ -5159,7 +5446,7 @@ Proposal::Verdict BrainProcessor::judge(size_t index, const ma::ChainPlan& plan,
                             + (plan.loudMasterClipDb > 0.0 ? pl(", z tego ") + juce::String(plan.loudMasterClipDb, 1)
                                                                  + pl(" dB pod głośny master (to on daje najwyższe szczyty miksu)")
                                                            : juce::String())
-                            + (plan.loudMasterCapped ? pl("; więcej clippera nie dam, bo uderzenie by się spłaszczyło") : juce::String()) + ".");
+                            + (plan.loudMasterCapped ? pl("; więcej clippera nie dam, bo ślad by się spłaszczył") : juce::String()) + ".");
     else if (plan.dynamicsKnown && plan.peakKnown && plan.crestDb > 0.0 && channel.data.intentionalDrive == 0)
         verdict.reasons.add(pl("Szczyty w normie (") + juce::String(plan.crestDb, 1) + pl(" dB nad głośną częścią)."));
     else if (plan.dynamicsKnown && !plan.peakKnown && channel.data.intentionalDrive == 0)
@@ -5554,6 +5841,10 @@ void BrainProcessor::buildToolNotes(bool wholeMix)
                 set(ma::bus::toolEvener, D::notNeeded, pl("wyrównuję tylko linię basu (niskie nuty ucho słyszy ciszej)"));
             else if (p.evener.on > 0.5f)
                 set(ma::bus::toolEvener, D::kept, pl("linia wokół ") + noteName(p.evener.referenceHz) + pl(" wyrównana"));
+            else if (channel.data.statsValid != 0 && channel.data.noteCount >= ma::kMinEvenNotes)
+                set(ma::bus::toolEvener, D::notNeeded,
+                    pl("linia jest już równa: jej nuty różnią się dla ucha o ") + juce::String(channel.data.noteSpreadDb, 1)
+                        + pl(" dB, a wyrównuję od ") + juce::String(ma::kNoteSpreadWarnDb, 0) + " dB");
             else
                 set(ma::bus::toolEvener, D::notChecked, pl("nie znam zwykłej nuty basu: kliknij „Naucz poziom” w Agencie, gdy gra linia basu"));
 
@@ -5664,7 +5955,11 @@ void BrainProcessor::buildToolNotes(bool wholeMix)
             else if (!p.depthConsidered)
                 set(ma::bus::toolDepth, D::notChecked, pl("brak widma wysyłki albo reszty miksu"));
             else
-                set(ma::bus::toolDepth, ma::depthOn(p.depth) ? D::kept : D::notNeeded, depthText(p));
+                set(ma::bus::toolDepth, ma::depthOn(p.depth) || ma::tailOn(channel.data.depth) ? D::kept : D::notNeeded,
+                    depthText(p)
+                        + (ma::tailOn(channel.data.depth) ? pl("; ogon skracany ") + juce::String(channel.data.depth.tailRatio, 1) + pl("× do taktu")
+                           : channel.data.tailSeconds > 0.0f ? pl("; ogon ") + juce::String(channel.data.tailSeconds, 1) + pl(" s mieści się w takcie, bez skracania")
+                                                             : pl("; ogon jeszcze niezmierzony (za mało wybrzmień)")));
 
             // Phase 35: the bass against the kick in time.
             const auto advice = alignAdvice(channel.data);
@@ -7047,6 +7342,12 @@ int BrainProcessor::applySelected(bool refining)
 }
 
 // Phase 30: refining after the user's "Zastosuj".
+bool BrainProcessor::autoLayersOn() const
+{
+    const auto* value = parameters.getRawParameterValue(autoLayersId);
+    return value == nullptr || value->load() > 0.5f;
+}
+
 bool BrainProcessor::autoRefineOn() const
 {
     return autoRefine->load() > 0.5f;
@@ -7059,6 +7360,72 @@ std::array<std::int64_t, 5> BrainProcessor::itemSignature(const Proposal::Item& 
                                                                         : 0;
     return { static_cast<std::int64_t>(item.owner), static_cast<std::int64_t>(item.action), static_cast<std::int64_t>(item.tool),
              static_cast<std::int64_t>(item.group), extra };
+}
+
+BrainProcessor::ChangeFamily BrainProcessor::itemFamily(const Proposal::Item& item)
+{
+    using Action = Proposal::Item::Action;
+    using Kind = ma::SolverChange::Kind;
+    if (item.advisory)
+        return ChangeFamily::none;
+    switch (item.action)
+    {
+        case Action::solver:
+            switch (item.change.kind)
+            {
+                case Kind::eqCut: return ChangeFamily::collisions;
+                case Kind::tonalCut:
+                case Kind::tonalBoost:
+                case Kind::stemCut:
+                case Kind::stemBoost: return ChangeFamily::tonal;
+                default: return ChangeFamily::none; // the ceiling cut stays whatever happens
+            }
+        case Action::level:
+        case Action::channelLevel:
+        case Action::balance: return ChangeFamily::levels;
+        case Action::chain: return ChangeFamily::chain;
+        default: return ChangeFamily::none;
+    }
+}
+
+juce::String BrainProcessor::familyName(ChangeFamily family)
+{
+    switch (family)
+    {
+        case ChangeFamily::tonal: return pl("korekcje barwy");
+        case ChangeFamily::collisions: return pl("cięcia pod kolizje");
+        case ChangeFamily::levels: return pl("zmiany poziomów");
+        case ChangeFamily::chain: return pl("ustawienia łańcucha (kompresor, clipper, przester)");
+        default: return {};
+    }
+}
+
+// What to suspect when the measurements read worse: each axis has the family that moves it.
+BrainProcessor::ChangeFamily BrainProcessor::blameFamily(const MixScore& now) const
+{
+    if (!scoreBefore.valid || !now.valid)
+        return ChangeFamily::none;
+    if (now.outsideDb > scoreBefore.outsideDb + 1.0 || now.offCentreDb > scoreBefore.offCentreDb + 1.0)
+        return ChangeFamily::tonal;
+    if (now.collisions > scoreBefore.collisions + 1)
+        return ChangeFamily::collisions;
+    if (now.plrDb > scoreBefore.plrDb + 1.0)
+        return ChangeFamily::chain;
+    return ChangeFamily::none;
+}
+
+void BrainProcessor::scoreChange(const MixScore& now, juce::StringArray& worse, juce::StringArray& better) const
+{
+    const auto judge = [&](double before, double after, double step, const juce::String& name) {
+        if (after > before + step)
+            worse.add(name);
+        else if (after < before - step)
+            better.add(name);
+    };
+    judge(scoreBefore.outsideDb, now.outsideDb, 1.0, pl("barwa poza korytarzem"));
+    judge(scoreBefore.offCentreDb, now.offCentreDb, 1.0, pl("odległość od środka korytarza"));
+    judge(scoreBefore.collisions, now.collisions, 1.0, pl("kolizje"));
+    judge(scoreBefore.plrDb, now.plrDb, 1.0, pl("gęstość"));
 }
 
 BrainProcessor::MixScore BrainProcessor::scoreNow() const
@@ -7079,6 +7446,10 @@ BrainProcessor::MixScore BrainProcessor::scoreNow() const
 int BrainProcessor::applyByUser()
 {
     stopRefining();
+    autoUndone = {};
+    droppedFamilyText = {};
+    refine.droppedFamily = -1;
+    refine.triedDrop = false;
     scoreBefore = scoreNow();
     // What the user unticked stays unticked in the rounds that follow.
     std::vector<std::array<std::int64_t, 5>> unticked;
@@ -7155,6 +7526,12 @@ void BrainProcessor::updateRefine(std::uint64_t now)
     for (auto& item : currentProposal.items)
         if (!item.advisory && std::find(refine.unticked.begin(), refine.unticked.end(), itemSignature(item)) != refine.unticked.end())
             item.selected = false;
+    // Phase 43: a family the Brain dropped because the measurements got worse with it stays dropped,
+    // which also takes off what an earlier round applied (apply builds the EQ from the ticked items).
+    if (refine.droppedFamily >= 0)
+        for (auto& item : currentProposal.items)
+            if (static_cast<int>(itemFamily(item)) == refine.droppedFamily)
+                item.selected = false;
     const auto left = std::count_if(currentProposal.items.begin(), currentProposal.items.end(),
                                     [](const auto& i) { return !i.advisory && i.selected != i.inPlace; });
     // The same changes as the round before: applying them again would not move anything.
@@ -7167,6 +7544,46 @@ void BrainProcessor::updateRefine(std::uint64_t now)
     if (left == 0 || refine.roundsLeft <= 0 || repeating)
     {
         refine.active = false;
+        // The rounds are over and the same measurements read worse than before the click, with nothing
+        // better to weigh against it: the Brain takes its own changes back rather than leave it as a to-do.
+        if (const auto after = scoreNow(); scoreBefore.valid && after.valid)
+        {
+            juce::StringArray worse, better;
+            scoreChange(after, worse, better);
+            if (!worse.isEmpty() && better.isEmpty() && !refine.triedDrop)
+            {
+                // Not everything hurt: drop the family that moves the measurement which got worse,
+                // keep the rest, and measure again. Only then, if it is still worse, undo it all.
+                const auto family = blameFamily(after);
+                const bool anyApplied = std::any_of(currentProposal.items.begin(), currentProposal.items.end(), [&](const auto& item) {
+                    return item.selected && itemFamily(item) == family;
+                });
+                if (family != ChangeFamily::none && anyApplied)
+                {
+                    refine.triedDrop = true;
+                    refine.droppedFamily = static_cast<int>(family);
+                    refine.roundsLeft = 1;
+                    refine.status = pl("Po zmianach pogorszyło się (") + worse.joinIntoString(", ") + pl("). Zdejmuję ")
+                                    + familyName(family) + pl(" i mierzę jeszcze raz, zamiast cofać wszystko. Puść drop.");
+                    droppedFamilyText = {};
+                    return;
+                }
+            }
+            if (!worse.isEmpty() && better.isEmpty())
+            {
+                const auto text = pl("Cofnąłem ostatnie „Zastosuj” sam: po zmianach pogorszyło się (") + worse.joinIntoString(", ")
+                                  + pl("), a nic się nie poprawiło. Barwa poza korytarzem ") + juce::String(scoreBefore.outsideDb, 1) + pl(" → ")
+                                  + juce::String(after.outsideDb, 1) + pl(" dB, kolizje ") + juce::String(scoreBefore.collisions) + pl(" → ")
+                                  + juce::String(after.collisions) + pl(", PLR ") + juce::String(scoreBefore.plrDb, 1) + pl(" → ")
+                                  + juce::String(after.plrDb, 1)
+                                  + pl(" dB. Miks jest jak przed kliknięciem. W propozycji odznacz kroki, których nie chcesz, i zastosuj resztę, "
+                                       "albo zostaw miks tak, jak jest.");
+                undoLast();
+                autoUndone = text;
+                refine.status = text;
+                return;
+            }
+        }
         // mixcheck: the last round's other changes (levels, EQ, a vocal rider) can lift the peak past what
         // its give-back left as margin. The rounds end inside the ceiling: only the analysis's own ceiling
         // cut goes out then, everything else stays as it is.
@@ -7186,6 +7603,9 @@ void BrainProcessor::updateRefine(std::uint64_t now)
                             + juce::String(-cutDb, 1) + pl(" dB.");
             return;
         }
+        if (refine.droppedFamily >= 0)
+            droppedFamilyText = pl("Mózg zdjął sam ") + familyName(static_cast<ChangeFamily>(refine.droppedFamily))
+                                + pl(": z nimi pomiary wychodziły gorzej niż przed „Zastosuj”, reszta zmian została.");
         if (left == 0)
             refine.status = refine.round == 0 ? pl("Efekt zmierzony: nic więcej do zmiany.")
                                               : pl("Dopracowane (") + juce::String(refine.round)
@@ -7215,6 +7635,10 @@ bool BrainProcessor::canUndo() const
 int BrainProcessor::undoLast()
 {
     scoreBefore = {};
+    autoUndone = {};
+    droppedFamilyText = {};
+    refine.droppedFamily = -1;
+    refine.triedDrop = false;
     stopRefining();
     if (comparing)
         setComparing(false);
@@ -7513,7 +7937,7 @@ juce::String BrainProcessor::previewVerdict(MixSnapshot::Status& status) const
                  + pl(" już pomaga, a ma jeszcze zapas: kliknij „Analizuj”, dobierze go do tego, co limiter ścina teraz") + lower;
     else if (loudMasterPlan.made && loudMasterPlan.loudest.isNotEmpty())
         advice = pl(" Najwyższe szczyty daje ") + quoted(loudMasterPlan.loudest)
-                 + pl(", a to nie perkusja, więc Mózg nie clipuje go sam: clipper albo kompresor na nim ustaw ręcznie") + lower;
+                 + pl(", a Mózg nie clipuje go sam (wokal, wysyłka albo ślad bez „Naucz poziom”): kompresor albo clipper na nim ustaw ręcznie") + lower;
     // A limiter working that hard does not even get there.
     const auto shortOf = std::isfinite(s.outputLufs) && s.outputLufs < target - 1.0
                              ? pl(" I tak nie dobije do celu: wychodzi ") + juce::String(s.outputLufs, 1) + " LUFS."

@@ -1,5 +1,7 @@
 #include "ma/Instrument.h"
 
+#include "ma/EqualLoudness.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -78,6 +80,7 @@ void InstrumentFeatures::reset()
     pitchTracker.reset();
     noteHistogram.fill(0);
     noteHops = 0;
+    notePowerSum.fill(0.0);
     tailHistogram.fill(0);
     tailHops = 0;
     for (auto& f : probeFilters)
@@ -187,7 +190,9 @@ void InstrumentFeatures::endHop()
         const double note = pitchTracker.pitchHz();
         if (note > 0.0)
         {
-            ++noteHistogram[static_cast<size_t>(std::clamp(std::lround(note), 0L, 160L))];
+            const auto bin = static_cast<size_t>(std::clamp(std::lround(note), 0L, 160L));
+            ++noteHistogram[bin];
+            notePowerSum[bin] += midPower;
             ++noteHops;
         }
     }
@@ -300,6 +305,26 @@ InstrumentFeatures::Summary InstrumentFeatures::summary() const
                 break;
             }
         }
+    }
+    // How even those notes are for the ear: each note's mean level, weighted by the equal-loudness
+    // contour, over the notes played often enough to be part of the line.
+    if (noteHops > 0)
+    {
+        double loudest = -200.0, quietest = 200.0;
+        int counted = 0;
+        for (size_t hz = 20; hz < noteHistogram.size(); ++hz)
+        {
+            const auto hops = noteHistogram[hz];
+            if (static_cast<double>(hops) < kEvenNoteShare * static_cast<double>(noteHops) || notePowerSum[hz] <= 0.0)
+                continue;
+            const double heard = powerToDb(notePowerSum[hz] / static_cast<double>(hops)) - equalLoudnessWeightDb(static_cast<double>(hz));
+            loudest = std::max(loudest, heard);
+            quietest = std::min(quietest, heard);
+            ++counted;
+        }
+        s.noteCount = counted;
+        if (counted >= kMinEvenNotes)
+            s.noteSpreadDb = loudest - quietest;
     }
     if (tailHops >= kMinTailHops && onsets >= 4)
     {

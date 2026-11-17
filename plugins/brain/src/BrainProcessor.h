@@ -13,6 +13,8 @@
 #include "ma/EnergyMap.h"
 #include "ma/GhostNoise.h"
 #include "ma/LoudnessMeter.h"
+#include "ma/Layers.h"
+#include "ma/LowEnd.h"
 #include "ma/MasterCheck.h"
 #include "ma/MasterPreview.h"
 #include "ma/KickTuning.h"
@@ -426,6 +428,7 @@ public:
     // left, analyses and applies once more by itself (at most kRefineRounds times); the user's
     // click, "Analizuj", "Cofnij" or "Przed / po" stop it. One undo takes everything back.
     static constexpr const char* autoRefineId = "autoRefine";
+    static constexpr const char* autoLayersId = "autoLayers";
     static constexpr int kRefineRounds = 2;
     // Kept under the pre-master ceiling when gain comes back (the rest of the song can peak higher
     // than its drop).
@@ -774,6 +777,10 @@ private:
         // How much drop the peak behind that cut was measured over: before gain comes back, a round
         // measures as much (mixcheck: the peaks of one song's drop differed by 8 dB between its halves).
         double peakSeconds = 0.0;
+        // Phase 43: when the rounds end worse than before the click, one family of changes is dropped
+        // and measured again before everything is undone. -1 = none dropped yet.
+        int droppedFamily = -1;
+        bool triedDrop = false;
     };
     Refine refine;
     // "Before and after": what the measurements said at the user's last "Zastosuj", to show what it changed.
@@ -787,6 +794,27 @@ private:
     };
     MixScore scoreNow() const;
     MixScore scoreBefore;
+    ma::LowEndReport lastLowEnd; // phase 41: the low end judged as one thing, for the verdicts
+    std::vector<ma::LayerGroup> lastLayers; // phase 42: parts stacked in the same register
+    bool layersResolved = false;           // the newest analysis found none left
+    bool autoLayersOn() const;
+    // What got worse and what got better since `scoreBefore` (names for the report).
+    void scoreChange(const MixScore& now, juce::StringArray& worse, juce::StringArray& better) const;
+    // Phase 43: which family of changes an item belongs to, and which family a measurement blames.
+    enum class ChangeFamily
+    {
+        none = -1,
+        tonal = 0,  // the solver's tonal and stem bells
+        collisions, // cuts that make room for another channel
+        levels,     // group and channel levels
+        chain       // the channel chain (compressor, clipper, saturation, dynamics)
+    };
+    static ChangeFamily itemFamily(const Proposal::Item& item);
+    ChangeFamily blameFamily(const MixScore& now) const;
+    static juce::String familyName(ChangeFamily family);
+    juce::String droppedFamilyText; // what the Brain dropped on its own, for the report
+    // Set when the refining rounds ended worse on every count that moved and the Brain undid them itself.
+    juce::String autoUndone;
     // Where the highest peak since the reset fell: the song position, whether that was the drop, and the
     // channel peaking highest at that moment.
     double topPeakDb = -INFINITY, topPeakAtSeconds = -1.0;

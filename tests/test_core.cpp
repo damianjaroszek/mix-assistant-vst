@@ -32,6 +32,8 @@
 #include "ma/GainStaging.h"
 #include "ma/LevelStats.h"
 #include "ma/Masking.h"
+#include "ma/Layers.h"
+#include "ma/LowEnd.h"
 #include "ma/MasterCheck.h"
 #include "ma/MixBus.h"
 #include "ma/CorrelationMeter.h"
@@ -3572,7 +3574,7 @@ void testLoudMasterClip()
         measuredChannel(ma::Role::percussion, 4, 0.0, sr), measuredChannel(ma::Role::pad, 6, 0.0, sr),
     };
     mix[0].carriesMasterPeaks = mix[2].carriesMasterPeaks = true;
-    mix[1].carriesMasterPeaks = true; // not percussion: never clipped for it
+    mix[1].carriesMasterPeaks = true; // a tonal part making the peaks: clipped only while it keeps its crest
     for (int b = 0; b < ma::SpectrumAnalyzer::numBandsFor(ma::BandScale::erb); ++b) // a clap, not a hat (hats are never clipped)
         if (ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b) > 5000.0)
             mix[2].bandsDb[static_cast<size_t>(b)] -= 25.0;
@@ -3586,7 +3588,20 @@ void testLoudMasterClip()
                 plans[2].clipDb, plans[2].loudMasterClipDb, plans[1].loudMasterClipDb);
     checkNear(plans[0].loudMasterClipDb, std::min(2.5, ma::kMaxLoudMasterClipDb - base[0].clipDb), 0.01, "the kick takes 2.5 dB more");
     check(plans[0].clipper.on > 0.5f && plans[2].clipper.on > 0.5f && plans[2].loudMasterClipDb > 0.0, "kick and percussion both clipped");
-    check(plans[1].loudMasterClipDb == 0.0 && plans[3].loudMasterClipDb == 0.0, "bass and pad left alone");
+    check(plans[3].loudMasterClipDb == 0.0, "a pad that does not make the peaks is left alone");
+    std::printf("      loud master, bass as carrier: crest %.1f, clip %.1f\n", plans[1].crestDb, plans[1].clipDb);
+    check(plans[1].loudMasterClipDb == 0.0 || plans[1].crestDb - plans[1].clipDb >= ma::kTonalKeepCrestDb - 1e-9,
+          "a tonal part clipped for the loud master keeps its crest");
+    {
+        // A spiky lead that makes the mix's peaks: clipped for the master, down to the crest it keeps.
+        auto withLead = mix;
+        withLead[3] = measuredChannel(ma::Role::lead, 3, 0.0, sr);
+        withLead[3].carriesMasterPeaks = true;
+        withLead[3].truePeakDb += 6.0;
+        const auto led = ma::planChains(withLead, context);
+        std::printf("      loud master, lead as carrier: +%.1f dB (crest %.1f, clip %.1f)\n", led[3].loudMasterClipDb, led[3].crestDb, led[3].clipDb);
+        check(led[3].loudMasterClipDb == 0.0 || led[3].crestDb - led[3].clipDb >= ma::kTonalKeepCrestDb - 1e-9, "the lead keeps its crest too");
+    }
     check(plans[0].clipDb <= ma::kMaxLoudMasterClipDb + 1e-9, "within the cap");
 
     // Applied: the Agents carry it and the limiter now works 2.6 dB. Same plan again.
@@ -4172,7 +4187,272 @@ void testTailMeter()
             meter.process(block.data(), nullptr, 512);
         check(!meter.valid() && meter.seconds() == 0.0, "a steady signal has no tail to measure");
     }
+    {
+        // The shaper turns a 4 s tail into about a bar (1.92 s at 125 BPM), measured by the same meter.
+        const double from = 4.0, to = 1.92;
+        ma::DepthSettings depth;
+        depth.tailRatio = ma::tailRatioFor(from, to);
+        check(depth.tailRatio > 1.5f && depth.tailRatio < ma::kMaxTailRatio && ma::tailRatioFor(1.0, 1.92) == 1.0f, "a ratio for a long tail, none for a short one");
+        ma::TailShaper shaper;
+        shaper.prepare(rate);
+        shaper.setSettings(depth);
+        ma::TailMeter before, after;
+        before.prepare(rate);
+        after.prepare(rate);
+        std::uint32_t seed = 777u;
+        std::vector<float> left(512), right(512);
+        const double perSample = std::pow(10.0, -60.0 / (20.0 * from * rate));
+        double gain = 0.0, steadyIn = 0.0, steadyOut = 0.0;
+        long long n = 0;
+        const long long every = static_cast<long long>(3.84 * rate), total = static_cast<long long>(60.0 * rate);
+        while (n < total)
+        {
+            for (size_t i = 0; i < left.size(); ++i)
+            {
+                if (n % every == 0)
+                    gain = 0.5;
+                seed = seed * 1664525u + 1013904223u;
+                left[i] = right[i] = static_cast<float>(gain * (static_cast<double>(seed >> 8) / 8388608.0 - 1.0));
+                gain *= perSample;
+                ++n;
+            }
+            before.process(left.data(), right.data(), 512);
+            float* io[2] = { left.data(), right.data() };
+            shaper.process(io, 2, 512);
+            after.process(left.data(), right.data(), 512);
+        }
+        std::printf("      tail shaper: ratio %.1f, %.2f s -> %.2f s (wanted %.2f)\n", depth.tailRatio, before.seconds(), after.seconds(), to);
+        check(after.valid() && std::abs(after.seconds() - to) < 0.5, "the shortened tail lands near the target");
+        // A steady signal passes untouched.
+        shaper.reset();
+        for (int block = 0; block < 400; ++block)
+        {
+            for (size_t i = 0; i < left.size(); ++i)
+            {
+                seed = seed * 1664525u + 1013904223u;
+                left[i] = right[i] = static_cast<float>(0.25 * (static_cast<double>(seed >> 8) / 8388608.0 - 1.0));
+                steadyIn += left[i] * left[i];
+            }
+            float* io[2] = { left.data(), right.data() };
+            shaper.process(io, 2, 512);
+            for (size_t i = 0; i < left.size(); ++i)
+                steadyOut += left[i] * left[i];
+        }
+        std::printf("      tail shaper on a steady wash: %.2f dB\n", 10.0 * std::log10(steadyOut / steadyIn));
+        check(10.0 * std::log10(steadyOut / steadyIn) > -0.5, "a steady wash is left alone");
+    }
     check(std::abs(ma::tailBars(1.92, 125.0) - 1.0) < 1e-9 && ma::tailBars(1.0, 0.0) == 0.0, "a tail in bars at the tempo");
+}
+
+void testLayers()
+{
+    const int bands = ma::SpectrumAnalyzer::numBandsFor(ma::BandScale::erb);
+    // A part with its power around `centreHz`, one octave wide, at `levelDb`.
+    const auto part = [&](double centreHz, double levelDb) {
+        ma::SpectrumAnalyzer::Bands db {};
+        db.fill(-120.0);
+        for (int b = 0; b < bands; ++b)
+        {
+            const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+            const double octaves = std::abs(std::log2(hz / centreHz));
+            db[static_cast<size_t>(b)] = levelDb - 24.0 * octaves;
+        }
+        return db;
+    };
+    {
+        // Three leads on the same register: the most important one keeps it, the other two make room.
+        std::vector<ma::LayerChannel> mix(4);
+        for (auto& channel : mix)
+        {
+            channel.valid = true;
+            channel.role = ma::Role::lead;
+        }
+        mix[0].bandsDb = part(900.0, -14.0);
+        mix[0].priority = 2; // the one that matters
+        mix[1].bandsDb = part(950.0, -13.0);
+        mix[1].priority = 4;
+        mix[2].bandsDb = part(880.0, -15.0);
+        mix[2].priority = 4;
+        mix[3].bandsDb = part(5000.0, -14.0); // a different register: not a layer
+        mix[3].priority = 4;
+        mix[3].role = ma::Role::percussion;
+        const auto groups = ma::findLayers(mix);
+        check(groups.size() == 1, "one stack of layers found");
+        const auto& stack = groups.front();
+        std::printf("      layers: %d parts, %.0f-%.0f Hz, overlap %.2f, leader %d, %d cuts\n", static_cast<int>(stack.members.size()),
+                    stack.lowHz, stack.highHz, stack.overlap, stack.members.front(), static_cast<int>(stack.cuts.size()));
+        check(stack.members.size() == 3, "the three leads are in it and the percussion is not");
+        check(stack.members.front() == 0, "the most important lead leads the stack");
+        check(stack.cuts.size() == 2, "the other two get a cut each");
+        for (const auto& cut : stack.cuts)
+        {
+            check(cut.channel != 0, "the leader is never cut");
+            check(cut.gainDb <= -ma::kMinLayerCutDb && cut.gainDb >= -ma::kMaxLayerCutDb, "the cut is between the limits");
+            check(cut.hz > 500.0 && cut.hz < 1600.0, "the bell sits in the shared register");
+            check(cut.q >= 0.5 && cut.q <= 2.0, "and is broad");
+        }
+        // A follower already under the leader needs nothing.
+        mix[1].bandsDb = part(950.0, -22.0);
+        mix[2].bandsDb = part(880.0, -24.0);
+        const auto behind = ma::findLayers(mix);
+        check(behind.empty(), "parts already standing behind the leader are left alone");
+    }
+    {
+        // Parts in different registers are not layers, however loud they are.
+        std::vector<ma::LayerChannel> mix(3);
+        const double centres[3] = { 300.0, 1200.0, 4800.0 };
+        for (size_t c = 0; c < mix.size(); ++c)
+        {
+            mix[c].valid = true;
+            mix[c].role = ma::Role::pad;
+            mix[c].priority = 4;
+            mix[c].bandsDb = part(centres[c], -14.0);
+        }
+        check(ma::findLayers(mix).empty(), "three parts in three registers are not a stack");
+    }
+    {
+        // A hat and a synth share the register but not the job: they live together by rhythm.
+        std::vector<ma::LayerChannel> mix(2);
+        for (auto& channel : mix)
+        {
+            channel.valid = true;
+            channel.bandsDb = part(3500.0, -16.0);
+            channel.priority = 4;
+        }
+        mix[0].role = ma::Role::percussion;
+        mix[1].role = ma::Role::lead;
+        check(ma::findLayers(mix).empty(), "a hat is not a layer of a synth");
+        mix[1].role = ma::Role::clap;
+        check(!ma::findLayers(mix).empty(), "two drum tracks on one register are");
+    }
+    {
+        // The kick and the bass are the low end's business, not the layer rule's.
+        std::vector<ma::LayerChannel> mix(2);
+        for (auto& channel : mix)
+        {
+            channel.valid = true;
+            channel.bandsDb = part(700.0, -14.0);
+            channel.priority = 3;
+        }
+        mix[0].role = ma::Role::kick;
+        mix[1].role = ma::Role::bass;
+        check(ma::findLayers(mix).empty(), "the kick and the bass are never layers");
+    }
+}
+
+void testLowEnd()
+{
+    const int bands = ma::SpectrumAnalyzer::numBandsFor(ma::kTonalScale);
+    const auto lift = [&](ma::Curve curve, double lowHz, double highHz, double db) {
+        for (int b = 0; b < bands; ++b)
+        {
+            const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::kTonalScale, b);
+            if (hz >= lowHz && hz < highHz)
+                curve[static_cast<size_t>(b)] += db;
+        }
+        return curve;
+    };
+    ma::Curve flat {};
+    flat.fill(0.0);
+
+    ma::LowEndInput input;
+    input.tonalValid = true;
+    input.bpm = 125.0;
+    input.mixDb = input.targetDb = flat;
+    {
+        const auto same = ma::analyseLowEnd(input);
+        check(same.valid, "a mix and a target give a low-end report");
+        check(same.parts[static_cast<size_t>(ma::LowPart::subVsBody)].status == ma::LowStatus::good
+                  && same.parts[static_cast<size_t>(ma::LowPart::space)].status == ma::LowStatus::good,
+              "a mix shaped like the references is good on both");
+        check(same.parts[static_cast<size_t>(ma::LowPart::notes)].status == ma::LowStatus::unknown, "no bass measured, no verdict on notes");
+    }
+    {
+        // 6 dB more sub than the references have under the same bass body.
+        input.mixDb = lift(flat, 0.0, ma::kSubTopHz, 6.0);
+        const auto deep = ma::analyseLowEnd(input);
+        const auto& part = deep.parts[static_cast<size_t>(ma::LowPart::subVsBody)];
+        std::printf("      low end: sub minus body %.1f dB, references %.1f dB\n", part.measured, part.target);
+        checkNear(part.delta, 6.0, 0.1, "the sub reads 6 dB over the references");
+        check(part.status == ma::LowStatus::problem, "and counts as a problem");
+    }
+    {
+        input.mixDb = lift(flat, ma::kBassTopHz, ma::kLowMidTopHz, 4.0);
+        const auto full = ma::analyseLowEnd(input);
+        check(full.parts[static_cast<size_t>(ma::LowPart::space)].status == ma::LowStatus::problem, "no room over the bass is a problem");
+        check(full.parts[static_cast<size_t>(ma::LowPart::subVsBody)].status == ma::LowStatus::good, "and does not move the sub verdict");
+        input.mixDb = lift(flat, ma::kBassTopHz, ma::kLowMidTopHz, 1.0);
+        check(ma::analyseLowEnd(input).parts[static_cast<size_t>(ma::LowPart::space)].status == ma::LowStatus::good, "1 dB over is still room");
+    }
+    input.mixDb = flat;
+    {
+        // Two bass channels: the louder one carries the line and is the one judged.
+        ma::LowEndInput::Channel quiet, loud;
+        quiet.bass = loud.bass = true;
+        quiet.levelDb = -30.0;
+        loud.levelDb = -12.0;
+        quiet.notesKnown = loud.notesKnown = true;
+        quiet.noteSpreadDb = 0.5;
+        loud.noteSpreadDb = 7.0;
+        loud.duck.on = 1.0f;
+        loud.duck.releaseMs = 120.0f; // recovers in 264 ms, inside the 480 ms beat
+        input.channels = { quiet, loud };
+        const auto report = ma::analyseLowEnd(input);
+        const auto& notes = report.parts[static_cast<size_t>(ma::LowPart::notes)];
+        check(notes.channel == 1 && notes.status == ma::LowStatus::problem, "the loudest bass is the one judged on its notes");
+        const auto& duck = report.parts[static_cast<size_t>(ma::LowPart::duckReturn)];
+        std::printf("      low end: duck back in %.0f ms, beat %.0f ms\n", duck.measured, duck.extra);
+        check(duck.status == ma::LowStatus::good, "a duck back inside the beat is in the groove");
+        check(report.worst() == ma::LowStatus::problem, "the worst part is the report's verdict");
+
+        input.channels[1].duck.releaseMs = 600.0f; // 1320 ms: the bass never comes back
+        check(ma::analyseLowEnd(input).parts[static_cast<size_t>(ma::LowPart::duckReturn)].status == ma::LowStatus::problem,
+              "a duck over two beats long is a problem");
+        input.channels[1].duck.releaseMs = 40.0f; // 88 ms: shorter than a sixteenth, more click than pump
+        check(ma::analyseLowEnd(input).parts[static_cast<size_t>(ma::LowPart::duckReturn)].status == ma::LowStatus::warning,
+              "a duck back before a sixteenth is only a warning");
+        // The spread is measured on the Agent's input, so an evener already set on the channel comes
+        // off it: the finding clears once it is fixed instead of staying red for ever.
+        input.channels[1].evenerAmount = 0.9;
+        const auto evened = ma::analyseLowEnd(input).parts[static_cast<size_t>(ma::LowPart::notes)];
+        std::printf("      low end: spread %.1f dB, after the evener %.1f dB\n", evened.extra, evened.measured);
+        check(evened.status == ma::LowStatus::good && evened.extra > evened.measured, "an evened line reads even");
+        input.channels[1].evenerAmount = 0.0;
+        input.channels[1].duck.on = 0.0f;
+        check(ma::analyseLowEnd(input).parts[static_cast<size_t>(ma::LowPart::duckReturn)].status == ma::LowStatus::unknown,
+              "no duck, no verdict on the return");
+    }
+    // The spread itself, measured by the Learn pass: two notes at the same digital level are not
+    // the same for the ear, and lifting the lower one by that gap evens them out.
+    {
+        constexpr double sr = 48000.0;
+        const double notes[3] = { 41.0, 55.0, 82.0 };
+        const auto line = [&](double lowLiftDb) {
+            std::vector<float> l(static_cast<size_t>(sr * 18.0));
+            for (size_t i = 0; i < l.size(); ++i)
+            {
+                const int note = static_cast<int>((i / static_cast<size_t>(sr)) % 3);
+                const double hz = notes[note];
+                // The lift follows the ear's gap to the top note, so a perfectly even line is the
+                // one whose lower notes are louder on the meter.
+                const double levelDb = -14.0 + lowLiftDb * (ma::equalLoudnessWeightDb(hz) - ma::equalLoudnessWeightDb(notes[2]));
+                const double amplitude = std::pow(10.0, levelDb / 20.0) * std::sqrt(2.0);
+                l[i] = static_cast<float>(amplitude * std::sin(2.0 * kPi * hz * static_cast<double>(i) / sr));
+            }
+            ma::InstrumentFeatures f;
+            f.prepare(sr);
+            const float* ch[] = { l.data(), l.data() };
+            f.process(ch, 2, static_cast<int>(l.size()));
+            return f.summary();
+        };
+        const auto flatLine = line(0.0);
+        const auto evened = line(1.0);
+        std::printf("      low end: notes at one level spread %.1f dB for the ear (%d notes), evened %.1f dB (%d)\n",
+                    flatLine.noteSpreadDb, flatLine.noteCount, evened.noteSpreadDb, evened.noteCount);
+        check(flatLine.noteCount >= ma::kMinEvenNotes && evened.noteCount >= ma::kMinEvenNotes, "every note of the line is seen");
+        check(flatLine.noteSpreadDb > 3.0, "the same level is not the same loudness down there");
+        check(evened.noteSpreadDb < flatLine.noteSpreadDb - 2.0, "lifting the low notes by the ear's gap evens the line out");
+    }
 }
 
 void testMasterCheck()
@@ -4331,6 +4611,8 @@ int main()
     testLoudMasterClip();
     testReviewFixes();
     testTailMeter();
+    testLayers();
+    testLowEnd();
     testMasterCheck();
     testSectionAutomation();
     testEnergyMap();

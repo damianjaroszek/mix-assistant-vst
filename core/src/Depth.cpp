@@ -401,6 +401,74 @@ double TailMeter::seconds() const
     return 0.0;
 }
 
+bool tailOn(const DepthSettings& depth)
+{
+    return depth.tailRatio > 1.05f;
+}
+
+void TailShaper::prepare(double sampleRate)
+{
+    levelCoefficient = std::exp(-1.0 / (0.03 * sampleRate));
+    openCoefficient = std::exp(-1.0 / (0.005 * sampleRate));
+    closeCoefficient = std::exp(-1.0 / (0.02 * sampleRate));
+    fallPerStep = kTailPeakFallDb * 16.0 / sampleRate;
+    reset();
+}
+
+void TailShaper::reset()
+{
+    power = 0.0;
+    peakDb = -200.0;
+    gain = targetGain = 1.0;
+    untilStep = 0;
+}
+
+void TailShaper::process(float* const* channels, int numChannels, int numSamples)
+{
+    if (numChannels <= 0)
+        return;
+    if (ratio <= 1.0f && gain > 0.9999)
+    {
+        // Off: keep the followers fresh so switching on does not start from silence.
+        gain = targetGain = 1.0;
+        peakDb = -200.0;
+        return;
+    }
+    float* left = channels[0];
+    float* right = numChannels >= 2 ? channels[1] : nullptr;
+    for (int i = 0; i < numSamples; ++i)
+    {
+        const double l = left[i], r = right != nullptr ? right[i] : l;
+        power = levelCoefficient * power + (1.0 - levelCoefficient) * 0.5 * (l * l + r * r);
+        if (--untilStep <= 0)
+        {
+            untilStep = 16;
+            const double levelDb = 10.0 * std::log10(std::max(power, 1e-12));
+            peakDb = std::max(peakDb - fallPerStep, levelDb);
+            const double under = std::max(0.0, peakDb - levelDb - 3.0);
+            const double cutDb = ratio > 1.0f && levelDb > -100.0 ? std::min(kMaxTailCutDb, (ratio - 1.0) * under) : 0.0;
+            targetGain = std::pow(10.0, -cutDb / 20.0);
+        }
+        const double coefficient = targetGain > gain ? openCoefficient : closeCoefficient;
+        gain = coefficient * gain + (1.0 - coefficient) * targetGain;
+        left[i] = static_cast<float>(l * gain);
+        if (right != nullptr)
+            right[i] = static_cast<float>(r * gain);
+    }
+}
+
+float tailRatioFor(double measuredSeconds, double targetSeconds)
+{
+    if (measuredSeconds <= 0.0 || targetSeconds <= 0.0 || measuredSeconds <= targetSeconds)
+        return 1.0f;
+    // dB a second: the tail as it is, as wanted, and what the peak follower itself gives back.
+    const double now = 60.0 / measuredSeconds, wanted = 60.0 / targetSeconds;
+    if (now <= kTailPeakFallDb + 0.5)
+        return kMaxTailRatio;
+    const double ratio = 1.0 + (wanted - now) / (now - kTailPeakFallDb);
+    return static_cast<float>(std::clamp(std::round(ratio * 10.0) / 10.0, 1.0, static_cast<double>(kMaxTailRatio)));
+}
+
 double tailBars(double tailSeconds, double bpm)
 {
     return bpm > 20.0 && tailSeconds > 0.0 ? tailSeconds / (240.0 / bpm) : 0.0;

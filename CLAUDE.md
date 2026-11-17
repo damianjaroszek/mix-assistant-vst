@@ -352,7 +352,44 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   `ma::TailMeter` (Depth.h; 15 ms level every 10 ms, each fall >= 7 dB timed from its first 3 dB down, median as time to fall 60 dB,
   >= 4 falls) runs on every Agent's input, `AgentData::tailSeconds` (`bus::kVersion` 25); the "Głębia" item lists each send's tail in
   seconds and bars and goes amber over `kLongTailBars` 1. Tested on synthetic decays only (the test songs have no reverb returns).
-- Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
+- Report items fixed automatically (bus v26): `ma::TailShaper` (Depth.h, after the high cut; a downward expander on the 30 ms level
+  against a peak follower forgetting 3 dB/s, 3 dB knee, <= 36 dB, one gain for both channels) with `DepthSettings::tailRatio`
+  (<= 1 off, Agent param `tailShorten`, packed dynamics 102 with the ratio last, 101 = before). `proposeWholeMix`: a send whose measured
+  tail (the Agent's input, so idempotent) is over 1.1 bars gets `tailRatioFor(tail, bar)`; a Brain-made ratio goes off when the tail fits;
+  high cut and tail share the depth item (what the plan leaves alone stays as the Agent has it). Loud master: besides drums within 6 dB,
+  any non-vocal part within 1 dB of the highest unclipped peak is a carrier; tonal carriers keep `kTonalKeepCrestDb` 8. After the
+  refining rounds, `scoreChange` worse on something and better on nothing makes the Brain undo its own apply (`autoUndone`, shown in the
+  "Przed i po" item and the refine status).
+- Phase 41 the low end as one thing (`ma/LowEnd.h`, bus v27): `analyseLowEnd` judges four parts together against the active
+  target's corridor centre (so the owner's 13 club masters): `subVsBody` (0-60 Hz minus 60-150 Hz of the mix, minus the same of the
+  target; warn 2, problem 4 dB), `notes` (the loudest bass channel's `noteSpreadDb`), `duckReturn` (`duckRecoveryMs` = 2.2 x the
+  duck's release against the beat: good inside a beat and not under a sixteenth) and `space` (150-400 Hz vs the target, warn 1.5,
+  problem 3). `InstrumentFeatures` measures the spread: the mid power per detected note (1 Hz bins) over the Learn pass, each note's
+  mean level minus `equalLoudnessWeightDb`, spread between the loudest and the quietest note played >= `kEvenNoteShare` 10% of the
+  note hops, >= `kMinEvenNotes` 3 notes (`Summary::noteSpreadDb` / `noteCount`, `AgentData`, the stats line gains two numbers at its
+  end). It is measured on the Agent's input, so the report takes off what the evener already does (`LowEndInput::Channel::evenerAmount`,
+  spread x (1 - amount)) and the finding clears once fixed. `planChains` sizes the evener from it (under 3 dB it stays off, else
+  0.3 + 0.1 x spread, <= 0.9) and a Brain-made evener on an even bass goes off; the tool note says so. Report item
+  "Dół miksu (sub, bas, pompa)" (mix group, advice per part). On the test songs: Galias sub +3.7 dB over the body against the
+  masters and 150-400 Hz crowded by 2.9 dB, Chardonnay's sub 3.8 dB short.
+- Phase 42 layers in one register (`ma/Layers.h`): `findLayers` compares the channels' shape (power share per ERB band) over
+  `kLayerLowHz` 150 to `kLayerHighHz` 6000, pairs them where the shapes have `kLayerOverlap` 0.5 in common and `layerClass` matches
+  (percussion with percussion, tonal with tonal; `layerRole` leaves out kick, bass, bus and send), takes the connected set, picks the
+  leader (priority, then level) and keeps only the members overlapping the leader itself. The shared register is the run of bands
+  around the peak of the members' minimum share (>= 25% of it); each follower not already `kLayerAheadDb` 3 dB behind the leader there
+  gets one broad bell (centre = geometric mean, Q = centre / width in 0.5-2, <= `kMaxLayerCutDb` 6, >= 1 dB). Everything is measured
+  pre-EQ (`Channel::bandsDb`), so a second analysis re-derives the same bell and `eqHasBand` marks it `inPlace`. The Brain adds the
+  bells to `currentProposal.eq` on a free slot as ordinary `eqCut` items (skipped where the proposal already cuts within half an
+  octave), or, with the `autoLayers` parameter off ("Warstwy sam" beside "Dopracuj sam") or no free slot, as advisory items carrying
+  the numbers. Report item "Warstwy w tym samym paśmie" keeps the last stack found and turns green once an analysis finds none left
+  (`layersResolved`). mixcheck: Chardonnay 5.7 -> 5.4 against its master (collisions unchanged), Galias has no stack.
+- Phase 43 one family dropped instead of everything: when the refine rounds end with the measurements worse on something and
+  better on nothing, `blameFamily` names the family that moves the axis that got worse (tonal corridor / centre -> the solver's
+  tonal and stem bells, collisions -> `eqCut`, PLR -> the chain) and `itemFamily` maps every item to one (the ceiling cut and
+  advisory items belong to none). The Brain then unticks that family (`Refine::droppedFamily`, re-applied each round the way
+  `Refine::unticked` is, so an earlier round's bands come off too), spends one more round and only undoes everything
+  (`undoLast`) if it is still worse (`Refine::triedDrop`). `droppedFamilyText` says so on the "Przed i po" report item.
+- - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 
 ## Commands

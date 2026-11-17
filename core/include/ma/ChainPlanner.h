@@ -34,6 +34,8 @@ struct ChainChannel
     double levelP10 = -200.0, levelP50 = -200.0, levelP95 = -200.0; // 100 ms RMS while playing
     double truePeakDb = -200.0;
     double lowNoteHz = 0.0;
+    double noteSpreadDb = 0.0; // the bass line's notes for the ear, 0 = not measured
+    bool notesKnown = false;
     bool intentionalDrive = false; // meant to distort: no clipper, no "over-compressed" verdict
     Resonances resonances {};      // from the Learn pass
     // A bus: what the Learn pass recognised on it, i.e. what its sources are (drums, vocals...).
@@ -58,6 +60,7 @@ struct ChainChannel
 constexpr double kLoudMasterLimitDb = 3.0;   // above this the limiter costs the hits their punch
 constexpr double kLoudMasterAimDb = 2.5;
 constexpr double kMaxLoudMasterClipDb = 6.0; // a clipper on a kick or percussion, in all
+constexpr double kTonalKeepCrestDb = 8.0;    // a tonal part clipped for the loud master keeps this much crest
 
 // Peak budget against the kick. In a club mix the kick sets the peak of the sum; a part whose peaks stand over
 // the kick's (a sparse spiky track, a bass with a hard attack) costs the master its loudness and gives nothing
