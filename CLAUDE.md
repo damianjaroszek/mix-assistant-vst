@@ -360,6 +360,18 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   any non-vocal part within 1 dB of the highest unclipped peak is a carrier; tonal carriers keep `kTonalKeepCrestDb` 8. After the
   refining rounds, `scoreChange` worse on something and better on nothing makes the Brain undo its own apply (`autoUndone`, shown in the
   "Przed i po" item and the refine status).
+- Phase 41 the low end as one thing (`ma/LowEnd.h`, bus v27): `analyseLowEnd` judges four parts together against the active
+  target's corridor centre (so the owner's 13 club masters): `subVsBody` (0-60 Hz minus 60-150 Hz of the mix, minus the same of the
+  target; warn 2, problem 4 dB), `notes` (the loudest bass channel's `noteSpreadDb`), `duckReturn` (`duckRecoveryMs` = 2.2 x the
+  duck's release against the beat: good inside a beat and not under a sixteenth) and `space` (150-400 Hz vs the target, warn 1.5,
+  problem 3). `InstrumentFeatures` measures the spread: the mid power per detected note (1 Hz bins) over the Learn pass, each note's
+  mean level minus `equalLoudnessWeightDb`, spread between the loudest and the quietest note played >= `kEvenNoteShare` 10% of the
+  note hops, >= `kMinEvenNotes` 3 notes (`Summary::noteSpreadDb` / `noteCount`, `AgentData`, the stats line gains two numbers at its
+  end). It is measured on the Agent's input, so the report takes off what the evener already does (`LowEndInput::Channel::evenerAmount`,
+  spread x (1 - amount)) and the finding clears once fixed. `planChains` sizes the evener from it (under 3 dB it stays off, else
+  0.3 + 0.1 x spread, <= 0.9) and a Brain-made evener on an even bass goes off; the tool note says so. Report item
+  "Dół miksu (sub, bas, pompa)" (mix group, advice per part). On the test songs: Galias sub +3.7 dB over the body against the
+  masters and 150-400 Hz crowded by 2.9 dB, Chardonnay's sub 3.8 dB short.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

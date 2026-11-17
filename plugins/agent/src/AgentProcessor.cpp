@@ -1200,6 +1200,8 @@ void AgentProcessor::publishToBrain()
     data.levelP50 = toShared(result.levelP50 + inputShiftDb);
     data.levelP95 = toShared(result.levelP95 + inputShiftDb);
     data.lowNoteHz = static_cast<float>(result.lowNoteHz);
+    data.noteSpreadDb = static_cast<float>(result.noteSpreadDb);
+    data.noteCount = result.noteCount;
     data.tailPitchHz = static_cast<float>(result.tailPitchHz);
     data.compressorReductionDb = static_cast<float>(compShownDb);
     data.clipperDb = static_cast<float>(clipShownDb);
@@ -1794,6 +1796,8 @@ void AgentProcessor::recogniseRole()
         result.levelP50 = summary.levelP50;
         result.levelP95 = summary.levelP95;
         result.lowNoteHz = summary.lowNoteHz;
+        result.noteSpreadDb = summary.noteSpreadDb;
+        result.noteCount = summary.noteCount;
         result.tailPitchHz = summary.tailPitchHz;
     }
     result.probesValid = summary.probesValid;
@@ -1865,7 +1869,9 @@ void AgentProcessor::getStateInformation(juce::MemoryBlock& destData)
         state.setProperty(statsProperty, juce::String(result.levelP10, 2) + " " + juce::String(result.levelP50, 2) + " "
                                              + juce::String(result.levelP95, 2) + " " + juce::String(result.lowNoteHz, 1) + " "
                                              + juce::String(result.tailPitchHz, 2) + " " + juce::String(inputShiftDb, 2)
-                                             + probeText(result), nullptr);
+                                             + probeText(result) + " " + juce::String(result.noteSpreadDb, 2) + " "
+                                             + juce::String(result.noteCount),
+                                         nullptr);
     else
         state.removeProperty(statsProperty, nullptr);
     // Phase 23: the learned level and true peak as well; without them the Brain read a peak of -200 dB
@@ -1930,7 +1936,9 @@ void AgentProcessor::setStateInformation(const void* data, int sizeInBytes)
         profileValid.store(true);
     }
     const auto stats = juce::StringArray::fromTokens(state.getProperty(statsProperty).toString(), " ", {});
-    if ((stats.size() >= 4 && stats.size() <= 6) || stats.size() == 6 + 1 + 2 * ma::kDynamicBands) // the tail pitch since phase 14, a bus's input shift since 15, the probes since 32
+    constexpr int kStatsWithProbes = 6 + 1 + 2 * ma::kDynamicBands; // the probes since phase 32
+    if ((stats.size() >= 4 && stats.size() <= 6) || stats.size() == kStatsWithProbes
+        || stats.size() == kStatsWithProbes + 2) // the tail pitch since phase 14, a bus's input shift since 15, the note spread last
     {
         result.statsValid = true;
         result.levelP10 = stats[0].getDoubleValue();
@@ -1940,6 +1948,11 @@ void AgentProcessor::setStateInformation(const void* data, int sizeInBytes)
         result.tailPitchHz = stats.size() > 4 ? stats[4].getDoubleValue() : 0.0;
         inputShiftDb = stats.size() > 5 ? stats[5].getDoubleValue() : 0.0;
         result.probesValid = stats.size() > 6 && stats[6] == "1";
+        if (stats.size() == kStatsWithProbes + 2)
+        {
+            result.noteSpreadDb = stats[kStatsWithProbes].getDoubleValue();
+            result.noteCount = stats[kStatsWithProbes + 1].getIntValue();
+        }
         for (int p = 0; p < ma::kDynamicBands && stats.size() > 6; ++p)
         {
             result.probeP50[static_cast<size_t>(p)] = stats[7 + 2 * p].getDoubleValue();

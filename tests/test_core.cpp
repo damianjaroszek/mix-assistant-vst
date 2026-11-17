@@ -32,6 +32,7 @@
 #include "ma/GainStaging.h"
 #include "ma/LevelStats.h"
 #include "ma/Masking.h"
+#include "ma/LowEnd.h"
 #include "ma/MasterCheck.h"
 #include "ma/MixBus.h"
 #include "ma/CorrelationMeter.h"
@@ -4242,6 +4243,121 @@ void testTailMeter()
     check(std::abs(ma::tailBars(1.92, 125.0) - 1.0) < 1e-9 && ma::tailBars(1.0, 0.0) == 0.0, "a tail in bars at the tempo");
 }
 
+void testLowEnd()
+{
+    const int bands = ma::SpectrumAnalyzer::numBandsFor(ma::kTonalScale);
+    const auto lift = [&](ma::Curve curve, double lowHz, double highHz, double db) {
+        for (int b = 0; b < bands; ++b)
+        {
+            const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::kTonalScale, b);
+            if (hz >= lowHz && hz < highHz)
+                curve[static_cast<size_t>(b)] += db;
+        }
+        return curve;
+    };
+    ma::Curve flat {};
+    flat.fill(0.0);
+
+    ma::LowEndInput input;
+    input.tonalValid = true;
+    input.bpm = 125.0;
+    input.mixDb = input.targetDb = flat;
+    {
+        const auto same = ma::analyseLowEnd(input);
+        check(same.valid, "a mix and a target give a low-end report");
+        check(same.parts[static_cast<size_t>(ma::LowPart::subVsBody)].status == ma::LowStatus::good
+                  && same.parts[static_cast<size_t>(ma::LowPart::space)].status == ma::LowStatus::good,
+              "a mix shaped like the references is good on both");
+        check(same.parts[static_cast<size_t>(ma::LowPart::notes)].status == ma::LowStatus::unknown, "no bass measured, no verdict on notes");
+    }
+    {
+        // 6 dB more sub than the references have under the same bass body.
+        input.mixDb = lift(flat, 0.0, ma::kSubTopHz, 6.0);
+        const auto deep = ma::analyseLowEnd(input);
+        const auto& part = deep.parts[static_cast<size_t>(ma::LowPart::subVsBody)];
+        std::printf("      low end: sub minus body %.1f dB, references %.1f dB\n", part.measured, part.target);
+        checkNear(part.delta, 6.0, 0.1, "the sub reads 6 dB over the references");
+        check(part.status == ma::LowStatus::problem, "and counts as a problem");
+    }
+    {
+        input.mixDb = lift(flat, ma::kBassTopHz, ma::kLowMidTopHz, 4.0);
+        const auto full = ma::analyseLowEnd(input);
+        check(full.parts[static_cast<size_t>(ma::LowPart::space)].status == ma::LowStatus::problem, "no room over the bass is a problem");
+        check(full.parts[static_cast<size_t>(ma::LowPart::subVsBody)].status == ma::LowStatus::good, "and does not move the sub verdict");
+        input.mixDb = lift(flat, ma::kBassTopHz, ma::kLowMidTopHz, 1.0);
+        check(ma::analyseLowEnd(input).parts[static_cast<size_t>(ma::LowPart::space)].status == ma::LowStatus::good, "1 dB over is still room");
+    }
+    input.mixDb = flat;
+    {
+        // Two bass channels: the louder one carries the line and is the one judged.
+        ma::LowEndInput::Channel quiet, loud;
+        quiet.bass = loud.bass = true;
+        quiet.levelDb = -30.0;
+        loud.levelDb = -12.0;
+        quiet.notesKnown = loud.notesKnown = true;
+        quiet.noteSpreadDb = 0.5;
+        loud.noteSpreadDb = 7.0;
+        loud.duck.on = 1.0f;
+        loud.duck.releaseMs = 120.0f; // recovers in 264 ms, inside the 480 ms beat
+        input.channels = { quiet, loud };
+        const auto report = ma::analyseLowEnd(input);
+        const auto& notes = report.parts[static_cast<size_t>(ma::LowPart::notes)];
+        check(notes.channel == 1 && notes.status == ma::LowStatus::problem, "the loudest bass is the one judged on its notes");
+        const auto& duck = report.parts[static_cast<size_t>(ma::LowPart::duckReturn)];
+        std::printf("      low end: duck back in %.0f ms, beat %.0f ms\n", duck.measured, duck.extra);
+        check(duck.status == ma::LowStatus::good, "a duck back inside the beat is in the groove");
+        check(report.worst() == ma::LowStatus::problem, "the worst part is the report's verdict");
+
+        input.channels[1].duck.releaseMs = 600.0f; // 1320 ms: the bass never comes back
+        check(ma::analyseLowEnd(input).parts[static_cast<size_t>(ma::LowPart::duckReturn)].status == ma::LowStatus::problem,
+              "a duck over two beats long is a problem");
+        input.channels[1].duck.releaseMs = 40.0f; // 88 ms: shorter than a sixteenth, more click than pump
+        check(ma::analyseLowEnd(input).parts[static_cast<size_t>(ma::LowPart::duckReturn)].status == ma::LowStatus::warning,
+              "a duck back before a sixteenth is only a warning");
+        // The spread is measured on the Agent's input, so an evener already set on the channel comes
+        // off it: the finding clears once it is fixed instead of staying red for ever.
+        input.channels[1].evenerAmount = 0.9;
+        const auto evened = ma::analyseLowEnd(input).parts[static_cast<size_t>(ma::LowPart::notes)];
+        std::printf("      low end: spread %.1f dB, after the evener %.1f dB\n", evened.extra, evened.measured);
+        check(evened.status == ma::LowStatus::good && evened.extra > evened.measured, "an evened line reads even");
+        input.channels[1].evenerAmount = 0.0;
+        input.channels[1].duck.on = 0.0f;
+        check(ma::analyseLowEnd(input).parts[static_cast<size_t>(ma::LowPart::duckReturn)].status == ma::LowStatus::unknown,
+              "no duck, no verdict on the return");
+    }
+    // The spread itself, measured by the Learn pass: two notes at the same digital level are not
+    // the same for the ear, and lifting the lower one by that gap evens them out.
+    {
+        constexpr double sr = 48000.0;
+        const double notes[3] = { 41.0, 55.0, 82.0 };
+        const auto line = [&](double lowLiftDb) {
+            std::vector<float> l(static_cast<size_t>(sr * 18.0));
+            for (size_t i = 0; i < l.size(); ++i)
+            {
+                const int note = static_cast<int>((i / static_cast<size_t>(sr)) % 3);
+                const double hz = notes[note];
+                // The lift follows the ear's gap to the top note, so a perfectly even line is the
+                // one whose lower notes are louder on the meter.
+                const double levelDb = -14.0 + lowLiftDb * (ma::equalLoudnessWeightDb(hz) - ma::equalLoudnessWeightDb(notes[2]));
+                const double amplitude = std::pow(10.0, levelDb / 20.0) * std::sqrt(2.0);
+                l[i] = static_cast<float>(amplitude * std::sin(2.0 * kPi * hz * static_cast<double>(i) / sr));
+            }
+            ma::InstrumentFeatures f;
+            f.prepare(sr);
+            const float* ch[] = { l.data(), l.data() };
+            f.process(ch, 2, static_cast<int>(l.size()));
+            return f.summary();
+        };
+        const auto flatLine = line(0.0);
+        const auto evened = line(1.0);
+        std::printf("      low end: notes at one level spread %.1f dB for the ear (%d notes), evened %.1f dB (%d)\n",
+                    flatLine.noteSpreadDb, flatLine.noteCount, evened.noteSpreadDb, evened.noteCount);
+        check(flatLine.noteCount >= ma::kMinEvenNotes && evened.noteCount >= ma::kMinEvenNotes, "every note of the line is seen");
+        check(flatLine.noteSpreadDb > 3.0, "the same level is not the same loudness down there");
+        check(evened.noteSpreadDb < flatLine.noteSpreadDb - 2.0, "lifting the low notes by the ear's gap evens the line out");
+    }
+}
+
 void testMasterCheck()
 {
     const int bands = ma::SpectrumAnalyzer::numBandsFor(ma::BandScale::erb);
@@ -4398,6 +4514,7 @@ int main()
     testLoudMasterClip();
     testReviewFixes();
     testTailMeter();
+    testLowEnd();
     testMasterCheck();
     testSectionAutomation();
     testEnergyMap();

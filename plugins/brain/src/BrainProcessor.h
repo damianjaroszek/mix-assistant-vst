@@ -13,6 +13,7 @@
 #include "ma/EnergyMap.h"
 #include "ma/GhostNoise.h"
 #include "ma/LoudnessMeter.h"
+#include "ma/LowEnd.h"
 #include "ma/MasterCheck.h"
 #include "ma/MasterPreview.h"
 #include "ma/KickTuning.h"
@@ -787,6 +788,7 @@ private:
     };
     MixScore scoreNow() const;
     MixScore scoreBefore;
+    ma::LowEndReport lastLowEnd; // phase 41: the low end judged as one thing, for the verdicts
     // What got worse and what got better since `scoreBefore` (names for the report).
     void scoreChange(const MixScore& now, juce::StringArray& worse, juce::StringArray& better) const;
     // Set when the refining rounds ended worse on every count that moved and the Brain undid them itself.

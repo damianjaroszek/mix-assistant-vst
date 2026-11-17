@@ -34,6 +34,8 @@ struct ChainChannel
     double levelP10 = -200.0, levelP50 = -200.0, levelP95 = -200.0; // 100 ms RMS while playing
     double truePeakDb = -200.0;
     double lowNoteHz = 0.0;
+    double noteSpreadDb = 0.0; // the bass line's notes for the ear, 0 = not measured
+    bool notesKnown = false;
     bool intentionalDrive = false; // meant to distort: no clipper, no "over-compressed" verdict
     Resonances resonances {};      // from the Learn pass
     // A bus: what the Learn pass recognised on it, i.e. what its sources are (drums, vocals...).

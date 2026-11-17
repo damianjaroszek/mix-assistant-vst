@@ -29,6 +29,9 @@ constexpr int kRoles = 11;
 // A drum hit other than the kick: hats, shakers, toms (percussion) and the backbeat.
 constexpr bool isPercussion(Role role) { return role == Role::percussion || role == Role::clap; }
 
+constexpr int kMinEvenNotes = 3;      // fewer notes than this say nothing about evenness
+constexpr double kEvenNoteShare = 0.1; // a note counts once it is played this share of the note hops
+
 // What the role recogniser listens for besides the spectrum: how the level moves in time.
 // Fed while the Agent learns a passage; cheap, allocation free after prepare().
 class InstrumentFeatures
@@ -52,6 +55,11 @@ public:
         // Dynamics for the mix engineer: 100 ms RMS levels while playing (dBFS, as fed in).
         double levelP10 = -200.0, levelP50 = -200.0, levelP95 = -200.0;
         double lowNoteHz = 0.0;      // the bass line's usual note (median), 0 = no clear low notes
+        // How even the bass line's notes are for the ear: the spread (dB) between the loudest and the
+        // quietest note it plays often, each note's mean level weighted by the equal-loudness contour.
+        // 0 with fewer than `kMinEvenNotes` notes played often enough.
+        double noteSpreadDb = 0.0;
+        int noteCount = 0;
         // Phase 14: the pitch a hit's low tail settles on (150-300 ms after onsets, 30-130 Hz,
         // median in 10-cent steps): a kick's tuning. 0 = no hits with a pitched tail.
         double tailPitchHz = 0.0;
@@ -88,6 +96,7 @@ private:
     LowPitchTracker pitchTracker;
     std::array<long long, 161> noteHistogram {}; // hops per detected note, 1 Hz steps
     long long noteHops = 0;
+    std::array<double, 161> notePowerSum {};     // and the mid power summed per note
     std::array<long long, 253> tailHistogram {}; // hops per tail pitch, 10 cents from 30 Hz (to ~130 Hz)
     long long tailHops = 0;
     // Phase 32: probe ranges for the dynamic EQ.

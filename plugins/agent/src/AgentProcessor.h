@@ -93,6 +93,8 @@ public:
         // Dynamics of the passage for the Brain's engineer pass (pre-trim).
         bool statsValid = false;
         double levelP10 = -200.0, levelP50 = -200.0, levelP95 = -200.0, lowNoteHz = 0.0, tailPitchHz = 0.0;
+        double noteSpreadDb = 0.0; // phase 41: how uneven the bass line is for the ear
+        int noteCount = 0;
         ma::Resonances resonances {}; // narrow peaks that stood out through the passage
         // Phase 32: the probe ranges against the whole part (ma::DynamicProbe order, dB).
         bool probesValid = false;

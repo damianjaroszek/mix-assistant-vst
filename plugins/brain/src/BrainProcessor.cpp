@@ -2790,6 +2790,110 @@ void BrainProcessor::buildReport()
             report.push_back(item);
     }
 
+    // Phase 41: the low end as one thing. Four parts have to work together for a club low end, and
+    // until now each was judged on its own: the sub under the bass body, how even the line's notes are
+    // for the ear, how the bass comes back from the kick's duck, and the room over the bass.
+    {
+        ma::LowEndInput in;
+        in.bpm = tempoBpm();
+        in.tonalValid = mix.tonal.valid && activeTarget().valid();
+        if (in.tonalValid)
+        {
+            in.mixDb = mix.tonal.mixDb;
+            in.targetDb = activeTarget().centre;
+        }
+        std::vector<const MixSnapshot::Channel*> rows;
+        for (const auto& channel : mix.channels)
+        {
+            ma::LowEndInput::Channel row;
+            row.bass = channel.data.role == static_cast<int>(ma::Role::bass);
+            row.notesKnown = channel.data.statsValid != 0 && channel.data.noteCount >= ma::kMinEvenNotes;
+            row.noteSpreadDb = channel.data.noteSpreadDb;
+            row.evenerAmount = channel.data.evener.on > 0.5f ? channel.data.evener.amount : 0.0;
+            row.duck = channel.data.duck;
+            row.duckKeyed = channel.data.duckKeyFound != 0;
+            row.levelDb = channel.data.statsValid != 0 ? channel.data.levelP50 + channel.data.trimDb : channel.data.inputRmsDb;
+            in.channels.push_back(row);
+            rows.push_back(&channel);
+        }
+        const auto low = ma::analyseLowEnd(in);
+        lastLowEnd = low;
+        if (low.valid)
+        {
+            using Part = ma::LowPart;
+            using Low = ma::LowStatus;
+            const auto statusOf = [](Low status) {
+                return status == Low::problem ? Status::problem : status == Low::warning ? Status::warning : Status::good;
+            };
+            const auto named = [&](const ma::LowFinding& finding) {
+                return finding.channel >= 0 && finding.channel < static_cast<int>(rows.size())
+                           ? quoted(rows[static_cast<size_t>(finding.channel)]->name)
+                           : juce::String();
+            };
+            MixSnapshot::ReportItem item;
+            item.title = pl("Dół miksu (sub, bas, pompa)");
+            juce::StringArray lines;
+            Status worst = Status::good;
+            const auto add = [&](const ma::LowFinding& finding, const juce::String& text) {
+                if (finding.status == Low::unknown)
+                    return;
+                lines.add(text);
+                if (static_cast<int>(statusOf(finding.status)) > static_cast<int>(worst))
+                    worst = statusOf(finding.status);
+            };
+
+            const auto& sub = low.parts[static_cast<size_t>(Part::subVsBody)];
+            add(sub, pl("Sub pod basem: ") + juce::String(sub.measured, 1) + pl(" dB względem korpusu basu (60–150 Hz), wzorce klubowe mają ")
+                         + juce::String(sub.target, 1) + " dB"
+                         + (sub.status == Low::good
+                                ? pl(", czyli tak jak trzeba.")
+                                : (sub.delta > 0.0 ? pl(". Sub jest o ") + juce::String(sub.delta, 1)
+                                                         + pl(" dB za mocny względem korpusu: dół dudni zamiast nieść. Ścisz warstwę suba albo "
+                                                              "podnieś 60–150 Hz na basie.")
+                                                   : pl(". Sub jest o ") + juce::String(-sub.delta, 1)
+                                                         + pl(" dB za słaby: na klubowym systemie zabraknie fundamentu. Zejdź niżej filtrem na "
+                                                              "basie albo dołóż warstwę suba."))));
+
+            const auto& notes = low.parts[static_cast<size_t>(Part::notes)];
+            const bool evened = notes.extra > notes.measured + 0.2;
+            add(notes, pl("Równość nut: ") + named(notes) + pl(" gra nuty, które dla ucha różnią się o ")
+                           + juce::String(notes.extra, 1) + " dB"
+                           + (evened ? pl(", a wyrównywacz w Agencie zdejmuje z tego tyle, że zostaje ok. ")
+                                           + juce::String(notes.measured, 1) + " dB"
+                                     : juce::String())
+                           + (notes.status == Low::good
+                                  ? pl(", czyli linia gra równo.")
+                                  : pl(". Niższe nuty giną, wyższe wyskakują, i to słychać jako zamulenie. „Analizuj” (cały łańcuch) ustawi "
+                                       "wyrównywacz nut w Agencie tak, żeby każda nuta ważyła tyle samo.")));
+
+            const auto& duck = low.parts[static_cast<size_t>(Part::duckReturn)];
+            const double eighth = in.bpm > 20.0 ? 60000.0 / in.bpm / 2.0 : 0.0;
+            add(duck, pl("Powrót po stopie: ") + named(duck) + pl(" wraca po ") + juce::String(juce::roundToInt(duck.measured))
+                          + pl(" ms, uderzenie trwa ") + juce::String(juce::roundToInt(duck.extra)) + pl(" ms")
+                          + (duck.status == Low::good
+                                 ? pl(", czyli bas wraca w rytmie.")
+                                 : (duck.delta > 0.0 ? pl(". Bas wraca dopiero po następnym uderzeniu i traci energię: skróć Release ducka do ok. ")
+                                                           + juce::String(juce::roundToInt(eighth / 2.2)) + pl(" ms (ósemka).")
+                                                     : pl(". Dziura jest tak krótka, że słychać kliknięcie zamiast pompy: wydłuż Release ducka do ok. ")
+                                                           + juce::String(juce::roundToInt(eighth / 2.2)) + pl(" ms (ósemka)."))));
+
+            const auto& space = low.parts[static_cast<size_t>(Part::space)];
+            add(space, pl("Miejsce nad basem (150–400 Hz): ") + juce::String(space.delta, 1) + pl(" dB względem wzorców")
+                           + (space.status == Low::good
+                                  ? pl(", bas ma gdzie stanąć.")
+                                  : (space.delta > 0.0 ? pl(". To pasmo jest zatłoczone i zjada separację basu: w propozycji szukaj cięć w 150–400 Hz "
+                                                            "na kanałach, które tego pasma nie potrzebują (pady, tła, pętle).")
+                                                       : pl(". Tu jest pusto, więc miks może brzmieć cienko między basem a średnicą."))));
+
+            if (!lines.isEmpty())
+            {
+                item.status = worst;
+                item.detail = lines.joinIntoString(" ");
+                report.push_back(item);
+            }
+        }
+    }
+
     // Phase 38: nothing lost anywhere in the song. From the song's seconds, as the mix hears them now
     // (each second's raw + trim power plus the channel's present EQ and cleanup), worked out every 2 s.
     {
@@ -4251,6 +4355,8 @@ void BrainProcessor::proposeWholeMix()
         in.levelP95 = channel.data.levelP95 + channel.data.trimDb;
         in.truePeakDb = channel.data.learnedTruePeakDb + channel.data.trimDb;
         in.lowNoteHz = channel.data.lowNoteHz;
+        in.noteSpreadDb = channel.data.noteSpreadDb;
+        in.notesKnown = channel.data.statsValid != 0 && channel.data.noteCount >= ma::kMinEvenNotes;
         in.currentCleanup = channel.data.cleanup;
         in.intentionalDrive = channel.data.intentionalDrive != 0;
         in.contentRole = static_cast<ma::Role>(juce::jlimit(0, ma::kRoles - 1, static_cast<int>(channel.data.detectedRole)));
@@ -4523,7 +4629,11 @@ void BrainProcessor::proposeWholeMix()
             item.evener = plan.evener;
             item.text = name + pl("wyrównanie nut basu względem ") + noteName(plan.evener.referenceHz) + " ("
                         + hzText(plan.evener.referenceHz) + pl(", ") + juce::String(juce::roundToInt(plan.evener.amount * 100.0f))
-                        + pl("%): niższe nuty ucho słyszy ciszej, więc dostają więcej, wyższe mniej. Linia gra równo");
+                        + pl("%): ")
+                        + (channel.data.statsValid != 0 && channel.data.noteCount >= ma::kMinEvenNotes
+                               ? pl("nuty tej linii różnią się dla ucha o ") + juce::String(channel.data.noteSpreadDb, 1) + pl(" dB, bo ")
+                               : pl("nuty tej linii nie były jeszcze mierzone („Naucz poziom” przy grającej linii), a "))
+                        + pl("niższe nuty ucho słyszy ciszej. Po wyrównaniu każda waży tyle samo");
             chainItems.push_back(item);
         }
 
@@ -4550,12 +4660,19 @@ void BrainProcessor::proposeWholeMix()
             item.text = name + pl("clipper wyłączony: szczyty w normie (") + juce::String(plan.crestDb, 1) + pl(" dB nad głośną częścią)");
             chainItems.push_back(item);
         }
-        if (plan.evener.on < 0.5f && channel.data.evener.on > 0.5f && channel.data.role != static_cast<int>(ma::Role::bass))
+        const bool bassNotesKnown = channel.data.statsValid != 0 && channel.data.noteCount >= ma::kMinEvenNotes;
+        const bool evenerBrainMade = (channel.data.brainTools & ma::bus::toolEvener) != 0;
+        if (plan.evener.on < 0.5f && channel.data.evener.on > 0.5f
+            && (channel.data.role != static_cast<int>(ma::Role::bass) || (bassNotesKnown && evenerBrainMade)))
         {
             item.tool = Proposal::Item::ChainTool::evener;
             item.evener = channel.data.evener;
             item.evener.on = 0.0f;
-            item.text = name + pl("wyrównanie nut wyłączone: jest tylko dla basu");
+            item.text = name
+                        + (channel.data.role == static_cast<int>(ma::Role::bass)
+                               ? pl("wyrównanie nut wyłączone: linia jest już równa (nuty różnią się o ")
+                                     + juce::String(channel.data.noteSpreadDb, 1) + pl(" dB dla ucha)")
+                               : pl("wyrównanie nut wyłączone: jest tylko dla basu"));
             chainItems.push_back(item);
         }
 
@@ -5594,6 +5711,10 @@ void BrainProcessor::buildToolNotes(bool wholeMix)
                 set(ma::bus::toolEvener, D::notNeeded, pl("wyrównuję tylko linię basu (niskie nuty ucho słyszy ciszej)"));
             else if (p.evener.on > 0.5f)
                 set(ma::bus::toolEvener, D::kept, pl("linia wokół ") + noteName(p.evener.referenceHz) + pl(" wyrównana"));
+            else if (channel.data.statsValid != 0 && channel.data.noteCount >= ma::kMinEvenNotes)
+                set(ma::bus::toolEvener, D::notNeeded,
+                    pl("linia jest już równa: jej nuty różnią się dla ucha o ") + juce::String(channel.data.noteSpreadDb, 1)
+                        + pl(" dB, a wyrównuję od ") + juce::String(ma::kNoteSpreadWarnDb, 0) + " dB");
             else
                 set(ma::bus::toolEvener, D::notChecked, pl("nie znam zwykłej nuty basu: kliknij „Naucz poziom” w Agencie, gdy gra linia basu"));
 

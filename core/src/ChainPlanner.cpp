@@ -1,5 +1,7 @@
 #include "ma/ChainPlanner.h"
 
+#include "ma/LowEnd.h"
+
 #include "ma/Ducker.h"
 #include "ma/Masking.h"
 
@@ -528,9 +530,17 @@ std::vector<ChainPlan> planChains(const std::vector<ChainChannel>& input, const 
 
         if (c.role == Role::bass && c.lowNoteHz > 0.0)
         {
-            plan.evener.on = 1.0f;
-            plan.evener.amount = 0.6f;
-            plan.evener.referenceHz = static_cast<float>(c.lowNoteHz);
+            // Sized by how uneven the line really is for the ear (the Learn pass measures the spread
+            // between its notes); a line that is already even is left alone.
+            const double amount = !c.notesKnown ? 0.6
+                                 : c.noteSpreadDb < kNoteSpreadWarnDb ? 0.0
+                                                                      : std::min(0.9, 0.3 + 0.1 * c.noteSpreadDb);
+            if (amount > 0.0)
+            {
+                plan.evener.on = 1.0f;
+                plan.evener.amount = static_cast<float>(std::round(amount * 20.0) / 20.0);
+                plan.evener.referenceHz = static_cast<float>(c.lowNoteHz);
+            }
         }
     }
 
