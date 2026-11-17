@@ -166,6 +166,14 @@ BrainEditor::BrainEditor(BrainProcessor& p)
     autoRefineAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         processor.parameters, BrainProcessor::autoRefineId, autoRefineButton);
 
+    autoLayersButton.setButtonText(pl("Warstwy sam"));
+    autoLayersButton.setTooltip(pl("Gdy kilka partii tego samego rodzaju niesie ten sam rejestr (np. trzy leady), Mózg zostawia go "
+                                   "najważniejszej z nich, a pozostałym daje jedno szerokie cięcie. Wyłączone: propozycja i raport dalej "
+                                   "podają dokładne pasma (Hz, dB, Q), ale nic nie zmieniają, i ustawiasz je sam."));
+    autoLayersButton.setColour(juce::ToggleButton::textColourId, colours::quiet);
+    autoLayersAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        processor.parameters, BrainProcessor::autoLayersId, autoLayersButton);
+
     proposalViewport.setViewedComponent(&proposalView, false);
     proposalViewport.setScrollBarsShown(true, false);
 
@@ -269,7 +277,7 @@ BrainEditor::BrainEditor(BrainProcessor& p)
              &integratedValue, &shortTermLabel, &shortTermValue, &truePeakLabel, &truePeakValue, &plrLabel, &plrValue,
              &lowCorrelationLabel, &lowCorrelationValue, &fullCorrelationLabel, &fullCorrelationValue, &ceilingLabel,
              &ceilingSlider, &targetLabel, &targetSlider, &tabs, &scopeBox, &analyseButton, &applyButton, &undoButton,
-             &compareButton, &proposalStatus, &adaptiveButton, &autoRefineButton, &stepPath })
+             &compareButton, &proposalStatus, &adaptiveButton, &autoRefineButton, &autoLayersButton, &stepPath })
         addAndMakeVisible(c);
     const auto page = [this](Tab tab, const juce::String& name, const juce::String& tooltip,
                              std::initializer_list<juce::Component*> children, std::function<void(juce::Rectangle<int>)> layout) {
@@ -980,6 +988,7 @@ void BrainEditor::resized()
     auto actions = area.removeFromBottom(28);
     auto steps = area.removeFromBottom(20);
     autoRefineButton.setBounds(steps.removeFromRight(150));
+    autoLayersButton.setBounds(steps.removeFromRight(130));
     stepPath.setBounds(steps);
     scopeBox.setBounds(actions.removeFromLeft(130));
     actions.removeFromLeft(4);

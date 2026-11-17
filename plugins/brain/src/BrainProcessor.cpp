@@ -570,6 +570,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout BrainProcessor::createLayout
         juce::AudioParameterFloatAttributes().withLabel("LUFS")));
     // Phase 30: after "Zastosuj", measure again and finish what is left by itself.
     layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { autoRefineId, 4 }, "Auto refine", true));
+    // Phase 42: parts stacked in the same register. Off: the report and the proposal still say
+    // exactly what to set, and the user does it in their own EQ.
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { autoLayersId, 5 }, "Auto layers", true));
 
     return layout;
 }
@@ -2894,6 +2897,39 @@ void BrainProcessor::buildReport()
         }
     }
 
+    // Phase 42: parts stacked in the same register, from the last analysis.
+    if (!lastLayers.empty())
+    {
+        MixSnapshot::ReportItem item;
+        item.title = pl("Warstwy w tym samym paśmie");
+        juce::StringArray stacks;
+        for (const auto& group : lastLayers)
+        {
+            const auto name = [&](int channel) {
+                return channel >= 0 && channel < static_cast<int>(mix.channels.size()) ? quoted(mix.channels[static_cast<size_t>(channel)].name)
+                                                                                       : juce::String();
+            };
+            juce::StringArray cuts;
+            for (const auto& cut : group.cuts)
+                cuts.add(name(cut.channel) + " " + juce::String(cut.gainDb, 1) + pl(" dB przy ") + hzText(cut.hz) + " (Q "
+                         + juce::String(cut.q, 1) + ")");
+            juce::StringArray members;
+            for (const int member : group.members)
+                members.add(name(member));
+            stacks.add(hzText(group.lowHz) + pl("–") + hzText(group.highHz) + ": " + joinNames(members) + pl(" niosą to samo (każda ma co najmniej ")
+                       + juce::String(juce::roundToInt(group.overlap * 100.0)) + pl("% kształtu wspólnego z głównym). Rejestr zostaje przy ")
+                       + name(group.members.front()) + pl(", reszta robi miejsce: ") + cuts.joinIntoString("; "));
+        }
+        item.status = layersResolved ? Status::good : Status::warning;
+        item.detail = (layersResolved ? pl("Rejestr jest już podzielony. Tak to wyglądało przy ostatniej analizie, która jeszcze coś znalazła: ")
+                                      : juce::String())
+                      + stacks.joinIntoString(" ")
+                      + (layersResolved ? juce::String()
+                         : autoLayersOn() ? pl(" Te cięcia są w propozycji; jeśli wolisz zrobić to sam, wyłącz „Warstwy sam” i zostaną samą radą.")
+                                          : pl(" „Warstwy sam” jest wyłączone, więc to tylko rada: ustaw te pasma w swoim EQ."));
+        report.push_back(item);
+    }
+
     // Phase 38: nothing lost anywhere in the song. From the song's seconds, as the mix hears them now
     // (each second's raw + trim power plus the channel's present EQ and cleanup), worked out every 2 s.
     {
@@ -4087,6 +4123,100 @@ void BrainProcessor::proposeOnce(const std::array<double, ma::kStemGroups>* grou
             }
         currentProposal.items.push_back(item);
     }
+    // Phase 42: parts stacked in the same register (three leads, two pads). The most important one
+    // keeps the register and the others get one broad bell, with the numbers written out so the user
+    // can set them by hand instead. Measured before the Brain's EQ, so a second analysis proposes the
+    // same bell (kept as "already running") rather than another one on top.
+    {
+        std::vector<ma::LayerChannel> rows(mix.channels.size());
+        for (size_t c = 0; c < mix.channels.size(); ++c)
+        {
+            const auto& channel = mix.channels[c];
+            if (!channel.spectrumValid || !inMixSums(channel))
+                continue;
+            auto& row = rows[c];
+            row.valid = true;
+            row.bandsDb = channel.bandsDb;
+            row.role = static_cast<ma::Role>(juce::jlimit(0, ma::kRoles - 1, static_cast<int>(channel.data.role)));
+            row.priority = channel.data.priority;
+        }
+        const auto layers = ma::findLayers(rows);
+        // When the last analysis cleared the stack (the cuts and the level moves did their work),
+        // the report still shows what it was and says it is sorted, instead of the item vanishing.
+        layersResolved = !lastLayers.empty() && layers.empty();
+        if (!layers.empty())
+            lastLayers = layers;
+        const bool autoLayers = autoLayersOn();
+        for (const auto& group : layers)
+        {
+            const auto& leader = mix.channels[static_cast<size_t>(group.members.front())];
+            for (const auto& cut : group.cuts)
+            {
+                const auto& follower = mix.channels[static_cast<size_t>(cut.channel)];
+                ma::EqBand band;
+                band.hz = static_cast<float>(cut.hz);
+                band.q = static_cast<float>(cut.q);
+                band.gainDb = static_cast<float>(cut.gainDb);
+                auto proposedEq = std::find_if(currentProposal.eq.begin(), currentProposal.eq.end(),
+                                               [&](const auto& e) { return e.first == follower.owner; });
+                // Where the proposal already takes that register down, one correction is enough.
+                bool covered = false;
+                int slot = -1;
+                if (proposedEq != currentProposal.eq.end())
+                    for (int b = 0; b < ma::kEqBands; ++b)
+                    {
+                        const auto& have = proposedEq->second[static_cast<size_t>(b)];
+                        if (std::abs(have.gainDb) < 0.05f)
+                        {
+                            slot = slot < 0 ? b : slot;
+                            continue;
+                        }
+                        if (have.gainDb <= -1.0f && have.hz > 0.0f && std::abs(std::log2(have.hz / band.hz)) < 0.5)
+                            covered = true;
+                    }
+                if (covered)
+                    continue;
+
+                Proposal::Item item;
+                item.change.kind = ma::SolverChange::Kind::eqCut;
+                item.change.channel = cut.channel;
+                item.change.maskedChannel = group.members.front();
+                item.change.lowHz = group.lowHz;
+                item.change.highHz = group.highHz;
+                item.owner = follower.owner;
+                item.maskedOwner = leader.owner;
+                item.band = band;
+                juce::StringArray others;
+                for (const int member : group.members)
+                    if (member != cut.channel)
+                        others.add(quoted(mix.channels[static_cast<size_t>(member)].name));
+                item.text = quoted(follower.name) + ": " + juce::String(band.gainDb, 1) + pl(" dB przy ") + hzText(band.hz) + " (Q "
+                            + juce::String(band.q, 1) + pl("), bo ") + hzText(group.lowHz) + pl("–") + hzText(group.highHz)
+                            + pl(" niesie razem z nim ") + joinNames(others) + pl(", a ten rejestr ma należeć do ") + quoted(leader.name)
+                            + (cut.underLeaderDb < 0.0 ? pl(" (gra tam o ") + juce::String(-cut.underLeaderDb, 1) + pl(" dB głośniej od niego)")
+                                                       : pl(" (jest tam tylko ") + juce::String(cut.underLeaderDb, 1) + pl(" dB pod nim)"));
+                if (autoLayers && slot >= 0 && proposedEq != currentProposal.eq.end())
+                {
+                    item.change.eqSlot = slot;
+                    proposedEq->second[static_cast<size_t>(slot)] = band;
+                    if (eqHasBand(follower, band))
+                    {
+                        item.inPlace = true;
+                        item.text = pl("Już działa: ") + item.text;
+                    }
+                }
+                else
+                {
+                    item.advisory = true;
+                    item.selected = false;
+                    item.text += autoLayers ? pl(". Wszystkie pasma EQ tego kanału są zajęte, więc ustaw to w swoim EQ")
+                                            : pl(". Ustaw to w swoim EQ (albo włącz „Warstwy sam”)");
+                }
+                currentProposal.items.push_back(item);
+            }
+        }
+    }
+
     // Phase 17: what the sketch lacks, first, as advice: the plan above already counts with it.
     if (mix.sketch.active())
     {
@@ -7212,6 +7342,12 @@ int BrainProcessor::applySelected(bool refining)
 }
 
 // Phase 30: refining after the user's "Zastosuj".
+bool BrainProcessor::autoLayersOn() const
+{
+    const auto* value = parameters.getRawParameterValue(autoLayersId);
+    return value == nullptr || value->load() > 0.5f;
+}
+
 bool BrainProcessor::autoRefineOn() const
 {
     return autoRefine->load() > 0.5f;

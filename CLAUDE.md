@@ -372,6 +372,17 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   0.3 + 0.1 x spread, <= 0.9) and a Brain-made evener on an even bass goes off; the tool note says so. Report item
   "Dół miksu (sub, bas, pompa)" (mix group, advice per part). On the test songs: Galias sub +3.7 dB over the body against the
   masters and 150-400 Hz crowded by 2.9 dB, Chardonnay's sub 3.8 dB short.
+- Phase 42 layers in one register (`ma/Layers.h`): `findLayers` compares the channels' shape (power share per ERB band) over
+  `kLayerLowHz` 150 to `kLayerHighHz` 6000, pairs them where the shapes have `kLayerOverlap` 0.5 in common and `layerClass` matches
+  (percussion with percussion, tonal with tonal; `layerRole` leaves out kick, bass, bus and send), takes the connected set, picks the
+  leader (priority, then level) and keeps only the members overlapping the leader itself. The shared register is the run of bands
+  around the peak of the members' minimum share (>= 25% of it); each follower not already `kLayerAheadDb` 3 dB behind the leader there
+  gets one broad bell (centre = geometric mean, Q = centre / width in 0.5-2, <= `kMaxLayerCutDb` 6, >= 1 dB). Everything is measured
+  pre-EQ (`Channel::bandsDb`), so a second analysis re-derives the same bell and `eqHasBand` marks it `inPlace`. The Brain adds the
+  bells to `currentProposal.eq` on a free slot as ordinary `eqCut` items (skipped where the proposal already cuts within half an
+  octave), or, with the `autoLayers` parameter off ("Warstwy sam" beside "Dopracuj sam") or no free slot, as advisory items carrying
+  the numbers. Report item "Warstwy w tym samym paśmie" keeps the last stack found and turns green once an analysis finds none left
+  (`layersResolved`). mixcheck: Chardonnay 5.7 -> 5.4 against its master (collisions unchanged), Galias has no stack.
 - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 

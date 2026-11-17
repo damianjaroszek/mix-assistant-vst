@@ -32,6 +32,7 @@
 #include "ma/GainStaging.h"
 #include "ma/LevelStats.h"
 #include "ma/Masking.h"
+#include "ma/Layers.h"
 #include "ma/LowEnd.h"
 #include "ma/MasterCheck.h"
 #include "ma/MixBus.h"
@@ -4243,6 +4244,102 @@ void testTailMeter()
     check(std::abs(ma::tailBars(1.92, 125.0) - 1.0) < 1e-9 && ma::tailBars(1.0, 0.0) == 0.0, "a tail in bars at the tempo");
 }
 
+void testLayers()
+{
+    const int bands = ma::SpectrumAnalyzer::numBandsFor(ma::BandScale::erb);
+    // A part with its power around `centreHz`, one octave wide, at `levelDb`.
+    const auto part = [&](double centreHz, double levelDb) {
+        ma::SpectrumAnalyzer::Bands db {};
+        db.fill(-120.0);
+        for (int b = 0; b < bands; ++b)
+        {
+            const double hz = ma::SpectrumAnalyzer::bandCentreHz(ma::BandScale::erb, b);
+            const double octaves = std::abs(std::log2(hz / centreHz));
+            db[static_cast<size_t>(b)] = levelDb - 24.0 * octaves;
+        }
+        return db;
+    };
+    {
+        // Three leads on the same register: the most important one keeps it, the other two make room.
+        std::vector<ma::LayerChannel> mix(4);
+        for (auto& channel : mix)
+        {
+            channel.valid = true;
+            channel.role = ma::Role::lead;
+        }
+        mix[0].bandsDb = part(900.0, -14.0);
+        mix[0].priority = 2; // the one that matters
+        mix[1].bandsDb = part(950.0, -13.0);
+        mix[1].priority = 4;
+        mix[2].bandsDb = part(880.0, -15.0);
+        mix[2].priority = 4;
+        mix[3].bandsDb = part(5000.0, -14.0); // a different register: not a layer
+        mix[3].priority = 4;
+        mix[3].role = ma::Role::percussion;
+        const auto groups = ma::findLayers(mix);
+        check(groups.size() == 1, "one stack of layers found");
+        const auto& stack = groups.front();
+        std::printf("      layers: %d parts, %.0f-%.0f Hz, overlap %.2f, leader %d, %d cuts\n", static_cast<int>(stack.members.size()),
+                    stack.lowHz, stack.highHz, stack.overlap, stack.members.front(), static_cast<int>(stack.cuts.size()));
+        check(stack.members.size() == 3, "the three leads are in it and the percussion is not");
+        check(stack.members.front() == 0, "the most important lead leads the stack");
+        check(stack.cuts.size() == 2, "the other two get a cut each");
+        for (const auto& cut : stack.cuts)
+        {
+            check(cut.channel != 0, "the leader is never cut");
+            check(cut.gainDb <= -ma::kMinLayerCutDb && cut.gainDb >= -ma::kMaxLayerCutDb, "the cut is between the limits");
+            check(cut.hz > 500.0 && cut.hz < 1600.0, "the bell sits in the shared register");
+            check(cut.q >= 0.5 && cut.q <= 2.0, "and is broad");
+        }
+        // A follower already under the leader needs nothing.
+        mix[1].bandsDb = part(950.0, -22.0);
+        mix[2].bandsDb = part(880.0, -24.0);
+        const auto behind = ma::findLayers(mix);
+        check(behind.empty(), "parts already standing behind the leader are left alone");
+    }
+    {
+        // Parts in different registers are not layers, however loud they are.
+        std::vector<ma::LayerChannel> mix(3);
+        const double centres[3] = { 300.0, 1200.0, 4800.0 };
+        for (size_t c = 0; c < mix.size(); ++c)
+        {
+            mix[c].valid = true;
+            mix[c].role = ma::Role::pad;
+            mix[c].priority = 4;
+            mix[c].bandsDb = part(centres[c], -14.0);
+        }
+        check(ma::findLayers(mix).empty(), "three parts in three registers are not a stack");
+    }
+    {
+        // A hat and a synth share the register but not the job: they live together by rhythm.
+        std::vector<ma::LayerChannel> mix(2);
+        for (auto& channel : mix)
+        {
+            channel.valid = true;
+            channel.bandsDb = part(3500.0, -16.0);
+            channel.priority = 4;
+        }
+        mix[0].role = ma::Role::percussion;
+        mix[1].role = ma::Role::lead;
+        check(ma::findLayers(mix).empty(), "a hat is not a layer of a synth");
+        mix[1].role = ma::Role::clap;
+        check(!ma::findLayers(mix).empty(), "two drum tracks on one register are");
+    }
+    {
+        // The kick and the bass are the low end's business, not the layer rule's.
+        std::vector<ma::LayerChannel> mix(2);
+        for (auto& channel : mix)
+        {
+            channel.valid = true;
+            channel.bandsDb = part(700.0, -14.0);
+            channel.priority = 3;
+        }
+        mix[0].role = ma::Role::kick;
+        mix[1].role = ma::Role::bass;
+        check(ma::findLayers(mix).empty(), "the kick and the bass are never layers");
+    }
+}
+
 void testLowEnd()
 {
     const int bands = ma::SpectrumAnalyzer::numBandsFor(ma::kTonalScale);
@@ -4514,6 +4611,7 @@ int main()
     testLoudMasterClip();
     testReviewFixes();
     testTailMeter();
+    testLayers();
     testLowEnd();
     testMasterCheck();
     testSectionAutomation();

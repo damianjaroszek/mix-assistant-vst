@@ -13,6 +13,7 @@
 #include "ma/EnergyMap.h"
 #include "ma/GhostNoise.h"
 #include "ma/LoudnessMeter.h"
+#include "ma/Layers.h"
 #include "ma/LowEnd.h"
 #include "ma/MasterCheck.h"
 #include "ma/MasterPreview.h"
@@ -427,6 +428,7 @@ public:
     // left, analyses and applies once more by itself (at most kRefineRounds times); the user's
     // click, "Analizuj", "Cofnij" or "Przed / po" stop it. One undo takes everything back.
     static constexpr const char* autoRefineId = "autoRefine";
+    static constexpr const char* autoLayersId = "autoLayers";
     static constexpr int kRefineRounds = 2;
     // Kept under the pre-master ceiling when gain comes back (the rest of the song can peak higher
     // than its drop).
@@ -789,6 +791,9 @@ private:
     MixScore scoreNow() const;
     MixScore scoreBefore;
     ma::LowEndReport lastLowEnd; // phase 41: the low end judged as one thing, for the verdicts
+    std::vector<ma::LayerGroup> lastLayers; // phase 42: parts stacked in the same register
+    bool layersResolved = false;           // the newest analysis found none left
+    bool autoLayersOn() const;
     // What got worse and what got better since `scoreBefore` (names for the report).
     void scoreChange(const MixScore& now, juce::StringArray& worse, juce::StringArray& better) const;
     // Set when the refining rounds ended worse on every count that moved and the Brain undid them itself.
