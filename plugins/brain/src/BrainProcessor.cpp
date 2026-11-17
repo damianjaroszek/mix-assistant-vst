@@ -2228,7 +2228,7 @@ void BrainProcessor::buildReport()
             juce::StringArray better;
             scoreChange(now, worse, better);
             item.status = worse.isEmpty() ? Status::good : Status::warning;
-            item.detail = lines.joinIntoString(pl("; ")) + "."
+            item.detail = lines.joinIntoString(pl("; ")) + "." + (droppedFamilyText.isEmpty() ? juce::String() : " " + droppedFamilyText)
                           + (worse.isEmpty() ? pl(" Nic się nie pogorszyło.")
                                              : pl(" Pogorszyło się: ") + worse.joinIntoString(", ")
                                                    + pl(". Porównaj na słuch („Przed / po”); „Cofnij” przywraca poprzedni stan."));
@@ -7362,6 +7362,58 @@ std::array<std::int64_t, 5> BrainProcessor::itemSignature(const Proposal::Item& 
              static_cast<std::int64_t>(item.group), extra };
 }
 
+BrainProcessor::ChangeFamily BrainProcessor::itemFamily(const Proposal::Item& item)
+{
+    using Action = Proposal::Item::Action;
+    using Kind = ma::SolverChange::Kind;
+    if (item.advisory)
+        return ChangeFamily::none;
+    switch (item.action)
+    {
+        case Action::solver:
+            switch (item.change.kind)
+            {
+                case Kind::eqCut: return ChangeFamily::collisions;
+                case Kind::tonalCut:
+                case Kind::tonalBoost:
+                case Kind::stemCut:
+                case Kind::stemBoost: return ChangeFamily::tonal;
+                default: return ChangeFamily::none; // the ceiling cut stays whatever happens
+            }
+        case Action::level:
+        case Action::channelLevel:
+        case Action::balance: return ChangeFamily::levels;
+        case Action::chain: return ChangeFamily::chain;
+        default: return ChangeFamily::none;
+    }
+}
+
+juce::String BrainProcessor::familyName(ChangeFamily family)
+{
+    switch (family)
+    {
+        case ChangeFamily::tonal: return pl("korekcje barwy");
+        case ChangeFamily::collisions: return pl("cięcia pod kolizje");
+        case ChangeFamily::levels: return pl("zmiany poziomów");
+        case ChangeFamily::chain: return pl("ustawienia łańcucha (kompresor, clipper, przester)");
+        default: return {};
+    }
+}
+
+// What to suspect when the measurements read worse: each axis has the family that moves it.
+BrainProcessor::ChangeFamily BrainProcessor::blameFamily(const MixScore& now) const
+{
+    if (!scoreBefore.valid || !now.valid)
+        return ChangeFamily::none;
+    if (now.outsideDb > scoreBefore.outsideDb + 1.0 || now.offCentreDb > scoreBefore.offCentreDb + 1.0)
+        return ChangeFamily::tonal;
+    if (now.collisions > scoreBefore.collisions + 1)
+        return ChangeFamily::collisions;
+    if (now.plrDb > scoreBefore.plrDb + 1.0)
+        return ChangeFamily::chain;
+    return ChangeFamily::none;
+}
+
 void BrainProcessor::scoreChange(const MixScore& now, juce::StringArray& worse, juce::StringArray& better) const
 {
     const auto judge = [&](double before, double after, double step, const juce::String& name) {
@@ -7395,6 +7447,9 @@ int BrainProcessor::applyByUser()
 {
     stopRefining();
     autoUndone = {};
+    droppedFamilyText = {};
+    refine.droppedFamily = -1;
+    refine.triedDrop = false;
     scoreBefore = scoreNow();
     // What the user unticked stays unticked in the rounds that follow.
     std::vector<std::array<std::int64_t, 5>> unticked;
@@ -7471,6 +7526,12 @@ void BrainProcessor::updateRefine(std::uint64_t now)
     for (auto& item : currentProposal.items)
         if (!item.advisory && std::find(refine.unticked.begin(), refine.unticked.end(), itemSignature(item)) != refine.unticked.end())
             item.selected = false;
+    // Phase 43: a family the Brain dropped because the measurements got worse with it stays dropped,
+    // which also takes off what an earlier round applied (apply builds the EQ from the ticked items).
+    if (refine.droppedFamily >= 0)
+        for (auto& item : currentProposal.items)
+            if (static_cast<int>(itemFamily(item)) == refine.droppedFamily)
+                item.selected = false;
     const auto left = std::count_if(currentProposal.items.begin(), currentProposal.items.end(),
                                     [](const auto& i) { return !i.advisory && i.selected != i.inPlace; });
     // The same changes as the round before: applying them again would not move anything.
@@ -7489,6 +7550,25 @@ void BrainProcessor::updateRefine(std::uint64_t now)
         {
             juce::StringArray worse, better;
             scoreChange(after, worse, better);
+            if (!worse.isEmpty() && better.isEmpty() && !refine.triedDrop)
+            {
+                // Not everything hurt: drop the family that moves the measurement which got worse,
+                // keep the rest, and measure again. Only then, if it is still worse, undo it all.
+                const auto family = blameFamily(after);
+                const bool anyApplied = std::any_of(currentProposal.items.begin(), currentProposal.items.end(), [&](const auto& item) {
+                    return item.selected && itemFamily(item) == family;
+                });
+                if (family != ChangeFamily::none && anyApplied)
+                {
+                    refine.triedDrop = true;
+                    refine.droppedFamily = static_cast<int>(family);
+                    refine.roundsLeft = 1;
+                    refine.status = pl("Po zmianach pogorszyło się (") + worse.joinIntoString(", ") + pl("). Zdejmuję ")
+                                    + familyName(family) + pl(" i mierzę jeszcze raz, zamiast cofać wszystko. Puść drop.");
+                    droppedFamilyText = {};
+                    return;
+                }
+            }
             if (!worse.isEmpty() && better.isEmpty())
             {
                 const auto text = pl("Cofnąłem ostatnie „Zastosuj” sam: po zmianach pogorszyło się (") + worse.joinIntoString(", ")
@@ -7523,6 +7603,9 @@ void BrainProcessor::updateRefine(std::uint64_t now)
                             + juce::String(-cutDb, 1) + pl(" dB.");
             return;
         }
+        if (refine.droppedFamily >= 0)
+            droppedFamilyText = pl("Mózg zdjął sam ") + familyName(static_cast<ChangeFamily>(refine.droppedFamily))
+                                + pl(": z nimi pomiary wychodziły gorzej niż przed „Zastosuj”, reszta zmian została.");
         if (left == 0)
             refine.status = refine.round == 0 ? pl("Efekt zmierzony: nic więcej do zmiany.")
                                               : pl("Dopracowane (") + juce::String(refine.round)
@@ -7553,6 +7636,9 @@ int BrainProcessor::undoLast()
 {
     scoreBefore = {};
     autoUndone = {};
+    droppedFamilyText = {};
+    refine.droppedFamily = -1;
+    refine.triedDrop = false;
     stopRefining();
     if (comparing)
         setComparing(false);

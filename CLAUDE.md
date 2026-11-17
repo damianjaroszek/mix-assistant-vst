@@ -383,7 +383,13 @@ VST3 mix assistant for FL Studio (JUCE 8, C++17). Owner writes Polish; UI string
   octave), or, with the `autoLayers` parameter off ("Warstwy sam" beside "Dopracuj sam") or no free slot, as advisory items carrying
   the numbers. Report item "Warstwy w tym samym paśmie" keeps the last stack found and turns green once an analysis finds none left
   (`layersResolved`). mixcheck: Chardonnay 5.7 -> 5.4 against its master (collisions unchanged), Galias has no stack.
-- Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
+- Phase 43 one family dropped instead of everything: when the refine rounds end with the measurements worse on something and
+  better on nothing, `blameFamily` names the family that moves the axis that got worse (tonal corridor / centre -> the solver's
+  tonal and stem bells, collisions -> `eqCut`, PLR -> the chain) and `itemFamily` maps every item to one (the ceiling cut and
+  advisory items belong to none). The Brain then unticks that family (`Refine::droppedFamily`, re-applied each round the way
+  `Refine::unticked` is, so an earlier round's bands come off too), spends one more round and only undoes everything
+  (`undoLast`) if it is still worse (`Refine::triedDrop`). `droppedFamilyText` says so on the "Przed i po" report item.
+- - Tonal balance (`ma/TonalBalance.h`) is on ERB bands like everything else; the Brain's master
   analyser is ERB too. Targets are `.matarget` text files in the user's app data folder.
 
 ## Commands
